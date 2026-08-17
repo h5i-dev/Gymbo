@@ -22,6 +22,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jv-repo"
+version = "0.1.0-dev"
+dependencies = [
+ "jv-model",
+]
+
+[[package]]
 name = "jv-resolver"
 version = "0.1.0-dev"
 dependencies = [
