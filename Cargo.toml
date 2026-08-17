@@ -1,0 +1,105 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Koukyosyumei/jv"
+homepage = "https://github.com/Koukyosyumei/jv"
+authors = ["jv contributors"]
+
+[workspace.dependencies]
+# Internal crates
+jv-cache = { path = "crates/jv-cache", version = "0.1.0-dev" }
+jv-exec = { path = "crates/jv-exec", version = "0.1.0-dev" }
+jv-install = { path = "crates/jv-install", version = "0.1.0-dev" }
+jv-lock = { path = "crates/jv-lock", version = "0.1.0-dev" }
+jv-model = { path = "crates/jv-model", version = "0.1.0-dev" }
+jv-model-builder = { path = "crates/jv-model-builder", version = "0.1.0-dev" }
+jv-repo = { path = "crates/jv-repo", version = "0.1.0-dev" }
+jv-resolver = { path = "crates/jv-resolver", version = "0.1.0-dev" }
+jv-testkit = { path = "crates/jv-testkit", version = "0.1.0-dev" }
+jv-tree = { path = "crates/jv-tree", version = "0.1.0-dev" }
+jv-version = { path = "crates/jv-version", version = "0.1.0-dev" }
+
+# Errors
+anyhow = "1.0"
+thiserror = "2.0"
+
+# CLI / output
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+indicatif = "0.17"
+owo-colors = "4.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+toml_edit = "0.22"
+
+# XML (streaming: POMs are numerous and small)
+quick-xml = "0.37"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+    "http2",
+    "gzip",
+    "stream",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
+futures-util = "0.3"
+url = "2.5"
+
+# Hashing / integrity
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+hex = "0.4"
+
+# Filesystem
+dirs = "6.0"
+fs4 = { version = "0.13", features = ["sync"] }
+tempfile = "3"
+walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Parallelism (CPU-side work only; network concurrency is tokio's job)
+rayon = "1.10"
+
+# Misc
+bytes = "1"
+percent-encoding = "2.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+# jv's product claim is latency, so the release profile optimizes for speed, not
+# size (a deliberate deviation from wukong's size-tuned profile). `strip` keeps
+# the shipped binary small anyway.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Corpus-driven tests are I/O and comparison heavy; unoptimized runs are slow
+# enough to discourage running them, so give test builds real optimization.
+[profile.test]
+opt-level = 1
+
+[profile.bench]
+inherits = "release"
+debug = true
+strip = false

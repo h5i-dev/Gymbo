@@ -198,12 +198,28 @@ Collect this from day one (cheap) even if rendering ships in v0.2.
 `maven-resolver-util/.../version/GenericVersion.java` (via the thin
 `MavenVersionScheme` delegate); `ComparableVersion` survives only in the
 deprecated `compat/maven-artifact`. Port `GenericVersion` +
-`GenericVersionScheme/Range/Constraint` + `UnionVersionRange`, then validate
-against **both** corpora (they agree on everything that matters in practice):
+`GenericVersionScheme/Range/Constraint` + `UnionVersionRange`, and validate
+against both corpora:
 - `maven-resolver-util/src/test/java/.../version/` — 7 classes, ~1500 LOC
   (`GenericVersionTest.java` alone: 635 LOC).
 - `maven/compat/maven-artifact/src/test/java/.../versioning/ComparableVersionTest.java`
   — 488 LOC of ordered-array corpora.
+
+**The two implementations genuinely disagree**, so "pass both corpora" is not a
+reachable goal and must not be written as one. `ComparableVersion` treats `-` as
+a sub-list separator; `GenericVersion` treats `-`, `.` and `_` as equivalent
+delimiters. Hence `2.0-1 < 2.0.1` in the legacy implementation but `2.0-1 ==
+2.0.1` in the one Maven actually runs. The legacy corpus is still worth carrying
+for its breadth — the overwhelming majority of it agrees — but the conflicting
+directives are marked and excluded rather than reconciled.
+
+Because `GenericVersion` and `GenericQualifiers` depend on almost nothing (a
+one-method interface, `java.util`, `java.math`), the real implementation can be
+compiled straight out of the reference clone and used as a live **oracle**. jv
+does this: `crates/jv-version/tests/oracle.rs` drives both sides over generated
+inputs and compares tokenization, comparison sign, and qualifier detection. This
+is a far stronger claim than any transcription, and the same trick applies
+wherever an upstream component can be isolated cheaply.
 
 ### 3.6 Repositories, metadata, network (`jv-repo`, `jv-cache`)
 
@@ -360,6 +376,14 @@ attribution in `jv-testkit`.
 
 Correctness is the product. Four rings, inside-out:
 
+**Ring 0 — oracle tests against isolated upstream components.**
+Where an upstream class can be compiled without dragging in its whole module,
+compile it from `_reference/` and diff jv against it over generated inputs. This
+is strictly stronger than any transcription and catches what nobody thought to
+assert; `jv-version` establishes the pattern (§3.5). Candidates for the same
+treatment: `GenericVersionRange`/`VersionSchemeSupport`, `ConflictMarker`,
+`ConflictIdSorter`, and the `DependencyGraphParser` DSL.
+
 **Ring 1 — ported unit corpora (offline, in `cargo test`).**
 Build `jv-testkit` parsers first; they unlock everything else:
 - Port `maven-resolver-test-util/.../DependencyGraphParser.java` (the compact
@@ -411,17 +435,25 @@ performance regressions are caught like correctness regressions.
 
 Sequenced by dependency, not calendar. Each has a hard acceptance gate.
 
-### M0 — Scaffolding & test infrastructure
-Workspace layout (§3.2), CI matrix, cargo-dist + release profile,
-`jv-testkit` corpus parsers (graph DSL, `.ini` descriptors, coursier fixtures,
-mvn-output differ), clone `maven-dependency-tree` into `_reference/`.
-**Gate:** all four corpus parsers round-trip their upstream files; `cargo dist`
-produces runnable binaries for Linux (x86_64 + aarch64, musl static) and macOS
-(x86_64 + aarch64).
+### M0 — Scaffolding & test infrastructure ✅
+Workspace layout (§3.2), CI matrix (Linux + macOS, fmt/clippy/test/doc),
+release profile, `_reference/` discovery for spec sources, `maven-dependency-tree`
+cloned. Corpus and oracle harness conventions established and documented in
+`docs/development.md`.
+**Gate:** met for the version corpora; `jv-testkit`'s remaining parsers (graph
+DSL, `.ini` descriptors, coursier fixtures, mvn-output differ) land with the
+milestones that consume them, since a parser with no consumer cannot be shown to
+round-trip anything. `cargo-dist` configuration is deferred to M5, when there is
+a binary to ship — dist config for a workspace of libraries would be untestable
+ceremony.
 
-### M1 — `jv-version`
-GenericVersion + scheme/ranges/constraints/unions.
-**Gate:** 100% pass on both version corpora (resolver-util + ComparableVersion).
+### M1 — `jv-version` ✅
+GenericVersion + qualifiers + ranges/constraints/unions.
+**Gate:** met, and raised. 323 corpus directives pass (expanding to ~1500
+ordering assertions) with the 2 known legacy disagreements marked and excluded;
+115 range/constraint/qualifier directives pass; and 50,862 generated checks agree
+with the real `GenericVersion` compiled from the reference clone. The original
+gate ("100% on both corpora") was unreachable as written — see §3.5.
 
 ### M2 — `jv-model` + `jv-model-builder`
 Streaming POM parser; full effective-POM pipeline (§3.3); settings.xml and

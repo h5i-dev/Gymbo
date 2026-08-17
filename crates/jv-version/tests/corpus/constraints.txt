@@ -1,0 +1,145 @@
+# Corpus: version-CONSTRAINT specifications.
+#
+# Purpose: machine-readable transcription of every constraint-semantics assertion found
+# in the Java test suites, for use by a Rust port. A constraint spec is what
+# VersionScheme#parseVersionConstraint accepts: a plain version ("1.0"), a single range
+# ("[1.0,2.0)"), or a comma-joined union of ranges ("[1.0,2.0),[3.0,4.0)").
+#
+# Transcribed from Apache-2.0 licensed test sources of maven-resolver / maven-artifact:
+#   maven-resolver/maven-resolver-util/src/test/java/org/eclipse/aether/util/version/GenericVersionSchemeTest.java
+#   maven-resolver/maven-resolver-util/src/test/java/org/eclipse/aether/util/version/UnionVersionRangeTest.java
+#   maven/compat/maven-artifact/src/test/java/org/apache/maven/artifact/versioning/VersionRangeTest.java
+# Implementation reference (semantics of the API being described):
+#   maven-resolver/maven-resolver-util/src/main/java/org/eclipse/aether/util/version/VersionSchemeSupport.java
+#   maven-resolver/maven-resolver-util/src/main/java/org/eclipse/aether/util/version/UnionVersionRange.java
+#   maven-resolver/maven-resolver-util/src/main/java/org/eclipse/aether/util/version/GenericVersionConstraint.java
+#
+# Grammar (one directive per line; '#' starts a comment line; blank lines ignored):
+#   contains  <constraint-spec>  <version>
+#   excludes  <constraint-spec>  <version>
+#   invalid   <constraint-spec>
+#   kind      <constraint-spec>  version        (getVersion() != null, getRange() == null)
+#   kind      <constraint-spec>  range          (getRange()  != null, getVersion() == null)
+# plus, in the marked union-bound section only:
+#   lower     <constraint-spec>  <version> inclusive|exclusive
+#   lower     <constraint-spec>  none
+#   upper     <constraint-spec>  <version> inclusive|exclusive
+#   upper     <constraint-spec>  none
+# Fields are whitespace-separated, EXCEPT on lines that contain a TAB: if a line
+# contains at least one TAB character, TAB is the field separator for that line
+# (used where a verbatim spec copied from Java contains a space).
+
+# === maven-resolver: GenericVersionScheme#parseVersionConstraint semantics ===
+
+# source: GenericVersionSchemeTest#testEnumeratedVersions
+# (the "1.0" case also asserts c.getVersion().toString() equals "1.0")
+kind       1.0                 version
+contains   1.0                 1.0
+kind       [1.0]               range
+contains   [1.0]               1.0
+contains   [1.0],[2.0]         1.0
+contains   [1.0],[2.0]         2.0
+contains   [1.0],[2.0],[3.0]   1.0
+contains   [1.0],[2.0],[3.0]   2.0
+contains   [1.0],[2.0],[3.0]   3.0
+excludes   [1.0],[2.0],[3.0]   1.5
+contains   [1,3),(3,5)         1
+contains   [1,3),(3,5)         2
+contains   [1,3),(3,5)         4
+excludes   [1,3),(3,5)         3
+excludes   [1,3),(3,5)         5
+contains   [1,3),(3,)          1
+contains   [1,3),(3,)          2
+contains   [1,3),(3,)          4
+excludes   [1,3),(3,)          3
+
+# source: GenericVersionSchemeTest#testInvalid
+invalid   [1,
+invalid   [1,2],(3,
+invalid   [1,2],3
+
+# source: GenericVersionSchemeTest#testSameUpperAndLowerBound
+# (also asserts toString() == "[1.0,1.0]" and the toString() round-trip equality;
+#  see the UNEXPRESSIBLE section at the end)
+contains   [1.0]   1.0
+
+# === union range aggregate bounds (UnionVersionRangeTest) ===
+# These assert the lower/upper Bound of the union range itself, so `lower`/`upper`
+# directives are reused here; they apply to the constraint's aggregate range
+# (constraint.getRange().getLowerBound() / .getUpperBound()).
+# Each spec below is the comma-joined form of the ranges the test unions
+# programmatically; parseVersionConstraint on it builds exactly the same
+# UnionVersionRange (VersionSchemeSupport collects the parsed ranges and calls
+# UnionVersionRange.from(ranges)), so the two are semantically identical.
+
+# source: UnionVersionRangeTest#testGetLowerBound
+lower   [1,2],[3,4]   1 inclusive
+lower   [1,2],(,4]    none
+lower   [1,2],(1,4]   1 inclusive
+lower   [1,2],(0,4]   0 exclusive
+
+# source: UnionVersionRangeTest#testGetUpperBound
+upper   [1,2],[3,4]   4 inclusive
+upper   [1,2],[3,)    none
+upper   [1,2],[1,2)   2 inclusive
+upper   [1,2],[1,3)   3 exclusive
+
+# === maven-artifact: legacy createFromVersionSpec semantics ===
+# Constraint-level specs (plain versions and multi-range unions) from the older
+# maven-artifact implementation; its single-range specs are in ranges.txt.
+# Every directive in this section also holds under maven-resolver semantics; cases
+# where the two implementations DISAGREE are isolated in the final sections below.
+# "kind ... range" below transcribes assertNull(range.getRecommendedVersion()) and
+# "kind ... version" transcribes getRecommendedVersion().toString() == <spec>.
+
+# source: VersionRangeTest#testRange
+kind   (,1.0]         range
+kind   1.0            version
+kind   [1.0]          range
+kind   [1.2,1.3]      range
+kind   [1.0,2.0)      range
+kind   [1.5,)         range
+kind   (,1.0],[1.2,)  range
+
+# source: VersionRangeTest#testContains
+contains   2.0.5   2.0.5
+
+# source: VersionRangeTest#testSnapshotSoftVersionCanContainSnapshot
+contains   1.0-SNAPSHOT   1.0-SNAPSHOT
+
+# source: VersionRangeTest#testInvalidRanges
+invalid   [1.0,1.2),1.3
+
+# === maven-artifact-only: assertions that CONTRADICT maven-resolver semantics ===
+# Do NOT feed these to a maven-resolver-semantics implementation.
+
+# source: VersionRangeTest#testContains
+# In maven-artifact a plain ("soft") version spec is only a recommendation and its
+# restriction is unbounded, so ANY version satisfies it. maven-resolver models a plain
+# version constraint as exact equality, where "2.0.4" does not contain 2.0.5.
+contains   2.0.4   2.0.5
+
+# source: VersionRangeTest#testInvalidRanges
+# maven-artifact rejects overlapping and mis-ordered range unions; maven-resolver's
+# UnionVersionRange accepts any set of ranges.
+invalid   [1.0,1.2),(1.1,1.3]
+invalid   [1.1,1.3),(1.0,1.2]
+invalid   (1.1,1.2],[1.0,1.1)
+
+# === programmatic union cases (NOT string-parseable) ===
+#
+# source: UnionVersionRangeTest#testGetLowerBound
+#   UnionVersionRange.from(Collections.emptySet()).getLowerBound() is null
+#   (no lower bound). An empty union has no spec string: the empty string would be
+#   parsed by parseVersionConstraint as a plain version, not as an empty union.
+#
+# source: UnionVersionRangeTest#testGetUpperBound
+#   UnionVersionRange.from(Collections.emptySet()).getUpperBound() is null
+#   (no upper bound). Same reason.
+
+# === UNEXPRESSIBLE assertions (recorded as prose; no directive form) ===
+#
+# source: GenericVersionSchemeTest#testSameUpperAndLowerBound
+#   parseVersionConstraint("[1.0]").toString() equals "[1.0,1.0]" -- i.e. a single-version
+#   range normalizes to an explicit closed range when rendered. The test then asserts the
+#   round-trip parseVersionConstraint(c.toString()).equals(c).

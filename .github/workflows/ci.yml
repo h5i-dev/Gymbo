@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # v0.x ships Linux and macOS only; see ROADMAP.md non-goals.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The differential tests compile parts of Maven Resolver and run real
+      # Maven, so both a JDK and the upstream sources have to be present. A
+      # missing oracle silently skips those tests locally; JV_REQUIRE_ORACLE
+      # makes that a failure here, which is the whole point of running them.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Fetch spec sources
+        run: |
+          mkdir -p _reference
+          git clone --depth 1 https://github.com/apache/maven-resolver _reference/maven-resolver
+
+      - run: cargo test --workspace --all-features
+        env:
+          JV_REQUIRE_ORACLE: "1"
+
+  # Every crate documents the upstream behavior it mirrors, so broken links and
+  # stale references in those docs are worth failing on.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
