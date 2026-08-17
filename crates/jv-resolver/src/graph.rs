@@ -88,6 +88,20 @@ pub struct Node {
     /// Other coordinates that denote the same artifact, which conflict grouping
     /// treats as equivalent.
     pub aliases: Vec<Artifact>,
+    /// The version that beat this node, set only on a loser the graph kept for
+    /// verbose output.
+    ///
+    /// Upstream stores this as the `winner` node datum and decides between
+    /// "omitted for duplicate" and "omitted for conflict with X" by comparing it
+    /// against the loser's own version, which is why the winner's *version* is
+    /// recorded rather than a flag.
+    pub omitted_for: Option<String>,
+    /// The scope this node had before conflict resolution changed it, reported
+    /// as "scope updated from".
+    pub original_scope: Option<Scope>,
+    /// A scope conflict resolution declined to apply, reported as "scope not
+    /// updated to".
+    pub ignored_scope: Option<Scope>,
 }
 
 impl Node {
@@ -279,10 +293,7 @@ mod tests {
     }
 
     fn node(name: &str, version: &str) -> Node {
-        Node::dependency(
-            Dependency::new("g", name, version),
-            artifact(name, version),
-        )
+        Node::dependency(Dependency::new("g", name, version), artifact(name, version))
     }
 
     /// root -> a -> b, plus root -> c
@@ -368,7 +379,13 @@ mod tests {
         let names: Vec<String> = graph
             .preorder()
             .into_iter()
-            .filter_map(|(id, _)| graph.node(id).artifact.as_ref().map(|a| a.artifact_id.clone()))
+            .filter_map(|(id, _)| {
+                graph
+                    .node(id)
+                    .artifact
+                    .as_ref()
+                    .map(|a| a.artifact_id.clone())
+            })
             .collect();
         assert_eq!(names, vec!["c"]);
         // Compaction renumbers, so an id held across it silently means something
@@ -390,7 +407,13 @@ mod tests {
         let names: Vec<String> = graph
             .preorder()
             .into_iter()
-            .filter_map(|(id, _)| graph.node(id).artifact.as_ref().map(|a| a.artifact_id.clone()))
+            .filter_map(|(id, _)| {
+                graph
+                    .node(id)
+                    .artifact
+                    .as_ref()
+                    .map(|a| a.artifact_id.clone())
+            })
             .collect();
         assert_eq!(names, vec!["a", "b", "c"]);
     }

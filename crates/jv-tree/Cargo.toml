@@ -1,0 +1,16 @@
+[package]
+name = "jv-tree"
+description = "Renders dependency graphs the way mvn dependency:tree does"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+jv-model = { workspace = true }
+jv-resolver = { workspace = true }
+
+[lints]
+workspace = true
