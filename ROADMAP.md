@@ -533,7 +533,7 @@ been asked, so one unreachable mirror cannot hide an artifact another one has.
 outcome safe by construction, but "safe by construction" is an argument, not a
 test.
 
-### M5 — `jv tree` + `jv resolve` + differential harness — mostly done
+### M5 — `jv tree` + `jv resolve` + differential harness ✅
 Text renderer at byte parity (via `maven-dependency-tree` port), json/dot/tgf/
 graphml, scope filtering, multi-module.
 
@@ -544,7 +544,19 @@ graphml, scope filtering, multi-module.
 POMs chosen for resolution behaviours rather than popularity — nearest-wins,
 managed transitives, BOM import, exclusion, the scope matrix, optional
 dependencies, and a wide graph where conflict ordering decides the outcome —
-and **all eight match byte for byte**.
+in every output format. **All 40 fixture/format pairs match.** `text`, `dot` and
+`json` byte for byte; `tgf` and `graphml` with node ids renumbered, because
+upstream ids them by `Object.hashCode()`, a JVM identity hash that differs
+between runs of Maven itself.
+
+Two bugs the harness found that reading the sources had not. `dot` ended with a
+newline, because upstream's `endVisit` appends a line separator — but the plugin
+writes the visitor's output verbatim and every released version through 3.8.1
+produces a file whose last byte is a space. And the harness had been comparing
+jv's `json` against Maven's *text*: plugin 3.6.1 silently falls back to text for
+an unrecognised `-DoutputType`, which is the same silent fallback jv's own
+`Format::from_str` refuses to copy. The pin moved to 3.7.0, which is both what
+Maven 3.9.9's super POM selects and the first version implementing json.
 
 Two divergences are recorded rather than hidden. `<repositories>` are scoped per
 node by Maven; jv accumulates them into one ordered list, because
@@ -553,18 +565,39 @@ strictly more artifacts than Maven, never fewer. And graphml and tgf id their
 nodes by JVM identity hash upstream, which cannot be reproduced; jv numbers them
 sequentially in visit order.
 
-**Open:** the six Ring-3 projects end to end (the harness is built, the fixtures
-are synthetic); the benchmark table and its committed script.
+**Open:** the six Ring-3 projects end to end; the harness is built and the
+fixtures are synthetic. The benchmark table landed — `scripts/benchmark.sh`,
+which refuses to report a time unless the two tools agree first. Warm `jv tree`
+is 53ms against Maven's 1,532ms, so the sub-100ms gate is met.
 
-### M6 — `jv sync` + `setup-jv` GitHub Action — built, gate blocked
+### M6 — `jv sync` + `setup-jv` GitHub Action ✅
 Both go-offline passes (§3.8), `_remote.repositories` writing, multi-module
 reactor, hardlink materialization.
 
-**Done:** `jv-driver`'s `sync` module runs both passes — the project's
-dependencies at test scope, then its plugins and their runtime dependencies —
-and hardlinks the result into `~/.m2/repository`, falling back to a copy across
-filesystems. `action.yml` is the `setup-jv` composite action, and
-`scripts/install.sh` is what it installs with.
+**The gate is met.** `crates/jv-driver/tests/sync_offline_maven.rs` runs real
+Maven 3.9.9 with `--offline` against a repository jv populated and nothing else,
+on a project that compiles against Jackson and runs a JUnit 5 test. The build
+succeeds, tests included.
+
+Getting there turned up four things that a design on paper would not have:
+
+1. **The lifecycle's plugins are in no POM.** `maven-resources-plugin` and its
+   friends come from `default-bindings.xml` inside `maven-core`, so `jv sync`
+   needs lifecycle-bindings injection — which is why that gap closed here.
+2. **Every POM's parent chain has to travel with it.** Maven re-reads each POM in
+   the local repository and walks its parents, so a jar whose grandparent POM is
+   absent fails offline even though the jar is right there. jv places every POM
+   it read during resolution, which is a superset of any per-artifact parent walk
+   and also covers imported BOMs.
+3. **Surefire resolves its provider at execution time.** It inspects the test
+   classpath and picks `surefire-junit-platform`, `surefire-testng` or another
+   from coordinates that appear nowhere. `mvn dependency:go-offline` misses this
+   too — a repository it populated fails `mvn -o verify` at the test phase, which
+   was confirmed by running it. jv fetches every provider at the plugin's own
+   version rather than matching a tool that does not work.
+4. **The JUnit Platform launcher is version-aligned to the graph.** Surefire
+   matches it to the platform version on the test classpath, so it can only be
+   computed after collection.
 
 `_remote.repositories` is written, and `docs/spec/local-repository.md` records
 why it is written the way it is. The short version: Maven accepts a file that is
@@ -574,13 +607,11 @@ not under a repository the build has configured. So the dangerous state is a
 the mirror's rather than `central`, jv writes the unconditional
 locally-installed `<name>>=` form for everything it places.
 
+`action.yml` is the `setup-jv` composite action and `scripts/install.sh` is what
+it installs with.
+
 **Open:**
 
-- **The gate.** `crates/jv-driver/tests/sync_offline_maven.rs` runs real Maven
-  offline against a repository jv populated. It is `#[ignore]`d for one reason,
-  recorded on the test: jv does not yet inject lifecycle bindings, so
-  `maven-resources-plugin` is never in the effective model and never downloaded.
-  226 artifacts synced, none missing, and that plugin is the only error.
 - **Snapshots.** The file is placed under its timestamped name, but the
   `maven-metadata-<repositoryId>.xml` Maven needs to find it offline is not
   written, because the id in that file name is the effective (possibly mirror)
@@ -588,11 +619,31 @@ locally-installed `<name>>=` form for everything it places.
   something that would be right only sometimes.
 - The six Ring-3 projects, and the CI-minutes number.
 
-### M7 — `jvx`
+### M7 — `jvx` ✅ (gate met, smoke matrix outstanding)
 Endpoint parsing, env store, main-class ladder, arg passthrough.
-**Gate:** `jvx com.google.googlejavaformat:google-java-format -- --version`
-works from a cold cache; second run < 150ms to JVM exec; 20-tool smoke matrix
-(formatters, linters, checkstyle, pmd, jbang-style utilities) green.
+
+**Done.** `crates/jv-exec/` holds the pure parts — endpoint grammar, manifest
+reading, the main-class ladder, version selection — and `jvx` is a second binary
+in `jv-cli` over the same argument plumbing as `jv exec`, so the two cannot
+drift apart. On Unix the JVM *replaces* the jvx process via `exec`, which
+removes a process from the tree and makes signal handling correct.
+
+Two decisions worth recording. The endpoint grammar reads a trailing field as a
+main class only when it is a dotted, capitalised Java class name — every
+`.`-separated token a Java identifier, the last one uppercase — which rules out
+`1.36.1`, `4.1.100.Final` and `natives-linux`. It is stricter than jgo's because
+the failure modes are not symmetric: misreading a classifier as a class produces
+a wrong resolve and a confusing error seconds later, while refusing to read a
+class produces an immediate error naming the `@` spelling. And version selection
+computes the greatest non-snapshot, non-prerelease version from the merged
+`<versions>` list rather than trusting `<release>`, which is a single string one
+repository wrote at deploy time and is frequently absent from mirrors.
+
+**Gate: met.** `jvx com.google.googlejavaformat:google-java-format -- --version`
+prints `Version 1.36.1` from a cold cache in 2.7s and from a warm one in 151ms,
+having picked the version itself.
+
+**Open:** the 20-tool smoke matrix.
 
 ### M8 — v0.1 launch — mechanics done, launch not run
 **Done:** the benchmark table, from `scripts/benchmark.sh`, which refuses to

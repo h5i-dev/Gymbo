@@ -264,13 +264,22 @@ fn normalize_ids(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
 
     for line in text.lines() {
-        let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        if digits > 0 && line[digits..].starts_with(' ') {
-            out.push_str(&renumber(&mut ids, &line[..digits]));
-            out.push_str(&rewrite_attributes(&mut ids, &line[digits..]));
-        } else {
-            out.push_str(&rewrite_attributes(&mut ids, line));
+        // tgf writes `<id> <label>` for a node and `<source> <target> <label>`
+        // for an edge, so a line can begin with one id or two. Consuming them in
+        // a loop handles both without needing to know which section we are in. A
+        // label never starts with digits followed by a space — coordinates have
+        // no spaces at all — so this cannot eat one.
+        let mut rest = line;
+        loop {
+            let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if digits == 0 || !rest[digits..].starts_with(' ') {
+                break;
+            }
+            out.push_str(&renumber(&mut ids, &rest[..digits]));
+            out.push(' ');
+            rest = &rest[digits + 1..];
         }
+        out.push_str(&rewrite_attributes(&mut ids, rest));
         out.push('\n');
     }
     out
