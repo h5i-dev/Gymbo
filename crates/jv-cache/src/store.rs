@@ -139,7 +139,14 @@ impl Store {
             });
         }
 
-        let part = with_suffix(path, "part");
+        // Unique per writer. A shared `.part` name means two writers of one URL
+        // race: the first renames it away and the second's rename fails with
+        // ENOENT, which surfaces as a resolve aborting on a file that is in fact
+        // present. Reachable whenever the download lock could not be taken.
+        let part = with_suffix(
+            path,
+            &format!("part.{}.{}", std::process::id(), next_write()),
+        );
         {
             let mut file = fs::File::create(&part).map_err(|source| StoreError::Io {
                 path: part.clone(),
@@ -225,15 +232,17 @@ impl Store {
     /// runtime. `Ok(None)` means somebody else is downloading this URL right
     /// now; the caller decides whether to wait for the result to appear in the
     /// cache or to fetch it again.
-    pub fn try_lock(&self, url: &str) -> Result<Option<DownloadLock>, StoreError> {
+    pub fn try_lock(&self, url: &str) -> Result<Locking, StoreError> {
         let file = self.lock_file(url)?;
         match FileExt::try_lock_exclusive(&file.handle) {
-            Ok(true) => Ok(Some(DownloadLock { file: file.handle })),
-            // Contended, which is not an error. Nor is a failure: a filesystem
-            // with no locking or a permission problem is reported as "not
-            // locked" rather than fatal, because the atomic rename already makes
-            // the write safe without a lock.
-            Ok(false) | Err(_) => Ok(None),
+            Ok(true) => Ok(Locking::Held(DownloadLock { file: file.handle })),
+            Ok(false) => Ok(Locking::Contended),
+            // A filesystem that cannot lock at all — an NFS mount with no lockd,
+            // some container overlays — must be distinguished from a contended
+            // lock. Treating the two alike made every fetch wait out the full
+            // "somebody else is downloading" timeout before doing the work
+            // itself, turning a half-minute resolve into hours.
+            Err(_) => Ok(Locking::Unavailable),
         }
     }
 
@@ -257,6 +266,19 @@ impl Store {
             })?;
         Ok(LockFile { path, handle })
     }
+}
+
+/// What [`Store::try_lock`] found.
+#[derive(Debug)]
+pub enum Locking {
+    /// The lock is this caller's until the guard drops.
+    Held(DownloadLock),
+    /// Somebody else is downloading this URL. Waiting for their result is
+    /// worthwhile.
+    Contended,
+    /// This filesystem does not support locking. Waiting would be waiting for
+    /// nobody; the atomic rename makes the write safe without it.
+    Unavailable,
 }
 
 /// An opened lock file, before anything has been locked.
@@ -323,6 +345,13 @@ fn modified_time(path: &Path) -> Result<Option<SystemTime>, StoreError> {
             source,
         }),
     }
+}
+
+/// A counter that makes a temp file name unique within this process.
+fn next_write() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 fn timestamp() -> String {
@@ -441,12 +470,12 @@ mod tests {
     fn a_second_lock_on_one_url_is_reported_rather_than_waited_for() {
         let (_dir, store) = store();
         let held = store.try_lock(JAR).unwrap();
-        assert!(held.is_some());
+        assert!(matches!(held, Locking::Held(_)));
         // Blocking here instead would park a tokio worker, and a fetcher running
         // many downloads at once would deadlock against its own prefetches.
-        assert!(store.try_lock(JAR).unwrap().is_none());
+        assert!(matches!(store.try_lock(JAR).unwrap(), Locking::Contended));
         drop(held);
-        assert!(store.try_lock(JAR).unwrap().is_some());
+        assert!(matches!(store.try_lock(JAR).unwrap(), Locking::Held(_)));
     }
 
     #[test]
@@ -456,7 +485,30 @@ mod tests {
         let second = store
             .try_lock("https://repo1.maven.org/maven2/g/a/1.0/a-1.0.jar")
             .unwrap();
-        assert!(first.is_some() && second.is_some());
+        assert!(matches!(first, Locking::Held(_)));
+        assert!(matches!(second, Locking::Held(_)));
+    }
+
+    #[test]
+    fn two_writers_of_one_url_do_not_destroy_each_others_temp_file() {
+        // Without a per-writer temp name the first writer renames it away and the
+        // second's rename fails with ENOENT — a resolve aborting on a file that
+        // is in fact present. Reachable whenever the lock could not be taken.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = Store::new(dir.path());
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let store = store.clone();
+                    scope.spawn(move || store.write(JAR, b"bytes"))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for result in &results {
+            assert!(result.is_ok(), "{result:?}");
+        }
+        assert_eq!(store.read(JAR).unwrap().as_deref(), Some(&b"bytes"[..]));
     }
 
     #[test]

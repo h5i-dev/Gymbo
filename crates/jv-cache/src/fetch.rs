@@ -18,7 +18,7 @@ use jv_model::Artifact;
 use jv_repo::{ChecksumPolicy, Policy, Repository, artifact_path, checksum_path, join_url};
 
 use crate::checksum::{self, ChecksumError};
-use crate::store::{Store, StoreError};
+use crate::store::{Locking, Store, StoreError};
 use crate::transport::{Transport, TransportError};
 
 /// A file could not be obtained.
@@ -38,6 +38,8 @@ pub enum FetchError {
         #[source]
         source: ChecksumError,
     },
+    #[error("{url}: no checksum was published, and the checksum policy is `fail`")]
+    MissingChecksum { url: String },
 }
 
 /// Where a file came from, which the CLI reports and the tests assert on.
@@ -173,7 +175,7 @@ impl Fetcher {
         // 1. jv's cache, per repository, respecting the update policy.
         for repository in repositories {
             let url = join_url(&repository.url, path);
-            if let Some(bytes) = self.cached(&url, repository.policy_for(version))? {
+            if let Some(bytes) = self.cached(&url, repository.policy_for(version), is_mutable)? {
                 return Ok(Fetched {
                     bytes,
                     origin: Origin::Cache,
@@ -186,7 +188,13 @@ impl Fetcher {
 
         // 2. Maven's local repository. Its layout is the same, so the
         // repository-relative path is also the path inside it.
-        if let Some(local) = &self.local_repository {
+        //
+        // Only when some repository would have served the file. With every
+        // repository blocked by a mirror, or a snapshot against a release-only
+        // repository, `~/.m2` would otherwise quietly satisfy a request that is
+        // supposed to fail — reporting success for an artifact the configuration
+        // says jv may not have.
+        if let (Some(local), false) = (&self.local_repository, repositories.is_empty()) {
             let candidate = local.join(path);
             if let Ok(bytes) = std::fs::read(&candidate) {
                 return Ok(Fetched {
@@ -221,10 +229,12 @@ impl Fetcher {
             // blocking here would let the prefetcher deadlock against itself.
             // When somebody else holds it, `await_download` waits for their
             // result to appear instead of waiting on the lock.
-            let lock = self.store.try_lock(&url)?;
-            if lock.is_none() {
+            // Held for the duration of the download; named `_lock` because
+            // nothing reads it, only its lifetime matters.
+            let _lock = self.store.try_lock(&url)?;
+            if matches!(_lock, Locking::Contended) {
                 if let Some(bytes) = self
-                    .await_download(&url, repository.policy_for(version))
+                    .await_download(&url, repository.policy_for(version), is_mutable)
                     .await?
                 {
                     return Ok(Fetched {
@@ -239,7 +249,7 @@ impl Fetcher {
                 // reporting an absence that is not real.
             }
             // It may have arrived while this task was yielding.
-            if let Some(bytes) = self.cached(&url, repository.policy_for(version))? {
+            if let Some(bytes) = self.cached(&url, repository.policy_for(version), is_mutable)? {
                 return Ok(Fetched {
                     bytes,
                     origin: Origin::Cache,
@@ -302,37 +312,54 @@ impl Fetcher {
         &self,
         url: &str,
         policy: &Policy,
+        is_mutable: bool,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         const INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
         const ATTEMPTS: usize = 40 * 60; // one minute
 
         for _ in 0..ATTEMPTS {
             tokio::time::sleep(INTERVAL).await;
-            if let Some(bytes) = self.cached(url, policy)? {
+            if let Some(bytes) = self.cached(url, policy, is_mutable)? {
                 return Ok(Some(bytes));
             }
             // The holder finished without producing anything — a 404, or a
-            // failure. Stop waiting and let the caller try.
-            if self.store.try_lock(url)?.is_some() {
+            // failure. Stop waiting and let the caller try. `Unavailable` ends
+            // the wait too: on a filesystem that cannot lock there is nobody to
+            // wait for.
+            if !matches!(self.store.try_lock(url)?, Locking::Contended) {
                 return Ok(None);
             }
         }
         Ok(None)
     }
 
-    /// The cached bytes, if present and not stale.
-    fn cached(&self, url: &str, policy: &Policy) -> Result<Option<Vec<u8>>, StoreError> {
+    /// The cached bytes, if present and usable.
+    ///
+    /// `is_mutable` decides whether the update policy applies at all. An
+    /// immutable release is never stale — that is what makes a warm resolve free
+    /// — while metadata and snapshots carry a freshness window.
+    fn cached(
+        &self,
+        url: &str,
+        policy: &Policy,
+        is_mutable: bool,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         let Some(bytes) = self.store.read(url)? else {
             return Ok(None);
         };
-        // An immutable artifact is never stale; only the update policy can make
-        // a cached entry unusable, and it applies to mutable files.
-        if let Some(checked) = self.store.checked_at(url)? {
-            if policy.update.is_stale(checked, SystemTime::now()) && !self.offline {
-                return Ok(None);
-            }
+        if !is_mutable || self.offline {
+            return Ok(Some(bytes));
         }
-        Ok(Some(bytes))
+        match self.store.checked_at(url)? {
+            Some(checked) if !policy.update.is_stale(checked, SystemTime::now()) => Ok(Some(bytes)),
+            Some(_) => Ok(None),
+            // A mutable entry with no stamp is stale, not fresh. The stamp is a
+            // separate file, so a process killed between writing the content and
+            // writing the stamp leaves one without the other — and reading that
+            // as "fresh" pinned a snapshot to a stale build permanently, with no
+            // timestamp for `-U` to compare against and dislodge.
+            None => Ok(None),
+        }
     }
 
     /// Whether a recorded absence is recent enough to trust.
@@ -399,7 +426,31 @@ impl Fetcher {
                 }
             }
         }
-        Ok(Vec::new())
+
+        // No checksum could be obtained from any algorithm. Under `fail` that is
+        // a failure, not a pass: an attacker in the path who rewrites the
+        // artifact and 404s the checksums would otherwise be accepted by the
+        // *strictest* setting, which is a verification bypass rather than a
+        // lenience. Upstream's `AbstractChecksumPolicy.onNoMoreChecksums` throws
+        // for the same reason.
+        if policy.is_fatal() {
+            return Err(FetchError::MissingChecksum {
+                url: url.to_owned(),
+            });
+        }
+        // Under `warn` — Maven's default, and jv's — a repository that publishes
+        // no checksums is accepted. Many internal repositories do not, and
+        // refusing them would make jv unusable where Maven works.
+        //
+        // The message names the *repository*, not the artifact: a repository
+        // without checksums has none for anything, and one line per artifact
+        // would bury every other warning under a hundred copies of the same
+        // sentence. Callers deduplicate identical messages, so this collapses to
+        // one.
+        Ok(vec![format!(
+            "{} publishes no checksums, so nothing downloaded from it can be verified",
+            repository.url
+        )])
     }
 }
 
@@ -592,7 +643,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_repository_publishing_no_checksum_is_accepted() {
+    async fn a_repository_publishing_no_checksum_is_accepted_but_reported() {
+        let mut transport = MapTransport::new();
+        transport.insert(url_for(CENTRAL, &artifact()), b"jar".to_vec());
+        let (_dir, fetcher) = fetcher(transport);
+        // Under the default `warn`: many internal repositories publish no
+        // checksums and refusing them would make jv unusable where Maven works.
+        let fetched = fetcher
+            .artifact(&[repository()], &artifact())
+            .await
+            .unwrap();
+        assert_eq!(fetched.warnings.len(), 1);
+        assert!(fetched.warnings[0].contains("no checksums"));
+        // Named by repository, not by artifact: one line, not one per jar.
+        assert!(fetched.warnings[0].contains(CENTRAL));
+    }
+
+    #[tokio::test]
+    async fn no_checksum_at_all_is_a_failure_under_a_strict_policy() {
         let mut transport = MapTransport::new();
         transport.insert(url_for(CENTRAL, &artifact()), b"jar".to_vec());
         let (_dir, fetcher) = fetcher(transport);
@@ -603,7 +671,11 @@ mod tests {
             },
             ..repository()
         };
-        assert!(fetcher.artifact(&[strict], &artifact()).await.is_ok());
+        // Accepting here would let anyone in the path rewrite the artifact and
+        // 404 the checksums, and be accepted by the *strictest* setting. That is
+        // a verification bypass, not a lenience.
+        let error = fetcher.artifact(&[strict], &artifact()).await.unwrap_err();
+        assert!(matches!(error, FetchError::MissingChecksum { .. }));
     }
 
     #[tokio::test]
@@ -694,6 +766,62 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, FetchError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_mutable_entry_with_no_freshness_stamp_is_stale() {
+        // The stamp is a separate file, so a process killed between writing the
+        // content and writing the stamp leaves one without the other. Reading
+        // that as "fresh" pinned a snapshot to a stale build permanently, with no
+        // timestamp for `-U` to compare against.
+        let snapshot = Artifact::new("g", "a", "1.0-SNAPSHOT");
+        let url = url_for(CENTRAL, &snapshot);
+        let mut transport = MapTransport::new();
+        transport.insert(url.clone(), b"fresh".to_vec());
+        let (_dir, fetcher) = fetcher(transport);
+
+        // Content in the cache, no stamp beside it.
+        fetcher.store().write(&url, b"stale").unwrap();
+        let fetched = fetcher.artifact(&[repository()], &snapshot).await.unwrap();
+        assert_eq!(fetched.origin, Origin::Repository);
+        assert_eq!(fetched.bytes, b"fresh");
+    }
+
+    #[tokio::test]
+    async fn a_release_with_no_stamp_is_still_served_from_the_cache() {
+        // An immutable release has nothing to re-check, and treating a missing
+        // stamp as stale there would make every warm resolve re-download
+        // everything.
+        let url = url_for(CENTRAL, &artifact());
+        let (_dir, fetcher) = fetcher(MapTransport::new());
+        fetcher.store().write(&url, b"jar").unwrap();
+        let fetched = fetcher
+            .artifact(&[repository()], &artifact())
+            .await
+            .unwrap();
+        assert_eq!(fetched.origin, Origin::Cache);
+    }
+
+    #[tokio::test]
+    async fn the_local_repository_does_not_rescue_a_blocked_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let m2 = dir.path().join("m2");
+        let path = m2.join(artifact_path(&artifact()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"from m2").unwrap();
+
+        let cache = tempfile::tempdir().unwrap();
+        let fetcher = Fetcher::new(Store::new(cache.path()), Box::new(MapTransport::new()))
+            .with_local_repository(&m2);
+
+        // A mirror declared every repository unreachable, so nothing may serve
+        // this. Answering out of `~/.m2` would report success for an artifact the
+        // configuration says jv may not have.
+        let blocked = Repository {
+            blocked: true,
+            ..repository()
+        };
+        assert!(fetcher.artifact(&[blocked], &artifact()).await.is_err());
     }
 
     #[tokio::test]

@@ -40,7 +40,7 @@ pub mod transport;
 
 pub use checksum::{ChecksumError, PREFERRED, digest, parse_published, verify};
 pub use fetch::{FetchError, Fetched, Fetcher, Origin};
-pub use store::{DownloadLock, FORMAT_VERSION, Store, StoreError};
+pub use store::{DownloadLock, FORMAT_VERSION, Locking, Store, StoreError};
 pub use transport::{HttpTransport, MapTransport, OfflineTransport, Transport, TransportError};
 
 /// Maven's local repository: `<localRepository>` from `settings.xml` if it
