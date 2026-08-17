@@ -24,7 +24,7 @@
 //! that directory belongs to Maven, and a file already there is Maven's answer,
 //! not jv's to correct.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use jv_model::{Artifact, Dependency, Plugin, Scope};
@@ -34,6 +34,7 @@ use jv_resolver::{CollectRequest, Verbosity};
 use crate::error::DriverError;
 use crate::project::Project;
 use crate::session::Session;
+use crate::tracking::Tracking;
 
 /// What to sync.
 #[derive(Clone, Debug)]
@@ -153,6 +154,11 @@ pub fn sync(
         }
     }
 
+    // Tracking files are per directory, and a directory holds every file of one
+    // GAV, so they are collected as the artifacts are placed and written once at
+    // the end. Writing per file would rewrite the same file three times.
+    let mut tracking: BTreeMap<PathBuf, Tracking> = BTreeMap::new();
+
     for artifact in wanted {
         // The POM travels with the jar: Maven reads it on every resolve, and a
         // local repository holding jars without POMs is one `mvn -o` rejects.
@@ -163,9 +169,12 @@ pub fn sync(
         };
         for candidate in [pom, artifact] {
             match session.source().materialize(&candidate)? {
-                Some((_origin, path)) => {
+                Some(found) => {
                     if let Some(local) = &request.local_repository {
-                        if let Some(linked) = materialize(&path, local, &candidate, &mut report)? {
+                        if let Some(linked) =
+                            materialize(&found.path, local, &candidate, &mut report)?
+                        {
+                            record_tracking(&mut tracking, &linked, found.repository.as_deref())?;
                             report.materialized.push(linked);
                         }
                     }
@@ -182,8 +191,38 @@ pub fn sync(
         }
     }
 
+    for (directory, entries) in &tracking {
+        if let Err(error) = entries.write(directory) {
+            // Maven resolves an untracked file anyway, so failing to write the
+            // tracking file costs fidelity, not correctness.
+            report
+                .warnings
+                .push(format!("cannot write the tracking file: {error}"));
+        }
+    }
+
     report.warnings.extend(session.warnings());
     Ok(report)
+}
+
+/// Records a placed file in its directory's tracking file, reading what Maven
+/// already wrote there the first time the directory is touched.
+fn record_tracking(
+    tracking: &mut BTreeMap<PathBuf, Tracking>,
+    placed: &Path,
+    repository: Option<&str>,
+) -> Result<(), DriverError> {
+    let (Some(directory), Some(file_name)) = (placed.parent(), placed.file_name()) else {
+        return Ok(());
+    };
+    let entries = match tracking.get_mut(directory) {
+        Some(entries) => entries,
+        None => tracking
+            .entry(directory.to_path_buf())
+            .or_insert(Tracking::read(directory)?),
+    };
+    entries.record(&file_name.to_string_lossy(), repository);
+    Ok(())
 }
 
 /// Adds an artifact once, skipping anything the reactor produces.
@@ -209,7 +248,10 @@ fn project_plugins(project: &Project) -> Vec<Plugin> {
             plugin.artifact_id.clone(),
         );
         let already = plugins.iter().any(|held: &Plugin| {
-            (held.group_id_or_default().to_owned(), held.artifact_id.clone()) == key
+            (
+                held.group_id_or_default().to_owned(),
+                held.artifact_id.clone(),
+            ) == key
         });
         if !already {
             plugins.push(plugin.clone());
@@ -315,10 +357,9 @@ fn materialize(
             Ok(_) => Ok(Some(destination)),
             Err(source) => {
                 // One unwritable file should not abort a sync of a thousand.
-                report.warnings.push(format!(
-                    "cannot place {}: {source}",
-                    destination.display()
-                ));
+                report
+                    .warnings
+                    .push(format!("cannot place {}: {source}", destination.display()));
                 Ok(None)
             }
         },
@@ -393,8 +434,16 @@ mod tests {
     fn the_reactors_own_artifacts_are_not_queued() {
         let reactor: BTreeSet<String> = ["com.example:lib".to_owned()].into_iter().collect();
         let mut wanted = Vec::new();
-        push(&mut wanted, &reactor, Artifact::new("com.example", "lib", "1.0"));
-        push(&mut wanted, &reactor, Artifact::new("org.slf4j", "slf4j-api", "2.0.9"));
+        push(
+            &mut wanted,
+            &reactor,
+            Artifact::new("com.example", "lib", "1.0"),
+        );
+        push(
+            &mut wanted,
+            &reactor,
+            Artifact::new("org.slf4j", "slf4j-api", "2.0.9"),
+        );
         // Nothing has published the reactor's own module; asking for it produces
         // a 404 that means nothing.
         assert_eq!(wanted.len(), 1);

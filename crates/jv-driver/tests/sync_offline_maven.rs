@@ -140,7 +140,9 @@ fn a_synced_repository_builds_offline() {
         ..Config::new().without_local_repository()
     };
     let session = Session::new(&config).expect("a session");
-    let project = session.project_at(&project_dir.join("pom.xml")).expect("the project");
+    let project = session
+        .project_at(&project_dir.join("pom.xml"))
+        .expect("the project");
 
     let report = sync(
         &session,

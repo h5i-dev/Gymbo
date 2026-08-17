@@ -1,0 +1,98 @@
+# Builds jv for every supported platform and attaches the archives to a release.
+#
+# Triggered by a `v*` tag. The job matrix is the definition of "supported":
+# Linux and macOS, x86_64 and aarch64. Windows is deliberately absent — see
+# ROADMAP.md.
+#
+# Every archive carries a checksum, and the checksums are published as one
+# `SHA256SUMS` file, because `scripts/install.sh` verifies what it downloads and
+# cannot do that without a source of truth it can fetch separately.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Buildable on demand so the matrix can be exercised without cutting a
+  # release, which is the only way to find out a target broke before it matters.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p jv-cli
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="jv-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/jv" "dist/$name/"
+          # jvx ships alongside jv when it exists; the build does not fail
+          # without it, so a release is not blocked on a binary that is still
+          # landing.
+          if [[ -f "target/${{ matrix.target }}/release/jvx" ]]; then
+            cp "target/${{ matrix.target }}/release/jvx" "dist/$name/"
+          fi
+          cp README.md LICENSE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jv-${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # A manual run builds the matrix to prove it still works; only a tag
+    # publishes anything.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true

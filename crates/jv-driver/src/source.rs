@@ -605,12 +605,8 @@ impl RepositorySource {
         Ok(artifact_path(&resolved))
     }
 
-    /// Downloads an artifact's own file, returning where it came from and where
-    /// it now is on disk.
-    pub fn materialize(
-        &self,
-        artifact: &Artifact,
-    ) -> Result<Option<(Origin, std::path::PathBuf)>, DriverError> {
+    /// Downloads an artifact's own file.
+    pub fn materialize(&self, artifact: &Artifact) -> Result<Option<Materialized>, DriverError> {
         let resolved = Artifact {
             version: self.resolved_version(artifact)?,
             ..artifact.clone()
@@ -624,12 +620,28 @@ impl RepositorySource {
                 for warning in &fetched.warnings {
                     self.warn(warning.clone());
                 }
-                Ok(Some((fetched.origin, fetched.path)))
+                Ok(Some(Materialized {
+                    origin: fetched.origin,
+                    path: fetched.path,
+                    repository: fetched.repository,
+                }))
             }
             Err(jv_cache::FetchError::NotFound { .. }) => Ok(None),
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// A file that is now on disk.
+#[derive(Clone, Debug)]
+pub struct Materialized {
+    pub origin: Origin,
+    /// Where the bytes are: in jv's cache, or in `~/.m2` when that is where they
+    /// were found.
+    pub path: std::path::PathBuf,
+    /// The repository that served it, when one did. `jv sync` records this in
+    /// `_remote.repositories`, which is why it has to survive this far.
+    pub repository: Option<String>,
 }
 
 /// The coordinates a relocation points at, with absent fields keeping the
