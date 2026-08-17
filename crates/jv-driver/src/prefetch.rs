@@ -349,20 +349,24 @@ mod tests {
     fn a_model_with_nothing_to_follow_yields_nothing() {
         assert!(follow(&Model::default()).is_empty());
         // And a parent missing a field is not half-followed.
-        let mut model = Model::default();
-        model.parent = Some(Parent {
-            group_id: Some("g".to_owned()),
-            ..Parent::default()
-        });
-        assert!(follow(&model).is_empty());
+        let half_a_parent = Model {
+            parent: Some(Parent {
+                group_id: Some("g".to_owned()),
+                ..Parent::default()
+            }),
+            ..Model::default()
+        };
+        assert!(follow(&half_a_parent).is_empty());
         // Nor is a dependency that states no version.
-        let mut model = Model::default();
-        model.dependencies = vec![Dependency {
-            group_id: "g".to_owned(),
-            artifact_id: "a".to_owned(),
-            ..Dependency::default()
-        }];
-        assert!(follow(&model).is_empty());
+        let unversioned = Model {
+            dependencies: vec![Dependency {
+                group_id: "g".to_owned(),
+                artifact_id: "a".to_owned(),
+                ..Dependency::default()
+            }],
+            ..Model::default()
+        };
+        assert!(follow(&unversioned).is_empty());
     }
 
     /// A runtime handle for tests that never actually spawn.
