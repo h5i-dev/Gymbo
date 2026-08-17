@@ -1,0 +1,20 @@
+[package]
+name = "jv-model"
+description = "Maven POM, settings, and repository metadata model and parsers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+jv-version = { workspace = true }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+walkdir = { workspace = true }
+
+[lints]
+workspace = true
