@@ -385,7 +385,10 @@ impl RepositorySource {
             })?;
 
         for problem in built.errors() {
-            self.warn(problem.to_string());
+            // The message alone: `Problem`'s own `Display` prefixes a severity,
+            // and the CLI adds one too, so using it here reads as "warning:
+            // error: ...".
+            self.warn(format!("{} ({})", problem.message, problem.source));
         }
         self.register_repositories(&built.model);
         Ok(Some(built.model))
@@ -602,8 +605,12 @@ impl RepositorySource {
         Ok(artifact_path(&resolved))
     }
 
-    /// Downloads an artifact's own file, returning where it came from.
-    pub fn materialize(&self, artifact: &Artifact) -> Result<Option<Origin>, DriverError> {
+    /// Downloads an artifact's own file, returning where it came from and where
+    /// it now is on disk.
+    pub fn materialize(
+        &self,
+        artifact: &Artifact,
+    ) -> Result<Option<(Origin, std::path::PathBuf)>, DriverError> {
         let resolved = Artifact {
             version: self.resolved_version(artifact)?,
             ..artifact.clone()
@@ -617,7 +624,7 @@ impl RepositorySource {
                 for warning in &fetched.warnings {
                     self.warn(warning.clone());
                 }
-                Ok(Some(fetched.origin))
+                Ok(Some((fetched.origin, fetched.path)))
             }
             Err(jv_cache::FetchError::NotFound { .. }) => Ok(None),
             Err(error) => Err(error.into()),

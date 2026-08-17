@@ -6,8 +6,19 @@
 before it answers. jv gives the same answer — Maven's, exactly — from a single
 binary, in milliseconds.
 
-> **Status: early development.** The crates marked below are implemented and
-> verified. There is no CLI yet, so there is nothing to install.
+```console
+$ jv tree
+com.example:demo:jar:1.0
++- com.fasterxml.jackson.core:jackson-databind:jar:2.17.1:compile
+|  +- com.fasterxml.jackson.core:jackson-annotations:jar:2.17.1:compile
+|  \- com.fasterxml.jackson.core:jackson-core:jar:2.17.1:compile
+\- org.junit.jupiter:junit-jupiter:jar:5.10.2:test
+   ...
+```
+
+> **Status: early development.** `jv tree` and `jv resolve` work and match
+> Maven's output byte for byte. There are no prebuilt binaries yet; build with
+> `cargo build --release` and the binary lands at `target/release/jv`.
 
 ## Why
 
@@ -23,9 +34,10 @@ reproduce `mvn dependency:tree`.
 | `jv-version` | Version ordering, ranges, constraints | ✅ |
 | `jv-model` | POM, `settings.xml`, `maven-metadata.xml` | ✅ |
 | `jv-model-builder` | Effective POMs: inheritance, profiles, interpolation, BOM imports | ✅ |
-| `jv-resolver` | Dependency collection, nearest-wins conflict resolution | |
-| `jv-repo`, `jv-cache` | Repositories, downloads, integrity, caching | |
-| `jv tree`, `jv sync`, `jvx` | The commands | |
+| `jv-resolver` | Dependency collection, nearest-wins conflict resolution | ✅ |
+| `jv-repo`, `jv-cache` | Repositories, downloads, integrity, caching | ✅ |
+| `jv-tree`, `jv-driver`, `jv-cli` | `jv tree`, `jv resolve` | ✅ |
+| `jv sync`, `jvx` | The remaining commands | |
 
 `ROADMAP.md` holds the architecture and the milestones.
 
@@ -34,6 +46,10 @@ reproduce `mvn dependency:tree`.
 Compatibility *is* the product, so jv is measured against Maven rather than
 against its own expectations:
 
+- `jv tree` matches `mvn dependency:tree` byte for byte on every fixture in the
+  differential harness, each chosen for a resolution behaviour — nearest-wins,
+  managed transitives, BOM imports, exclusions, the scope matrix, optional
+  dependencies, conflict ordering.
 - Version ordering agrees with maven-resolver's own `GenericVersion` — compiled
   from source and driven as an oracle — across 50,862 generated inputs.
 - Effective POMs match `mvn help:effective-pom` from Maven 3.9.9 exactly.

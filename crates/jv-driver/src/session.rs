@@ -199,6 +199,16 @@ fn build_source(
     }
 
     let mut context = BuildContext::from_environment();
+    // Without this, every `<jdk>` activator in every POM silently fails to
+    // match, and jv builds a different effective model than Maven does on the
+    // same machine.
+    if let Some(version) = config
+        .java_version
+        .clone()
+        .or_else(crate::java::detect_version)
+    {
+        context = context.with_java_version(version);
+    }
     for (key, value) in &config.user_properties {
         context.user_properties.insert(key.clone(), value.clone());
     }

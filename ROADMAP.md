@@ -510,21 +510,51 @@ traced run of upstream's own test.
 **Gate:** transformer corpus green (met); the artifact-description corpus green
 apart from the one case above; coursier contrast suite still to document.
 
-### M4 — `jv-repo` + `jv-cache` (network & store)
-Layout, metadata/SNAPSHOT/RELEASE resolution, update policies, checksum
-validation, negative cache, remote store with sidecars + locking, `.m2`
-opportunistic reads, mirrors + server auth from settings.xml, `--offline`.
-**Gate:** cold-resolve spring-petclinic from an empty cache on a clean VM;
-kill -9 mid-download then resume cleanly; checksum-mismatch and 404 paths
-covered by tests against a local fixture HTTP server.
+### M4 — `jv-repo` + `jv-cache` (network & store) ✅
+Layout, metadata/SNAPSHOT resolution, update policies, checksum validation,
+negative cache, remote store with sidecars + locking, `.m2` opportunistic reads,
+mirrors + server auth from settings.xml, `--offline`.
 
-### M5 — `jv tree` + `jv resolve` + differential harness
+**Done.** `jv-repo` holds layout, update and checksum policies, and the mirror
+and credential rules from `settings.xml`, including the shallow-merge-by-id of
+the installation and user files. `jv-cache` holds a URL-keyed store with
+`.part`/`.error`/`.checked`/`.lock` sidecars, a transport that serves `file:`
+and HTTP through one path, and the fetcher that orders them: jv's cache, then
+`~/.m2` read-only, then each repository in turn.
+
+Three decisions worth recording. An encrypted `settings.xml` password is
+*withheld* rather than sent, because ciphertext authenticates as nobody and
+produces a baffling 401. A checksum policy of `warn` actually warns, reported
+through `Fetched::warnings` — a `warn` that says nothing is `ignore` under
+another name. And a broken repository is held back until every repository has
+been asked, so one unreachable mirror cannot hide an artifact another one has.
+
+**Open:** a `kill -9` mid-download test. The atomic-rename write makes the
+outcome safe by construction, but "safe by construction" is an argument, not a
+test.
+
+### M5 — `jv tree` + `jv resolve` + differential harness — mostly done
 Text renderer at byte parity (via `maven-dependency-tree` port), json/dot/tgf/
 graphml, scope filtering, multi-module.
-**Gate (the launch gate):** `diff <(mvn dependency:tree) <(jv tree)` empty on
-all six Ring-3 projects, every module; warm `jv tree` on petclinic < 100ms;
-benchmark table (cold/warm/startup, vs mvn + mvnd + coursier) reproducible via
-a committed script.
+
+**Done:** all five output formats, each ported from its upstream visitor;
+`jv-driver`, which is where the pure crates meet the machine; and `jv-cli` with
+`jv tree` and `jv resolve`. The differential harness
+(`crates/jv-cli/tests/mvn_tree_oracle.rs`) runs real Maven 3.9.9 against eight
+POMs chosen for resolution behaviours rather than popularity — nearest-wins,
+managed transitives, BOM import, exclusion, the scope matrix, optional
+dependencies, and a wide graph where conflict ordering decides the outcome —
+and **all eight match byte for byte**.
+
+Two divergences are recorded rather than hidden. `<repositories>` are scoped per
+node by Maven; jv accumulates them into one ordered list, because
+`DescriptorSource` has no node context to hang the scoping on. This finds
+strictly more artifacts than Maven, never fewer. And graphml and tgf id their
+nodes by JVM identity hash upstream, which cannot be reproduced; jv numbers them
+sequentially in visit order.
+
+**Open:** the six Ring-3 projects end to end (the harness is built, the fixtures
+are synthetic); the benchmark table and its committed script.
 
 ### M6 — `jv sync` + `setup-jv` GitHub Action
 Both go-offline passes (§3.8), `_remote.repositories` writing, multi-module

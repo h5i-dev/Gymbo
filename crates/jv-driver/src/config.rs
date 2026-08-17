@@ -37,6 +37,12 @@ pub struct Config {
     pub active_profiles: Vec<String>,
     /// Profile ids forced off, as `-P !id`. Beats every other rule.
     pub inactive_profiles: Vec<String>,
+    /// The `java.version` that `<jdk>` profile activators match against.
+    ///
+    /// Detected from `JAVA_HOME` or `java` on the path when absent. Set it
+    /// explicitly to resolve as a different JDK would — which is what makes a
+    /// resolve reproducible across machines.
+    pub java_version: Option<String>,
     /// The repositories to start from, replacing Maven Central.
     ///
     /// POMs may still add more as they are read; this only decides where the

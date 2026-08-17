@@ -47,7 +47,7 @@ jobs:
       - name: Fetch spec sources
         run: ./scripts/fetch-reference.sh
 
-      # A real Maven 3.9 is the oracle for effective POMs and, later, for
+      # A real Maven 3.9 is the oracle for effective POMs and for
       # `dependency:tree` output parity. Pinned and checksum-verified because the
       # answers jv is compared against must not drift silently.
       - name: Install Maven 3.9.9

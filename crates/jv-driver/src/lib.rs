@@ -24,6 +24,7 @@
 
 pub mod config;
 pub mod error;
+pub mod java;
 pub mod project;
 pub mod session;
 pub mod source;

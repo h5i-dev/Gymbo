@@ -58,6 +58,10 @@ pub struct Fetched {
     pub origin: Origin,
     /// The repository it came from, when it was downloaded.
     pub repository: Option<String>,
+    /// Where the bytes are on disk — in jv's cache, or in `~/.m2/repository`
+    /// when that is where they were found. Callers that need a file rather than
+    /// bytes, such as building a classpath, use this instead of recomputing it.
+    pub path: PathBuf,
     /// Problems that did not stop the fetch — a checksum mismatch under a `warn`
     /// policy, most of all. The caller is expected to show these; a checksum
     /// policy named `warn` that produces no warning is just `ignore`.
@@ -169,6 +173,7 @@ impl Fetcher {
                     bytes,
                     origin: Origin::Cache,
                     repository: Some(repository.id.clone()),
+                    path: self.store.path_for(&url)?,
                     warnings: Vec::new(),
                 });
             }
@@ -183,6 +188,7 @@ impl Fetcher {
                     bytes,
                     origin: Origin::LocalRepository,
                     repository: None,
+                    path: candidate,
                     warnings: Vec::new(),
                 });
             }
@@ -211,6 +217,7 @@ impl Fetcher {
                     bytes,
                     origin: Origin::Cache,
                     repository: Some(repository.id.clone()),
+                    path: self.store.path_for(&url)?,
                     warnings: Vec::new(),
                 });
             }
@@ -222,12 +229,13 @@ impl Fetcher {
                     } else {
                         Vec::new()
                     };
-                    self.store.write(&url, &bytes)?;
+                    let path = self.store.write(&url, &bytes)?;
                     self.store.clear_missing(&url)?;
                     return Ok(Fetched {
                         bytes,
                         origin: Origin::Repository,
                         repository: Some(repository.id.clone()),
+                        path,
                         warnings,
                     });
                 }

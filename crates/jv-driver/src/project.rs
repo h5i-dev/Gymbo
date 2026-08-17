@@ -141,7 +141,7 @@ fn load_at(
         })?;
 
     for problem in built.errors() {
-        source.record_warning(problem.to_string());
+        source.record_warning(format!("{} ({})", problem.message, problem.source));
     }
     source.register_project_repositories(&built.model);
 

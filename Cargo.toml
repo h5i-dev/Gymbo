@@ -14,6 +14,7 @@ authors = ["jv contributors"]
 [workspace.dependencies]
 # Internal crates
 jv-cache = { path = "crates/jv-cache", version = "0.1.0-dev" }
+jv-cli = { path = "crates/jv-cli", version = "0.1.0-dev" }
 jv-driver = { path = "crates/jv-driver", version = "0.1.0-dev" }
 jv-exec = { path = "crates/jv-exec", version = "0.1.0-dev" }
 jv-install = { path = "crates/jv-install", version = "0.1.0-dev" }

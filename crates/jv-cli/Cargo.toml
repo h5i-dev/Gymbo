@@ -1,0 +1,30 @@
+[package]
+name = "jv-cli"
+description = "The jv command-line tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "jv"
+path = "src/main.rs"
+
+[dependencies]
+jv-cache = { workspace = true }
+jv-driver = { workspace = true }
+jv-model = { workspace = true }
+jv-repo = { workspace = true }
+jv-resolver = { workspace = true }
+jv-tree = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+owo-colors = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
