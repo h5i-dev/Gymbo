@@ -8,11 +8,12 @@
 //! - under `group/artifact/` it lists the released versions, and names the
 //!   `latest` and `release` ones, which is what resolves `RELEASE` and a version
 //!   range's candidates;
-//! - under `group/artifact/version-SNAPSHOT/` it says which timestamped build is
-//!   current, which is what turns `1.0-SNAPSHOT` into `1.0-20240115.103000-7`;
+//! - under `group/artifact/version-SNAPSHOT/` it says which timestamped build
+//!   is current, which is what turns `1.0-SNAPSHOT` into
+//!   `1.0-20240115.103000-7`;
 //! - under `group/` it maps plugin prefixes to artifact ids, which jv does not
 //!   need yet.
-
+//!
 //! Corrupt metadata must be *ignored*, not fatal. Repositories serve truncated
 //! files and HTML error pages under this name, and Maven treats an unparseable
 //! `maven-metadata.xml` as though the file were absent (its own regression test
