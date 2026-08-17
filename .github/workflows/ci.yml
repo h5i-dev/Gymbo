@@ -42,10 +42,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # The corpus and oracle tests read out of these clones; the list lives in
+      # the script so it cannot drift out of step with what the tests need.
       - name: Fetch spec sources
-        run: |
-          mkdir -p _reference
-          git clone --depth 1 https://github.com/apache/maven-resolver _reference/maven-resolver
+        run: ./scripts/fetch-reference.sh
 
       # A real Maven 3.9 is the oracle for effective POMs and, later, for
       # `dependency:tree` output parity. Pinned and checksum-verified because the

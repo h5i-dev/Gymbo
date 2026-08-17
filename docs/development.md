@@ -15,12 +15,11 @@ compatible behavior, and the differential tests compile out of it directly, so
 nothing upstream is vendored into this repository.
 
 ```sh
-mkdir -p _reference && cd _reference
-git clone --depth 1 https://github.com/apache/maven-resolver
-git clone --depth 1 https://github.com/apache/maven
-git clone --depth 1 https://github.com/apache/maven-dependency-plugin
-git clone --depth 1 https://github.com/apache/maven-dependency-tree
+./scripts/fetch-reference.sh
 ```
+
+That script is the single definition of which clones the tests need; CI runs the
+same one. Adding a clone requirement means editing it, not editing two places.
 
 `_reference/` may also be a symlink to clones kept elsewhere.
 
