@@ -1,0 +1,46 @@
+# Corpus: generic version QUALIFIER detection.
+#
+# Purpose: machine-readable transcription of every assertion about the public
+# GenericQualifiers.qualifier(String) function, which returns an optional integer
+# "shift": negative for preview versions, zero for final versions, positive for
+# service packs, absent when no qualifier is detected.
+#
+# Transcribed from Apache-2.0 licensed test sources of maven-resolver:
+#   maven-resolver/maven-resolver-util/src/test/java/org/eclipse/aether/util/version/GenericQualifiersTest.java
+# Implementation reference (semantics of the API being described):
+#   maven-resolver/maven-resolver-util/src/main/java/org/eclipse/aether/util/version/GenericQualifiers.java
+#
+# Grammar (one directive per line; '#' starts a comment line; blank lines ignored):
+#   qualifier  <input-string>  <shift>     where <shift> is an integer
+#   qualifier  <input-string>  none        no qualifier detected (empty optional)
+# Fields are whitespace-separated.
+#
+# Shift constants: alpha=-5, beta=-4, milestone=-3, rc/cr=-2, snapshot=-1,
+# ga/final/release=0, sp=1.
+
+# source: GenericQualifiersTest#fullCases
+qualifier   1-alpha-1     -5
+qualifier   alpha-1       -5
+qualifier   1-alpha       -5
+qualifier   1-beta        -4
+qualifier   milestone     -3
+qualifier   1-milestone   -3
+qualifier   1-ga-1        0
+qualifier   1-final       0
+qualifier   1-sp          1
+
+# source: GenericQualifiersTest#shortCases
+# special: alpha, beta and milestone are detected also when in form of "a1"
+# (a, b, or m immediately followed by number)
+qualifier   1-a1   -5
+qualifier   a1     -5
+qualifier   1-b1   -4
+qualifier   1-m1   -3
+qualifier   m1     -3
+
+# source: GenericQualifiersTest#edgeCases
+# a qualifier label must be surrounded by non-letter "transitions", so these
+# substrings (rc in "arced", ga in "legacy", cr in "sacred") are NOT qualifiers
+qualifier   1.0-arced    none
+qualifier   1.0-legacy   none
+qualifier   1.0-sacred   none

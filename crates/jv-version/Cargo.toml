@@ -1,0 +1,15 @@
+[package]
+name = "jv-version"
+description = "Maven-compatible version ordering, ranges, and constraints"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

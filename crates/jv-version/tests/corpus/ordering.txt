@@ -1,0 +1,500 @@
+# Version ordering / equality corpus for the Rust port of Maven version comparison.
+#
+# Purpose: a machine-readable transcription of the ordering and equality assertions
+# made by the upstream Java unit tests, so the Rust implementation can be checked
+# against exactly the same expectations.
+#
+# Transcribed by hand from Apache License 2.0 licensed test sources of the
+# Apache Maven Resolver and Apache Maven (maven-artifact) projects:
+#   maven-resolver/maven-resolver-util/src/test/java/org/eclipse/aether/util/version/GenericVersionTest.java
+#   maven/compat/maven-artifact/src/test/java/org/apache/maven/artifact/versioning/ComparableVersionTest.java
+# (helpers: maven-resolver/.../org/eclipse/aether/util/version/AbstractVersionTest.java)
+#
+# Directive syntax (one per line, blank lines and '#' comments allowed):
+#   order  A < B < C        strictly ascending chain: for every i<j, item_i < item_j
+#   eq     A == B == C      all listed versions compare equal to each other
+#   lt     <A>|<B>          single strict pair, pipe separated (for strings with spaces)
+#   eqp    <A>|<B>          single equal pair, pipe separated (for strings with spaces)
+#
+# The GenericVersionTest section reflects maven-resolver's GenericVersion.
+# The ComparableVersionTest section at the end reflects maven-artifact's legacy
+# ComparableVersion; the two implementations do NOT agree everywhere. Lines whose
+# expectations are believed to conflict with GenericVersion are preceded by a
+# '# DISAGREEMENT?:' comment.
+
+# =====================================================================
+# === GenericVersionTest corpus (maven-resolver) ===
+# =====================================================================
+
+# source: GenericVersionTest#testEmptyVersion
+# second operand is the empty string, hence the pipe form
+eqp 0|
+
+# source: GenericVersionTest#testEdgeCase_1_1
+# Asserts only inequality (assertNotEquals), not an order: "0.0.0.ga.ga.foo" != "foo"
+# (they were equal in Resolver 1.x). There is no directive form for "not equal",
+# so it is recorded here as a comment only.
+
+# source: GenericVersionTest#testEdgeCase_1_2
+order  ga.ga.foo < foo
+
+# source: GenericVersionTest#testEdgeCase_2_1
+order  foo.1.2.3 < 0.foo.1.2.3
+order  foo < 0.foo
+eq     1.0.0-foo == 1-foo
+order  1.0.0-ga-foo < 1-foo
+eq     1.0.0-ga-foo == 1-ga-foo
+order  1.0.0.final-foo < 1-foo
+eq     1.0.0.final-foo == 1-final-foo
+
+# source: GenericVersionTest#testEdgeCase_2_2
+# Asserts only inequalities (assertNotEquals), no ordering direction:
+#   "0.0.0.ga.ga.foo" != "foo"
+#   "foo"             != "0.0.0.0.0.foo"
+#   "0.0.0.ga.ga.foo" != "0.0.0.0.0.foo"   (because "0" != "ga")
+# No directive form for "not equal"; recorded as a comment only.
+
+# source: GenericVersionTest#testEdgeCase_2_3
+eq     1.ga == 1.0
+order  ga.1 < 0.1
+order  1.ga.1 < 1.0.1
+
+# source: GenericVersionTest#testEdgeCase_2_4
+order  1.0.final.1 < 1.0.1.final
+
+# source: GenericVersionTest#testQualifier
+order  1.0.0.a1 < 1.0.0.b1
+order  1.0.0.b1 < 1.0.0.m1
+order  1.0.0.m1 < 1.0.0.rc
+order  1.0.0.rc < 1.0.0-SNAPSHOT
+order  1.0.0-SNAPSHOT < 1.0.0
+eq     1.0.0.ga == 1.0.0.final
+eq     1.0.0.final == 1.0.0.release
+order  1.0.0.final < 1.0.0.sp
+order  1.0.0 < 1.0.0.sp
+
+# source: GenericVersionTest#testNumericOrdering
+order  2 < 10
+order  1.2 < 1.10
+order  1.0.2 < 1.0.10
+order  1.0.0.2 < 1.0.0.10
+order  1.0.20101206.111434.1 < 1.0.20101206.111435.1
+order  1.0.20101206.111434.2 < 1.0.20101206.111434.10
+
+# source: GenericVersionTest#testDelimiters
+eq     1.0 == 1-0
+eq     1.0 == 1_0
+eq     1.a == 1a
+
+# source: GenericVersionTest#testLeadingZerosAreSemanticallyIrrelevant
+eq     1 == 01
+eq     1.2 == 1.002
+eq     1.2.3 == 1.2.0003
+eq     1.2.3.4 == 1.2.3.00004
+
+# source: GenericVersionTest#testTrailingZerosAreSemanticallyIrrelevant
+eq     1 == 1.0.0.0.0.0.0.0.0.0.0.0.0.0
+eq     1 == 1-0-0-0-0-0-0-0-0-0-0-0-0-0
+eq     1 == 1.0-0.0-0.0-0.0-0.0-0.0-0.0
+eq     1 == 1.0000000000000
+eq     1.0 == 1.0.0
+
+# source: GenericVersionTest#testTrailingZerosBeforeQualifierAreSemanticallyIrrelevant
+eq     1.0_ga == 1.0.0_ga
+eq     1.0-ga == 1.0.0-ga
+eq     1.0.ga == 1.0.0.ga
+eq     1.0ga == 1.0.0ga
+eq     1.0-alpha == 1.0.0-alpha
+eq     1.0.alpha == 1.0.0.alpha
+eq     1.0alpha == 1.0.0alpha
+eq     1.0-alpha-snapshot == 1.0.0-alpha-snapshot
+eq     1.0.alpha.snapshot == 1.0.0.alpha.snapshot
+eq     1.x.0-alpha == 1.x.0.0-alpha
+eq     1.x.0.alpha == 1.x.0.0.alpha
+eq     1.x.0-alpha-snapshot == 1.x.0.0-alpha-snapshot
+eq     1.x.0.alpha.snapshot == 1.x.0.0.alpha.snapshot
+
+# source: GenericVersionTest#testTrailingDelimitersAreSemanticallyIrrelevant
+eq     1 == 1.............
+eq     1 == 1-------------
+eq     1.0 == 1.............
+eq     1.0 == 1-------------
+eq     1.0 == 1_______
+
+# source: GenericVersionTest#testInitialDelimiters
+eq     0.1 == .1
+eq     0.0.1 == ..1
+eq     0.1 == -1
+eq     0.0.1 == --1
+eq     0.1 == _1
+
+# source: GenericVersionTest#testConsecutiveDelimiters
+eq     1.0.1 == 1..1
+eq     1.0.0.1 == 1...1
+eq     1.0.1 == 1--1
+eq     1.0.0.1 == 1---1
+
+# source: GenericVersionTest#testUnlimitedNumberOfVersionComponents
+order  1.0.1.2.3.4.5.6.7.8.9.0.1.2.3 < 1.0.1.2.3.4.5.6.7.8.9.0.1.2.10
+
+# source: GenericVersionTest#testUnlimitedNumberOfDigitsInNumericComponent
+order  1.123456789012345678901234567891 < 1.1234567890123456789012345678901
+
+# source: GenericVersionTest#testTransitionFromDigitToLetterAndViceVersaIsEquivalentToDelimiter
+eq     1alpha10 == 1.alpha.10
+eq     1alpha10 == 1-alpha-10
+order  1.alpha2 < 1.alpha10
+order  1alpha < 10alpha
+
+# source: GenericVersionTest#testWellKnownQualifierOrdering
+eq     1-alpha1 == 1-a1
+order  1-alpha < 1-beta
+eq     1-beta1 == 1-b1
+order  1-beta < 1-milestone
+eq     1-milestone1 == 1-m1
+order  1-milestone < 1-rc
+eq     1-rc == 1-cr
+order  1-rc < 1-snapshot
+order  1-snapshot < 1
+eq     1 == 1-ga
+eq     1 == 1.ga.0.ga
+eq     1.0 == 1-ga
+eq     1 == 1-ga.ga
+eq     1 == 1-ga-ga
+eq     A == A.ga.ga
+eq     A == A-ga-ga
+eq     1 == 1-final
+eq     1 == 1-release
+order  1 < 1-sp
+order  A.rc.1 < A.ga.1
+order  A.ga.1 < A.sp.1
+order  A.rc.x < A.ga.x
+order  A.ga.x < A.sp.x
+
+# source: GenericVersionTest#testWellKnownQualifierVersusUnknownQualifierOrdering
+order  1-alpha < 1-abc
+order  1-beta < 1-abc
+order  1-milestone < 1-abc
+order  1-rc < 1-abc
+order  1-snapshot < 1-abc
+order  1 < 1-abc
+order  1-sp < 1-abc
+
+# source: GenericVersionTest#testWellKnownSingleCharQualifiersOnlyRecognizedIfImmediatelyFollowedByNumber
+order  1.0 < 1.0a
+order  1.0 < 1.0-a
+order  1.0 < 1.0.a
+order  1.0 < 1.0b
+order  1.0 < 1.0-b
+order  1.0 < 1.0.b
+order  1.0 < 1.0m
+order  1.0 < 1.0-m
+order  1.0 < 1.0.m
+order  1.0a1 < 1.0
+order  1.0-a1 < 1.0
+order  1.0.a1 < 1.0
+order  1.0b1 < 1.0
+order  1.0-b1 < 1.0
+order  1.0.b1 < 1.0
+order  1.0m1 < 1.0
+order  1.0-m1 < 1.0
+order  1.0.m1 < 1.0
+order  1.0 < 1.0a.1
+order  1.0 < 1.0a-1
+order  1.0 < 1.0b.1
+order  1.0 < 1.0b-1
+order  1.0 < 1.0m.1
+order  1.0 < 1.0m-1
+
+# source: GenericVersionTest#testUnknownQualifierOrdering
+order  1-abc < 1-abcd
+order  1-abc < 1-bcd
+order  1-aac < 1-abc
+
+# source: GenericVersionTest#testCaseInsensitiveOrderingOfQualifiers
+eq     1.alpha == 1.ALPHA
+eq     1.alpha == 1.Alpha
+eq     1.beta == 1.BETA
+eq     1.beta == 1.Beta
+eq     1.milestone == 1.MILESTONE
+eq     1.milestone == 1.Milestone
+eq     1.rc == 1.RC
+eq     1.rc == 1.Rc
+eq     1.cr == 1.CR
+eq     1.cr == 1.Cr
+eq     1.snapshot == 1.SNAPSHOT
+eq     1.snapshot == 1.Snapshot
+eq     1.ga == 1.GA
+eq     1.ga == 1.Ga
+eq     1.final == 1.FINAL
+eq     1.final == 1.Final
+eq     1.release == 1.RELEASE
+eq     1.release == 1.Release
+eq     1.sp == 1.SP
+eq     1.sp == 1.Sp
+eq     1.unknown == 1.UNKNOWN
+eq     1.unknown == 1.Unknown
+
+# source: GenericVersionTest#testHypenBeforeUnderscoreDotOrder
+eq     1.0.0-1 == 1.0.0_1
+eq     1.0.0-1 == 1.0.0.1
+eq     1.0.0_1 == 1.0.0.1
+
+# source: GenericVersionTest#testCaseInsensitiveOrderingOfQualifiersIsLocaleIndependent
+# (asserted once per locale in Java: ENGLISH and "tr"; locale is irrelevant here)
+eq     1-abcdefghijklmnopqrstuvwxyz == 1-ABCDEFGHIJKLMNOPQRSTUVWXYZ
+
+# source: GenericVersionTest#testQualifierVersusNumberOrdering
+order  1-ga < 1-1
+order  1.ga < 1.1
+eq     1-ga == 1.0
+eq     1.ga == 1.0
+order  1-ga-1 < 1-0-1
+order  1.ga.1 < 1.0.1
+order  1.0 < 1.sp
+order  1.sp < 1.1
+order  1-abc < 1-1
+order  1.abc < 1.1
+order  1-xyz < 1-1
+order  1.xyz < 1.1
+
+# source: GenericVersionTest#testVersionEvolution
+# assertSequence asserts all pairs i<j, hence a single strictly ascending chain
+order  0.9.9-SNAPSHOT < 0.9.9 < 0.9.10-SNAPSHOT < 0.9.10 < 1.0-alpha-2-SNAPSHOT < 1.0-alpha-2 < 1.0-alpha-10-SNAPSHOT < 1.0-alpha-10 < 1.0-beta-1-SNAPSHOT < 1.0-beta-1 < 1.0-rc-1-SNAPSHOT < 1.0-rc-1 < 1.0-SNAPSHOT < 1.0 < 1.0-sp-1-SNAPSHOT < 1.0-sp-1 < 1.0.1-alpha-1-SNAPSHOT < 1.0.1-alpha-1 < 1.0.1-beta-1-SNAPSHOT < 1.0.1-beta-1 < 1.0.1-rc-1-SNAPSHOT < 1.0.1-rc-1 < 1.0.1-SNAPSHOT < 1.0.1 < 1.1-SNAPSHOT < 1.1
+order  1.0-alpha < 1.0 < 1.0-1
+order  1.0.alpha < 1.0 < 1.0-1
+order  1.0-alpha < 1.0 < 1.0.1
+order  1.0.alpha < 1.0 < 1.0.1
+
+# source: GenericVersionTest#testMinimumSegment
+order  1.min < 1.0-alpha-1
+order  1.min < 1.0-SNAPSHOT
+order  1.min < 1.0
+order  1.min < 1.9999999999
+eq     1.min == 1.MIN
+order  0.99999 < 1.min
+order  0.max < 1.min
+
+# source: GenericVersionTest#testMaximumSegment
+order  1.0-alpha-1 < 1.max
+order  1.0-SNAPSHOT < 1.max
+order  1.0 < 1.max
+order  1.9999999999 < 1.max
+eq     1.max == 1.MAX
+order  1.max < 2.0-alpha-1
+order  1.max < 2.min
+
+# source: GenericVersionTest#testCompareLettersToNumbers
+order  J < 1.7
+
+# source: GenericVersionTest#testCompareDigitToLetter
+order  J < 7
+order  c < 7
+
+# source: GenericVersionTest#testNonAsciiDigits
+# the second operand is U+0668 ARABIC-INDIC DIGIT EIGHT (must not count as a digit)
+order  ٨ < 1
+order  ٨ < 9
+
+# source: GenericVersionTest#testLexicographicOrder
+order  aardvark < zebra
+# second operand is the Greek word for zebra: U+03B6 U+03AD U+03B2 U+03C1 U+03B1
+order  zebra < ζέβρα
+
+# =====================================================================
+# === ComparableVersionTest corpus (maven-artifact, legacy) ===
+# =====================================================================
+#
+# NOTE: this is a different implementation from GenericVersion. Directives here
+# are what ComparableVersionTest asserts, even where GenericVersion is believed
+# to behave differently (those lines carry a '# DISAGREEMENT?:' comment).
+
+# source: ComparableVersionTest#testVersionsQualifier
+# checkVersionsOrder(String[]) asserts all pairs i<j, hence one ascending chain
+order  1-alpha2snapshot < 1-alpha2 < 1-alpha-123 < 1-beta-2 < 1-beta123 < 1-m2 < 1-m11 < 1-rc < 1-cr2 < 1-rc123 < 1-SNAPSHOT < 1 < 1-sp < 1-sp2 < 1-sp123 < 1-abc < 1-def < 1-pom-1 < 1-1-snapshot < 1-1 < 1-2 < 1-123
+
+# source: ComparableVersionTest#testVersionsNumber
+# DISAGREEMENT?: this chain places "2-1" between "2.0.a" and "2.0.2", and "2.1-1"
+# below "2.1.0.1". In GenericVersion, '-' and '.' are equivalent delimiters
+# (GenericVersionTest#testDelimiters: "1.0" == "1-0"), so GenericVersion would
+# read 2-1 == 2.1 (> 2.0.2) and 2.1-1 == 2.1.1 (> 2.1.0.1).
+order  2.0 < 2.0.a < 2-1 < 2.0.2 < 2.0.123 < 2.1.0 < 2.1-a < 2.1b < 2.1-c < 2.1-1 < 2.1.0.1 < 2.2 < 2.123 < 11.a2 < 11.a11 < 11.b2 < 11.b11 < 11.m2 < 11.m11 < 11 < 11.a < 11b < 11c < 11m
+
+# source: ComparableVersionTest#testVersionsEqual
+eq     1 == 1
+eq     1 == 1.0
+eq     1 == 1.0.0
+eq     1.0 == 1.0.0
+eq     1 == 1-0
+eq     1 == 1.0-0
+eq     1.0 == 1.0-0
+eq     1a == 1-a
+eq     1a == 1.0-a
+eq     1a == 1.0.0-a
+eq     1.0a == 1-a
+eq     1.0.0a == 1-a
+eq     1x == 1-x
+eq     1x == 1.0-x
+eq     1x == 1.0.0-x
+eq     1.0x == 1-x
+eq     1.0.0x == 1-x
+eq     1cr == 1rc
+eq     1a1 == 1-alpha-1
+eq     1b2 == 1-beta-2
+eq     1m3 == 1-milestone-3
+eq     1X == 1x
+eq     1A == 1a
+eq     1B == 1b
+eq     1M == 1m
+eq     1Cr == 1Rc
+eq     1cR == 1rC
+eq     1m3 == 1Milestone3
+eq     1m3 == 1MileStone3
+eq     1m3 == 1MILESTONE3
+
+# source: ComparableVersionTest#testVersionsHaveSameOrderButAreNotEqual
+# checkVersionsHaveSameOrder asserts compareTo() == 0 only; these versions are
+# deliberately NOT equals()-equal in ComparableVersion, but they do compare equal.
+eq     1ga == 1
+eq     1release == 1
+eq     1final == 1
+eq     1Ga == 1
+eq     1GA == 1
+eq     1RELEASE == 1
+eq     1RELeaSE == 1
+eq     1Final == 1
+eq     1FinaL == 1
+eq     1FINAL == 1
+
+# source: ComparableVersionTest#testVersionComparing
+order  1 < 2
+order  1.5 < 2
+order  1 < 2.5
+order  1.0 < 1.1
+order  1.1 < 1.2
+order  1.0.0 < 1.1
+order  1.0.1 < 1.1
+order  1.1 < 1.2.0
+order  1.0-alpha-1 < 1.0
+order  1.0-alpha-1 < 1.0-alpha-2
+order  1.0-alpha-1 < 1.0-beta-1
+order  1.0-beta-1 < 1.0-SNAPSHOT
+order  1.0-SNAPSHOT < 1.0
+order  1.0-alpha-1-SNAPSHOT < 1.0-alpha-1
+order  1.0 < 1.0-1
+order  1.0-1 < 1.0-2
+order  1.0.0 < 1.0-1
+# DISAGREEMENT?: GenericVersion treats '-' and '.' as equivalent delimiters, so
+# it would consider "2.0-1" == "2.0.1" instead of strictly less.
+order  2.0-1 < 2.0.1
+order  2.0.1-klm < 2.0.1-lmn
+order  2.0.1 < 2.0.1-xyz
+order  2.0.1 < 2.0.1-123
+order  2.0.1-xyz < 2.0.1-123
+
+# source: ComparableVersionTest#testLeadingZeroes
+order  0.7 < 2
+order  0.2 < 1.0.7
+
+# source: ComparableVersionTest#testDigitGreaterThanNonAscii
+# second operand is U+00E9 LATIN SMALL LETTER E WITH ACUTE
+order  é < 1
+
+# source: ComparableVersionTest#testDigitGreaterThanNonBmpCharacters
+# second operand is U+1D7E4 MATHEMATICAL SANS-SERIF DIGIT TWO (not an ASCII digit)
+order  𝟤 < 1
+
+# source: ComparableVersionTest#testLexicographicASCIISortOrder
+eq     1.0.0-alpha1 == 1.0.0-ALPHA1
+
+# source: ComparableVersionTest#testCompareLowerCaseToUpperCaseASCII
+eq     1.a == 1.A
+
+# source: ComparableVersionTest#testCompareLowerCaseToUpperCaseNonASCII
+# U+00E9 vs U+00C9
+eq     1.é == 1.É
+
+# source: ComparableVersionTest#testCompareDigitToLetter
+order  J < 7
+order  c < 7
+
+# source: ComparableVersionTest#testNonAsciiDigits
+# U+0668 ARABIC-INDIC DIGIT EIGHT
+order  ٨ < 1
+order  ٨ < 9
+
+# source: ComparableVersionTest#testLexicographicOrder
+order  aardvark < zebra
+order  zebra < ζέβρα
+
+# source: ComparableVersionTest#testMng5568
+order  6.1.0rc3 < 6.1.0
+order  6.1.0rc3 < 6.1H.5-beta
+order  6.1.0 < 6.1H.5-beta
+
+# source: ComparableVersionTest#testMng6572
+order  20190126.230843 < 1234567890.12345
+order  1234567890.12345 < 123456789012345.1H.5-beta
+order  20190126.230843 < 123456789012345.1H.5-beta
+order  123456789012345.1H.5-beta < 12345678901234567890.1H.5-beta
+order  1234567890.12345 < 12345678901234567890.1H.5-beta
+order  20190126.230843 < 12345678901234567890.1H.5-beta
+
+# source: ComparableVersionTest#testVersionEqualWithLeadingZeroes
+eq     0000000000000000001 == 000000000000000001 == 00000000000000001 == 0000000000000001 == 000000000000001 == 00000000000001 == 0000000000001 == 000000000001 == 00000000001 == 0000000001 == 000000001 == 00000001 == 0000001 == 000001 == 00001 == 0001 == 001 == 01 == 1
+
+# source: ComparableVersionTest#testVersionZeroEqualWithLeadingZeroes
+eq     0000000000000000000 == 000000000000000000 == 00000000000000000 == 0000000000000000 == 000000000000000 == 00000000000000 == 0000000000000 == 000000000000 == 00000000000 == 0000000000 == 000000000 == 00000000 == 0000000 == 000000 == 00000 == 0000 == 000 == 00 == 0
+
+# source: ComparableVersionTest#testMng6964
+order  1-0.alpha < 1
+order  1-0.beta < 1
+order  1-0.alpha < 1-0.beta
+
+# source: ComparableVersionTest#testLocaleIndependent
+# (asserted once per locale in Java; locale is irrelevant here)
+eq     1-abcdefghijklmnopqrstuvwxyz == 1-ABCDEFGHIJKLMNOPQRSTUVWXYZ
+
+# source: ComparableVersionTest#testMng7644
+# loop body over x in {abc, alpha, a, beta, b, def, milestone, m, RC}
+order  1.0.0.abc1 < 1.0.0-abc2
+eq     2-abc == 2.0.abc
+eq     2-abc == 2.0.0.abc
+eq     2.0.abc == 2.0.0.abc
+order  1.0.0.alpha1 < 1.0.0-alpha2
+eq     2-alpha == 2.0.alpha
+eq     2-alpha == 2.0.0.alpha
+eq     2.0.alpha == 2.0.0.alpha
+order  1.0.0.a1 < 1.0.0-a2
+eq     2-a == 2.0.a
+eq     2-a == 2.0.0.a
+eq     2.0.a == 2.0.0.a
+order  1.0.0.beta1 < 1.0.0-beta2
+eq     2-beta == 2.0.beta
+eq     2-beta == 2.0.0.beta
+eq     2.0.beta == 2.0.0.beta
+order  1.0.0.b1 < 1.0.0-b2
+eq     2-b == 2.0.b
+eq     2-b == 2.0.0.b
+eq     2.0.b == 2.0.0.b
+order  1.0.0.def1 < 1.0.0-def2
+eq     2-def == 2.0.def
+eq     2-def == 2.0.0.def
+eq     2.0.def == 2.0.0.def
+order  1.0.0.milestone1 < 1.0.0-milestone2
+eq     2-milestone == 2.0.milestone
+eq     2-milestone == 2.0.0.milestone
+eq     2.0.milestone == 2.0.0.milestone
+order  1.0.0.m1 < 1.0.0-m2
+eq     2-m == 2.0.m
+eq     2-m == 2.0.0.m
+eq     2.0.m == 2.0.0.m
+order  1.0.0.RC1 < 1.0.0-RC2
+eq     2-RC == 2.0.RC
+eq     2-RC == 2.0.0.RC
+eq     2.0.RC == 2.0.0.RC
+
+# source: ComparableVersionTest#testMng7714
+order  1.0.final-redhat < 1.0-sp1-redhat
+order  1.0.final-redhat < 1.0-sp-1-redhat
+order  1.0.final-redhat < 1.0-sp.1-redhat

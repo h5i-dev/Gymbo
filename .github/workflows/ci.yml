@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # v0.x ships Linux and macOS only; see ROADMAP.md non-goals.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The differential tests compile parts of Maven Resolver and run real
+      # Maven, so both a JDK and the upstream sources have to be present. A
+      # missing oracle silently skips those tests locally; JV_REQUIRE_ORACLE
+      # makes that a failure here, which is the whole point of running them.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # The corpus and oracle tests read out of these clones; the list lives in
+      # the script so it cannot drift out of step with what the tests need.
+      - name: Fetch spec sources
+        run: ./scripts/fetch-reference.sh
+
+      # A real Maven 3.9 is the oracle for effective POMs and, later, for
+      # `dependency:tree` output parity. Pinned and checksum-verified because the
+      # answers jv is compared against must not drift silently.
+      - name: Install Maven 3.9.9
+        run: |
+          set -euo pipefail
+          curl -sSLo maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz
+          curl -sSLo maven.tar.gz.sha512 https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz.sha512
+          echo "$(cat maven.tar.gz.sha512)  maven.tar.gz" | shasum -a 512 -c -
+          tar xzf maven.tar.gz
+          echo "JV_MVN=$PWD/apache-maven-3.9.9/bin/mvn" >> "$GITHUB_ENV"
+
+      - run: cargo test --workspace --all-features
+        env:
+          JV_REQUIRE_ORACLE: "1"
+
+  # Every crate documents the upstream behavior it mirrors, so broken links and
+  # stale references in those docs are worth failing on.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings

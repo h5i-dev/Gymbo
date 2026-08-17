@@ -1,0 +1,213 @@
+# Corpus: single version-RANGE specifications.
+#
+# Purpose: machine-readable transcription of every range-semantics assertion found in
+# the Java test suites, for use by a Rust port. Each directive is one assertion.
+#
+# Transcribed from Apache-2.0 licensed test sources of maven-resolver / maven-artifact:
+#   maven-resolver/maven-resolver-util/src/test/java/org/eclipse/aether/util/version/GenericVersionRangeTest.java
+#   maven/compat/maven-artifact/src/test/java/org/apache/maven/artifact/versioning/VersionRangeTest.java
+# Implementation reference (semantics of the API being described):
+#   maven-resolver/maven-resolver-util/src/main/java/org/eclipse/aether/util/version/GenericVersionRange.java
+#   maven-resolver/maven-resolver-util/src/main/java/org/eclipse/aether/util/version/VersionSchemeSupport.java
+#
+# Grammar (one directive per line; '#' starts a comment line; blank lines ignored):
+#   contains  <range-spec>  <version>
+#   excludes  <range-spec>  <version>
+#   invalid   <range-spec>
+#   lower     <range-spec>  <version> inclusive|exclusive
+#   lower     <range-spec>  none
+#   upper     <range-spec>  <version> inclusive|exclusive
+#   upper     <range-spec>  none
+# Fields are whitespace-separated, EXCEPT on lines that contain a TAB: if a line
+# contains at least one TAB character, TAB is the field separator for that line
+# (used where a verbatim spec copied from Java contains a space).
+#
+# NOTE: specs here are *range* specs (GenericVersionRange / a single maven-artifact
+# restriction group), not constraint specs. "1.0" is therefore an INVALID range even
+# though it is a valid version *constraint* (see constraints.txt).
+
+# === maven-resolver: GenericVersionRange semantics ===
+
+# source: GenericVersionRangeTest#testLowerBoundInclusiveUpperBoundInclusive
+contains   [1,2]   1
+contains   [1,2]   1.1-SNAPSHOT
+contains   [1,2]   2
+
+# source: GenericVersionRangeTest#testLowerBoundInclusiveUpperBoundExclusive
+contains   [1.2.3.4.5,1.2.3.4.6)   1.2.3.4.5
+excludes   [1.2.3.4.5,1.2.3.4.6)   1.2.3.4.6
+
+# source: GenericVersionRangeTest#testLowerBoundExclusiveUpperBoundInclusive
+excludes   (1a,1b]   1a
+contains   (1a,1b]   1b
+
+# source: GenericVersionRangeTest#testLowerBoundExclusiveUpperBoundExclusive
+excludes   (1,3)   1
+contains   (1,3)   2-SNAPSHOT
+excludes   (1,3)   3
+
+# source: GenericVersionRangeTest#testSingleVersion
+contains   [1]     1
+contains   [1,1]   1
+
+# source: GenericVersionRangeTest#testSingleWildcardVersion
+contains   [1.2.*]   1.2-alpha-1
+contains   [1.2.*]   1.2-SNAPSHOT
+contains   [1.2.*]   1.2
+contains   [1.2.*]   1.2.9999999
+excludes   [1.2.*]   1.3-rc-1
+
+# source: GenericVersionRangeTest#testMissingOpenCloseDelimiter
+invalid   1.0
+
+# source: GenericVersionRangeTest#testMissingOpenDelimiter
+invalid   1.0]
+invalid   1.0)
+
+# source: GenericVersionRangeTest#testMissingCloseDelimiter
+invalid   [1.0
+invalid   (1.0
+
+# source: GenericVersionRangeTest#testTooManyVersions
+invalid   [1,2,3]
+invalid   (1,2,3)
+invalid   [1,2,3)
+
+# === maven-artifact: legacy VersionRange semantics ===
+# These come from the older maven-artifact implementation. Single-range specs only;
+# multi-range and plain-version specs from the same tests live in constraints.txt.
+# Every directive in this section also holds under maven-resolver semantics; cases
+# where the two implementations DISAGREE are isolated in the final sections below.
+
+# source: VersionRangeTest#testRange
+lower   (,1.0]        none
+upper   (,1.0]        1.0 inclusive
+lower   [1.0]         1.0 inclusive
+upper   [1.0]         1.0 inclusive
+lower   [1.2,1.3]     1.2 inclusive
+upper   [1.2,1.3]     1.3 inclusive
+lower   [1.0,2.0)     1.0 inclusive
+upper   [1.0,2.0)     2.0 exclusive
+lower   [1.5,)        1.5 inclusive
+upper   [1.5,)        none
+# the two constituent restrictions asserted for the spec "(,1.0],[1.2,)"
+# (the "(,1.0]" half is already covered by the two directives above)
+lower   [1.2,)        1.2 inclusive
+upper   [1.2,)        none
+excludes   [1.0,)                   1.0-SNAPSHOT
+contains   [1.0,1.1-SNAPSHOT]       1.1-SNAPSHOT
+contains   [5.0.9.0,5.0.10.0)       5.0.9.0
+
+# source: VersionRangeTest#testInvalidRanges
+invalid   (1.0)
+invalid   [1.0)
+invalid   (1.0]
+invalid   [1.1,1.0]
+
+# source: VersionRangeTest#testReleaseRangeBoundsContainsSnapshots
+contains   [1.0,1.2]   1.1-SNAPSHOT
+contains   [1.0,1.2]   1.2-SNAPSHOT
+excludes   [1.0,1.2]   1.0-SNAPSHOT
+
+# source: VersionRangeTest#testSnapshotRangeBoundsCanContainSnapshots
+contains   [1.0,1.2-SNAPSHOT]   1.1-SNAPSHOT
+contains   [1.0,1.2-SNAPSHOT]   1.2-SNAPSHOT
+contains   [1.0-SNAPSHOT,1.2]   1.0-SNAPSHOT
+contains   [1.0-SNAPSHOT,1.2]   1.1-SNAPSHOT
+
+# source: VersionRangeTest#testContains
+# (the two plain-version specs of this test are in constraints.txt)
+contains   [2.0.5]        2.0.5
+excludes   [2.0.6,)       2.0.5
+excludes   [2.0.6]        2.0.5
+contains   [2.0,2.1]      2.0.5
+excludes   [2.0,2.0.3]    2.0.5
+contains   [2.0,2.0.5]    2.0.5
+excludes   [2.0,2.0.5)    2.0.5
+
+# === maven-artifact-only: specs INVALID under maven-artifact but VALID under maven-resolver ===
+# Do NOT feed these to a maven-resolver-semantics parser. maven-artifact rejects an
+# empty range (equal bounds with at least one exclusive side); GenericVersionRange
+# accepts them (it only rejects lower > upper).
+# source: VersionRangeTest#testInvalidRanges
+invalid   (1.0,1.0]
+invalid   [1.0,1.0)
+invalid   (1.0,1.0)
+
+# === EXTENSION: maven-artifact VersionRange#restrict (intersection) cases ===
+# Not expressible in the contains/excludes/invalid/lower/upper vocabulary, so a
+# dedicated directive is used. maven-artifact-only semantics: maven-resolver has no
+# equivalent operation.
+#
+#   intersect  <spec1>  <spec2>  <recommended-version|none>  <restrictions>
+#
+# <spec1>.restrict(<spec2>) yields a range whose recommended version is field 4
+# ("none" for null) and whose restriction list is field 5, encoded as the
+# comma-joined bracket forms of each restriction ("[lo,hi]", "(lo,hi)", an empty
+# side meaning an absent bound, so "(,)" is the unbounded restriction); the literal
+# word "empty" means the restriction list is empty.
+# Lines whose specs contain a space use TAB as the field separator.
+#
+# source: VersionRangeTest#testIntersections
+intersect   1.0   1.1   1.0   (,)
+intersect   1.1   1.0   1.1   (,)
+intersect   [1.0,)   1.1   1.1   [1.0,)
+intersect   [1.1,)   1.1   1.1   [1.1,)
+# NOTE: at this case the Java source (line 245) re-asserts getLowerBound() with the
+# CHECK_UPPER_BOUND message (an apparent typo); only upper-bound inclusiveness is
+# actually asserted there. The upper bound version below is [1.1] restricted by the
+# soft version 1.1, i.e. 1.1.
+intersect   [1.1]   1.1   1.1   [1.1,1.1]
+intersect   (1.1,)   1.1   none   (1.1,)
+intersect   [1.2,)   1.1   none   [1.2,)
+intersect   (,1.2]   1.1   1.1   (,1.2]
+intersect   (,1.1]   1.1   1.1   (,1.1]
+intersect   (,1.1)   1.1   none   (,1.1)
+intersect   (,1.0]   1.1   none   (,1.0]
+intersect	(,1.0], [1.1,)	1.2	1.2	(,1.0],[1.1,)
+intersect	(,1.0], [1.1,)	1.0.5	none	(,1.0],[1.1,)
+intersect	(,1.1), (1.1,)	1.1	none	(,1.1),(1.1,)
+intersect   [1.1,1.3]   (1.1,)   none   (1.1,1.3]
+intersect   (,1.3)   [1.2,1.3]   none   [1.2,1.3)
+intersect   [1.1,1.3]   [1.2,)   none   [1.2,1.3]
+intersect   (,1.3]   [1.2,1.4]   none   [1.2,1.3]
+intersect   (1.2,1.3]   [1.1,1.4]   none   (1.2,1.3]
+intersect   (1.2,1.3)   [1.1,1.4]   none   (1.2,1.3)
+intersect   [1.2,1.3)   [1.1,1.4]   none   [1.2,1.3)
+intersect   [1.0,1.1]   [1.1,1.4]   none   [1.1,1.1]
+intersect   [1.0,1.1)   [1.1,1.4]   none   empty
+intersect   [1.0,1.2],[1.3,1.5]   [1.1]   none   [1.1,1.1]
+intersect   [1.0,1.2],[1.3,1.5]   [1.4]   none   [1.4,1.4]
+intersect   [1.0,1.2],[1.3,1.5]   [1.1,1.4]   none   [1.1,1.2],[1.3,1.4]
+intersect   [1.0,1.2),(1.3,1.5]   [1.1,1.4]   none   [1.1,1.2),(1.3,1.4]
+intersect   [1.0,1.2],[1.3,1.5]   (1.1,1.4)   none   (1.1,1.2],[1.3,1.4)
+intersect   [1.0,1.2),(1.3,1.5]   (1.1,1.4)   none   (1.1,1.2),(1.3,1.4)
+intersect   (,1.1),(1.4,)   [1.1,1.4]   none   empty
+intersect   (,1.1],[1.4,)   (1.1,1.4)   none   empty
+intersect   [,1.1],[1.4,]   [1.2,1.3]   none   empty
+intersect   [1.0,1.2],[1.3,1.5]   [1.1,1.4],[1.6,]   none   [1.1,1.2],[1.3,1.4]
+intersect   [1.0,1.2],[1.3,1.5]   [1.1,1.4],[1.5,]   none   [1.1,1.2],[1.3,1.4],[1.5,1.5]
+intersect   [1.0,1.2],[1.3,1.7]   [1.1,1.4],[1.5,1.6]   none   [1.1,1.2],[1.3,1.4],[1.5,1.6]
+
+# === UNEXPRESSIBLE assertions (recorded as prose; no directive form) ===
+#
+# source: VersionRangeTest#testIntersections ("test restricting empty sets", lines 648-663)
+#   (a) r = createFromVersionSpec("[,1.1],[1.4,]").restrict("[1.2,1.3]")  -> empty;
+#       r.restrict("[1.2,1.3]") again -> recommended null, 0 restrictions.
+#   (b) r1 = createFromVersionSpec("[,1.1],[1.4,]"); r2 = r1.restrict("[1.2,1.3]") (empty);
+#       r1.restrict(r2) -> recommended null, 0 restrictions.
+#   Both chain a restrict onto the *result* of a restrict, so spec1/spec2 cannot be
+#   given as literal strings in the intersect grammar above.
+#
+# source: VersionRangeTest#testRange
+#   For every spec in that test the assertions also cover restrictions.size()
+#   (1 for "(,1.0]", "1.0", "[1.0]", "[1.2,1.3]", "[1.0,2.0)", "[1.5,)";
+#    2 for "(,1.0],[1.2,)"), plus the maven-artifact-only accessors
+#   isSelectedVersionKnown(null)/getSelectedVersion(null) (true/"1.0" for the soft
+#   spec "1.0", false/null for every range spec). The soft spec "1.0" additionally
+#   asserts one restriction with both bounds null and both inclusive flags false --
+#   maven-resolver models "1.0" as a version constraint with no range at all.
+#
+# source: GenericVersionRangeTest (all six positive tests)
+#   Each asserts the toString() round-trip: range.equals(parse(range.toString())).
+#   Skipped as a toString/equals contract, not range membership semantics.

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>dev.jv.itest</groupId>
+  <artifactId>profiles</artifactId>
+  <version>1.0.0</version>
+  <properties><base.version>1.0</base.version></properties>
+  <profiles>
+    <profile>
+      <id>fallback</id>
+      <activation><activeByDefault>true</activeByDefault></activation>
+      <properties><which>fallback</which></properties>
+      <dependencies>
+        <dependency><groupId>dev.jv</groupId><artifactId>from-fallback</artifactId><version>${base.version}</version></dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>by-file</id>
+      <activation><file><exists>activation-marker</exists></file></activation>
+      <properties><which>by-file</which></properties>
+      <dependencies>
+        <dependency><groupId>dev.jv</groupId><artifactId>from-file</artifactId><version>${base.version}</version></dependency>
+      </dependencies>
+      <repositories>
+        <repository><id>profile-repo</id><url>https://example.invalid/repo</url></repository>
+      </repositories>
+    </profile>
+    <profile>
+      <id>never</id>
+      <activation><file><exists>absent-marker</exists></file></activation>
+      <dependencies>
+        <dependency><groupId>dev.jv</groupId><artifactId>never</artifactId><version>9</version></dependency>
+      </dependencies>
+    </profile>
+  </profiles>
+</project>

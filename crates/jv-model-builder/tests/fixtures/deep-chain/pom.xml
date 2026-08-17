@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>dev.jv.itest</groupId>
+  <artifactId>root</artifactId>
+  <version>1.0.0</version>
+  <packaging>pom</packaging>
+  <properties>
+    <guava.version>33.0.0-jre</guava.version>
+    <shared>from-root</shared>
+  </properties>
+  <modules><module>mid</module></modules>
+  <build><pluginManagement><plugins>
+    <plugin><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin>
+  </plugins></pluginManagement></build>
+</project>
