@@ -20,7 +20,9 @@ use jv_model::{Artifact, Dependency, Ga, Scope};
 pub struct NodeId(u32);
 
 impl NodeId {
-    fn index(self) -> usize {
+    /// The arena position, for sibling modules that need to key a dense array by
+    /// node. Deliberately not public: outside the crate an id is opaque.
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }
