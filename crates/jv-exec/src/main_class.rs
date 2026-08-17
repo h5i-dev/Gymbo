@@ -24,6 +24,38 @@ use std::path::Path;
 use crate::error::ExecError;
 use crate::manifest;
 
+/// Checks that a class name is a class name.
+///
+/// This is a security boundary, not tidiness. The name is passed to `java` as
+/// the first non-option argument, and `java` reads a leading `-` as an option
+/// and a leading `@` as an argfile — *before* running anything. A jar published
+/// with `Main-Class: -Xlog:gc*=debug:file=/path/to/anything` therefore truncates
+/// and overwrites that file the moment jvx launches it, and the class the user
+/// asked for never runs. `-javaagent:` and `-agentpath:` load code from a path
+/// the jar chooses; `@file` reads options from one.
+///
+/// A real class name is Java identifiers separated by `.`, with `$` for nested
+/// classes. Nothing else is accepted, which costs nothing: no launchable tool
+/// has ever had a different one.
+fn validated(name: &str, endpoint: &str) -> Result<String, ExecError> {
+    let plausible = !name.is_empty()
+        && !name.starts_with(['-', '@'])
+        && name.split('.').all(|segment| {
+            !segment.is_empty()
+                && !segment.starts_with(|c: char| c.is_ascii_digit())
+                && segment
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        });
+    if plausible {
+        return Ok(name.to_owned());
+    }
+    Err(ExecError::UnusableMainClass {
+        endpoint: endpoint.to_owned(),
+        name: name.to_owned(),
+    })
+}
+
 /// Which rung of the ladder answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -45,7 +77,7 @@ pub fn detect(
 ) -> Result<(String, Source), ExecError> {
     let requested = requested.map(str::trim).filter(|name| !name.is_empty());
     if let Some(name) = requested {
-        return Ok((name.to_owned(), Source::Requested));
+        return Ok((validated(name, endpoint)?, Source::Requested));
     }
 
     let mut tried = vec!["no --main and no `@mainClass`".to_owned()];
@@ -56,7 +88,7 @@ pub fn detect(
                 .as_deref()
                 .and_then(|manifest| manifest::attribute(manifest, "Main-Class"))
             {
-                return Ok((name, Source::Manifest));
+                return Ok((validated(name.trim(), endpoint)?, Source::Manifest));
             }
             let name = jar.file_name().unwrap_or(jar.as_os_str());
             tried.push(match manifest {
@@ -79,6 +111,47 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn a_main_class_that_java_would_read_as_an_option_is_refused() {
+        // Verified against a real JDK before this check existed: a jar published
+        // with `Main-Class: -Xlog:gc*=debug:file=<path>` truncates and overwrites
+        // that file the moment jvx launches it, before any of the jar's code
+        // runs, and the class the user asked for never runs at all.
+        for hostile in [
+            "-Xlog:gc*=debug:file=/tmp/victim",
+            "-XshowSettings:properties",
+            "-javaagent:/tmp/evil.jar",
+            "@/tmp/argfile",
+            "",
+            "com..Main",
+            "com.example.9Main",
+            "com.example.Main extra",
+            "com/example/Main",
+            "-",
+        ] {
+            assert!(
+                validated(hostile, "g:a:1").is_err(),
+                "{hostile:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_class_names_are_accepted() {
+        // The check must cost nothing real: every launchable tool has a name of
+        // this shape, nested and unicode ones included.
+        for name in [
+            "com.example.Main",
+            "Main",
+            "com.example.Outer$Inner",
+            "com.example._private.Main",
+            "com.example.a1.B2",
+            "café.Main",
+        ] {
+            assert_eq!(validated(name, "g:a:1").ok().as_deref(), Some(name));
+        }
+    }
 
     /// Writes a jar holding exactly the manifest given, or none at all.
     fn jar(directory: &Path, manifest: Option<&str>) -> PathBuf {

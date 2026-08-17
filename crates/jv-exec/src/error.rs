@@ -32,6 +32,15 @@ pub enum ExecError {
         endpoint: String,
         tried: Vec<String>,
     },
+    /// A name that would reach `java` as something other than a class.
+    ///
+    /// Worth its own variant rather than folding into `NoMainClass`: this is not
+    /// "we could not find one", it is "the one we found is not safe to run", and
+    /// the difference matters to whoever reads it.
+    #[error(
+        "{endpoint} names {name:?} as its main class, but java would read that as an option rather than a class; refusing to launch it"
+    )]
+    UnusableMainClass { endpoint: String, name: String },
     #[error("no published version of {group_id}:{artifact_id} was found")]
     NoVersion {
         group_id: String,

@@ -97,7 +97,29 @@ pub fn executable() -> Option<PathBuf> {
     }
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|directory| directory.join(EXECUTABLE))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
+}
+
+/// Whether a path is a file this process could actually run.
+///
+/// `is_file()` alone is not enough: a non-executable file named `java` in any
+/// writable directory on PATH would be selected here and then fail at launch,
+/// while a shell would have skipped it and found the real one. That makes it a
+/// denial of service anyone with write access to such a directory can arrange.
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        return metadata.permissions().mode() & 0o111 != 0;
+    }
+    #[cfg(not(unix))]
+    true
 }
 
 /// The file name a JVM is installed under.
@@ -148,6 +170,25 @@ fn parse_version(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_non_executable_file_named_java_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let decoy = dir.path().join("java");
+        std::fs::write(&decoy, b"not a program").unwrap();
+        // A shell would skip this and keep looking; selecting it turns any
+        // writable PATH directory into a denial of service for `jvx`.
+        assert!(!is_executable(&decoy));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(is_executable(&decoy));
+        }
+        assert!(!is_executable(dir.path()));
+        assert!(!is_executable(&dir.path().join("absent")));
+    }
 
     #[test]
     fn a_release_file_is_read_without_starting_a_jvm() {

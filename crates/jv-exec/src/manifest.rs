@@ -50,18 +50,54 @@ pub fn read(jar: &Path) -> Result<Option<String>, ExecError> {
         }
     };
 
-    // Lossy rather than strict: the spec says UTF-8, but folding splits on a
-    // byte boundary, so a manifest carrying a non-ASCII vendor name can be
-    // genuinely malformed. Refusing to read `Main-Class` over that would be a
-    // failure caused by a field nobody asked about.
+    // Capped, because the jar comes from a repository and its manifest is read
+    // before anything about it has been established. A 6 MB jar can hold a
+    // manifest that inflates to gigabytes, and reading it to the end would take
+    // the machine down before the tool is ever launched. Real manifests are a
+    // few kilobytes; a megabyte is already absurd.
     let mut bytes = Vec::new();
-    entry
+    std::io::Read::take(&mut entry, MAX_MANIFEST)
         .read_to_end(&mut bytes)
         .map_err(|source| ExecError::Io {
             path: jar.to_owned(),
             source,
         })?;
-    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+    Ok(Some(unfold(&bytes)))
+}
+
+/// The most manifest jv will read.
+///
+/// A cap, not a limit anyone should reach: the JDK's own manifests are a couple
+/// of kilobytes.
+const MAX_MANIFEST: u64 = 1 << 20;
+
+/// Joins folded lines, then decodes.
+///
+/// The order matters and is the JDK's. A manifest line is wrapped at 72 *bytes*,
+/// so the fold can land in the middle of a multi-byte character — decoding first
+/// turns that one character into two replacement characters, and the value is
+/// then wrong in a way no later processing can undo. `café.Main` folded across
+/// the `é` came back as `caf<?><?>.Main`.
+///
+/// Decoding is still lossy at the end: the spec says UTF-8, but a manifest
+/// carrying a genuinely malformed vendor name should not stop jv reading
+/// `Main-Class`.
+fn unfold(bytes: &[u8]) -> String {
+    let mut joined: Vec<u8> = Vec::with_capacity(bytes.len());
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        match line.strip_prefix(b" ") {
+            // A continuation: append its bytes with no separator at all.
+            Some(rest) if index > 0 => joined.extend_from_slice(rest),
+            _ => {
+                if index > 0 {
+                    joined.push(b'\n');
+                }
+                joined.extend_from_slice(line);
+            }
+        }
+    }
+    String::from_utf8_lossy(&joined).into_owned()
 }
 
 /// The value of a main-section attribute.
@@ -74,6 +110,9 @@ pub fn attribute(manifest: &str, name: &str) -> Option<String> {
         if line.is_empty() {
             break;
         }
+        // `read` has already joined folds at the byte level, so this does nothing
+        // for a manifest that came through it. It stays because `attribute` is
+        // public and reading raw manifest text with it must still work.
         if let Some(continuation) = line.strip_prefix(' ') {
             if let Some((_, value)) = pending.as_mut() {
                 value.push_str(continuation);
@@ -141,6 +180,27 @@ mod tests {
         let manifest = "Manifest-Version: 1.0\r\nMain-Class: com.example.Main\r\n";
         assert_eq!(
             attribute(manifest, "Main-Class").as_deref(),
+            Some("com.example.Main")
+        );
+    }
+
+    #[test]
+    fn a_fold_splitting_a_character_is_rejoined_before_decoding() {
+        // A manifest line wraps at 72 *bytes*, so a fold can land inside a
+        // multi-byte character. Decoding first turns that one character into two
+        // replacement characters and the value is wrong in a way nothing later
+        // can undo — `java -jar` on the same jar reports `café.Main`.
+        let folded = b"Manifest-Version: 1.0\nMain-Class: caf\xc3\n \xa9.Main\n\n";
+        let text = unfold(folded);
+        assert_eq!(attribute(&text, "Main-Class").as_deref(), Some("café.Main"));
+    }
+
+    #[test]
+    fn unfolding_leaves_an_ordinary_manifest_alone() {
+        let plain = b"Manifest-Version: 1.0\r\nMain-Class: com.example.Main\r\n\r\n";
+        let text = unfold(plain);
+        assert_eq!(
+            attribute(&text, "Main-Class").as_deref(),
             Some("com.example.Main")
         );
     }
