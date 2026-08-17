@@ -128,7 +128,18 @@ pub fn mark_conflict_ids(graph: &Graph) -> HashMap<NodeId, ConflictId> {
     // old keys are in the same group, so either would do.
     let mut ids = HashMap::new();
     for id in &order {
-        let Some(artifact) = &graph.node(*id).artifact else {
+        let node = graph.node(*id);
+        // Upstream's `mark` tests the *dependency*, not the artifact, and the
+        // difference is load-bearing. A root given as an artifact — the shape
+        // `CollectRequest::root_artifact` produces, which is how a project
+        // resolves its own dependencies — has coordinates but no dependency. Give
+        // it a conflict id and it becomes a competitor in its own conflict group
+        // at depth 0, wins, and prunes any transitive dependency on the project
+        // itself along with everything beneath it.
+        if node.dependency.is_none() {
+            continue;
+        }
+        let Some(artifact) = &node.artifact else {
             continue;
         };
         if let Some(group) = by_key.get(&Key::of(artifact)) {

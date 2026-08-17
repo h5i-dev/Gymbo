@@ -381,13 +381,22 @@ fn process(
             collected
                 .cycles
                 .push(format!("{}:{}", artifact.group_id, artifact.artifact_id));
-            let mut node = Node::dependency(dependency.clone(), artifact.clone());
-            node.managed = managed;
-            node.premanaged = premanaged.clone();
-            let id = collected.graph.add(node);
-            collected.graph.add_child(work.parent, id);
-            cycle_links.push((id, ancestor));
-            continue;
+            // The cycle is recorded either way, but it only becomes a *node* when
+            // the ancestor it closed on is a dependency. Upstream checks
+            // `cycleNode.getDependency() != null` and otherwise falls through to
+            // ordinary expansion — which matters for a root given as an artifact,
+            // where the project's own coordinates reappearing transitively would
+            // otherwise borrow the root's child list and never be expanded,
+            // silently dropping everything the real subtree contains.
+            if collected.graph.node(ancestor).dependency.is_some() {
+                let mut node = Node::dependency(dependency.clone(), artifact.clone());
+                node.managed = managed;
+                node.premanaged = premanaged.clone();
+                let id = collected.graph.add(node);
+                collected.graph.add_child(work.parent, id);
+                cycle_links.push((id, ancestor));
+                continue;
+            }
         }
 
         let descriptor = match source.descriptor(&artifact) {
