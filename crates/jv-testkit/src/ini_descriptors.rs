@@ -309,7 +309,18 @@ impl DescriptorReader {
     /// A relocating file's other sections are discarded, matching upstream:
     /// the relocation replaces the artifact rather than adding to it.
     pub fn get(&self, artifact: &Artifact) -> Result<ArtifactDescription, IniError> {
+        Ok(self.resolve(artifact)?.description)
+    }
+
+    /// Reads a description and reports where the relocations led.
+    ///
+    /// The chain is what a caller needs to build a faithful `Descriptor`:
+    /// swallowing it — which `get` does, and which is all this offered before —
+    /// leaves the collector unable to tell a relocated artifact from a plain
+    /// one, so the corpus's two relocation goldens went unexercised.
+    pub fn resolve(&self, artifact: &Artifact) -> Result<Resolved, IniError> {
         let mut current = artifact.clone();
+        let mut relocations = Vec::new();
         // A relocation chain is short in practice; the bound only stops a
         // corpus file that points at itself from hanging the test.
         for _ in 0..16 {
@@ -320,12 +331,61 @@ impl DescriptorReader {
             })?;
             let description = parse_description(&text)?;
             match &description.relocation {
-                Some(target) => current = target.clone(),
-                None => return Ok(description),
+                Some(target) => {
+                    relocations.push(current.clone());
+                    current = target.clone();
+                }
+                None => {
+                    return Ok(Resolved {
+                        description,
+                        artifact: current,
+                        relocations,
+                    });
+                }
             }
         }
-        Ok(ArtifactDescription::default())
+        Ok(Resolved {
+            description: ArtifactDescription::default(),
+            artifact: current,
+            relocations,
+        })
     }
+}
+
+impl DescriptorReader {
+    /// The versions the corpus holds for an artifact, ascending.
+    ///
+    /// Read off the file names, since the corpus is one `.ini` per version and
+    /// has no index. A range cannot expand without this, which is why the two
+    /// range goldens sat unexercised.
+    pub fn versions(&self, group_id: &str, artifact_id: &str) -> Vec<String> {
+        let prefix = format!("{group_id}_{artifact_id}_");
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut versions: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter_map(|name| {
+                let stem = name.strip_suffix(".ini")?;
+                Some(stem.strip_prefix(&prefix)?.to_owned())
+            })
+            .collect();
+        versions.sort_by(|left, right| {
+            jv_version::Version::parse(left).cmp(&jv_version::Version::parse(right))
+        });
+        versions
+    }
+}
+
+/// A description, with the coordinates it was actually found under.
+#[derive(Clone, Debug, Default)]
+pub struct Resolved {
+    pub description: ArtifactDescription,
+    /// Where the artifact really lives, after any relocations.
+    pub artifact: Artifact,
+    /// Coordinates it was relocated *from*, oldest first.
+    pub relocations: Vec<Artifact>,
 }
 
 #[cfg(test)]

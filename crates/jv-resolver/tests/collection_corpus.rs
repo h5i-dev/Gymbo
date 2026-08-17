@@ -44,16 +44,22 @@ struct IniSource {
 
 impl DescriptorSource for IniSource {
     fn descriptor(&self, artifact: &Artifact) -> Result<Descriptor, String> {
-        let description = self
+        let resolved = self
             .reader
-            .get(artifact)
+            .resolve(artifact)
             .map_err(|error| error.to_string())?;
         Ok(Descriptor {
-            artifact: artifact.clone(),
-            dependencies: description.dependencies,
-            managed_dependencies: description.managed_dependencies,
-            relocations: Vec::new(),
+            // The coordinates the artifact really lives under, which differ from
+            // the ones asked for exactly when a relocation applied.
+            artifact: resolved.artifact,
+            dependencies: resolved.description.dependencies,
+            managed_dependencies: resolved.description.managed_dependencies,
+            relocations: resolved.relocations,
         })
+    }
+
+    fn versions(&self, group_id: &str, artifact_id: &str) -> Result<Vec<String>, String> {
+        Ok(self.reader.versions(group_id, artifact_id))
     }
 }
 
@@ -188,6 +194,40 @@ fn a_single_dependency_is_collected() {
 #[test]
 fn a_whole_subtree_matches_its_golden() {
     let Some(expected) = load_golden("", "expectedSubtreeComparisonResult.txt") else {
+        return;
+    };
+    let Some(actual) = collected("", root_dependency(&expected)) else {
+        return;
+    };
+    assert_same_subtree(&expected, &actual);
+}
+
+/// A transitive version range, expanded newest-first.
+#[test]
+fn a_transitive_range_expands_to_every_matching_version() {
+    let Some(expected) = load_golden("", "transitiveDepsUseRangesDirtyTreeResult_BF.txt") else {
+        return;
+    };
+    let Some(actual) = collected("", root_dependency(&expected)) else {
+        return;
+    };
+    assert_same_subtree(&expected, &actual);
+}
+
+/// A range whose versions relocate — three in, one out.
+///
+/// This golden went unexercised for a long time because the corpus reader
+/// followed relocations silently and reported the original coordinates, so the
+/// collector never saw a relocation at all. It pins two things at once: that a
+/// relocated dependency is rewritten onto its new coordinates, and that
+/// upstream *returns* after handling a relocation rather than continuing the
+/// version loop, so a relocated range collapses to a single node.
+#[test]
+fn a_relocated_range_collapses_to_one_node() {
+    let Some(expected) = load_golden(
+        "",
+        "transitiveDepsUseRangesAndRelocationDirtyTreeResult_BF.txt",
+    ) else {
         return;
     };
     let Some(actual) = collected("", root_dependency(&expected)) else {

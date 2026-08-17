@@ -171,6 +171,8 @@ pub fn collect(
             selector: selector.clone(),
             level: 1,
             path: vec![root],
+            relocations: Vec::new(),
+            disable_version_management: false,
         })
         .collect();
     // A node that shares another's child list — because it closed a cycle, or
@@ -347,6 +349,15 @@ struct Work {
     level: usize,
     /// Ancestors, for cycle detection.
     path: Vec<NodeId>,
+    /// Coordinates this dependency was relocated from, oldest first. Empty for
+    /// almost everything; carried so the node can report where it came from.
+    relocations: Vec<Artifact>,
+    /// Set when a relocation kept the same `groupId:artifactId`.
+    ///
+    /// Upstream's `disableVersionManagementSubsequently`: management already
+    /// applied a version under those coordinates, and applying it again to the
+    /// relocated dependency would overwrite the version the relocation chose.
+    disable_version_management: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -362,6 +373,42 @@ fn process(
     pool_links: &mut Vec<(NodeId, NodeId)>,
     skipper: &mut Skipper,
 ) -> Result<(), CollectError> {
+    process_at(
+        source,
+        types,
+        management,
+        work,
+        collected,
+        next,
+        cycle_links,
+        pool,
+        pool_links,
+        skipper,
+        0,
+    )
+}
+
+/// How many times a relocation may point at another relocation.
+///
+/// Chains are one or two links in practice. The bound exists so a published POM
+/// that relocates to itself cannot recurse forever.
+const MAX_RELOCATIONS: usize = 16;
+
+/// One step, `depth` relocations deep.
+#[allow(clippy::too_many_arguments)]
+fn process_at(
+    source: &dyn DescriptorSource,
+    types: &TypeRegistry,
+    management: &Management,
+    work: &Work,
+    collected: &mut Collected,
+    next: &mut Vec<Work>,
+    cycle_links: &mut Vec<(NodeId, NodeId)>,
+    pool: &mut HashMap<PoolKey, NodeId>,
+    pool_links: &mut Vec<(NodeId, NodeId)>,
+    skipper: &mut Skipper,
+    depth: usize,
+) -> Result<(), CollectError> {
     // Selection happens before management, so a managed `<optional>` cannot
     // rescue a dependency the selector already dropped.
     if !work.selector.select(&work.dependency) {
@@ -369,11 +416,30 @@ fn process(
     }
 
     let mut dependency = work.dependency.clone();
-    let (managed, premanaged) = management.apply(&mut dependency, work.level);
+    let (managed, premanaged) =
+        management.apply(&mut dependency, work.level, work.disable_version_management);
 
     for version in candidate_versions(source, &dependency, types)? {
-        let mut artifact = dependency.to_artifact(types);
-        artifact.version = version.clone();
+        let mut requested = dependency.to_artifact(types);
+        requested.version = version.clone();
+
+        let descriptor = match source.descriptor(&requested) {
+            Ok(descriptor) => descriptor,
+            Err(reason) => {
+                collected
+                    .missing_descriptors
+                    .push(format!("{requested}: {reason}"));
+                Descriptor {
+                    artifact: requested.clone(),
+                    ..Default::default()
+                }
+            }
+        };
+        // The descriptor names what the artifact *is*, which differs from what
+        // was asked for when a relocation applied. Everything downstream — the
+        // cycle check included — works from the real coordinates, as upstream's
+        // `d = d.setArtifact(descriptorResult.getArtifact())` does.
+        let artifact = descriptor.artifact.clone();
 
         // Version is deliberately ignored: two versions of one artifact still
         // mean the producing projects form a cycle.
@@ -389,9 +455,11 @@ fn process(
             // otherwise borrow the root's child list and never be expanded,
             // silently dropping everything the real subtree contains.
             if collected.graph.node(ancestor).dependency.is_some() {
-                let mut node = Node::dependency(dependency.clone(), artifact.clone());
+                let mut node =
+                    Node::dependency(relocated(&dependency, &artifact), artifact.clone());
                 node.managed = managed;
                 node.premanaged = premanaged.clone();
+                node.relocations = work.relocations.clone();
                 let id = collected.graph.add(node);
                 collected.graph.add_child(work.parent, id);
                 cycle_links.push((id, ancestor));
@@ -399,24 +467,63 @@ fn process(
             }
         }
 
-        let descriptor = match source.descriptor(&artifact) {
-            Ok(descriptor) => descriptor,
-            Err(reason) => {
+        // A relocation is not a label on the node: upstream restarts the whole
+        // step with the relocated coordinates, so selection and management are
+        // re-decided against where the artifact actually lives. An exclusion or a
+        // managed version naming the *new* coordinates has to take effect, and
+        // neither would if the relocation were only recorded.
+        if !descriptor.relocations.is_empty() {
+            let moved = relocated(&dependency, &artifact);
+            // Re-selected, because an exclusion on the new coordinates applies.
+            if !work.selector.select(&moved) {
+                return Ok(());
+            }
+            let mut relocations = work.relocations.clone();
+            relocations.extend(descriptor.relocations.iter().cloned());
+            let step = Work {
+                parent: work.parent,
+                dependency: moved,
+                selector: work.selector.clone(),
+                level: work.level,
+                path: work.path.clone(),
+                relocations,
+                // Only when the coordinates are unchanged but for the version:
+                // management already spoke under this `groupId:artifactId`, and
+                // applying it again would undo the version the relocation chose.
+                disable_version_management: dependency.group_id == artifact.group_id
+                    && dependency.artifact_id == artifact.artifact_id,
+            };
+            if depth > MAX_RELOCATIONS {
                 collected
                     .missing_descriptors
-                    .push(format!("{artifact}: {reason}"));
-                Descriptor {
-                    artifact: artifact.clone(),
-                    ..Default::default()
-                }
+                    .push(format!("{artifact}: relocations are chained too deeply"));
+                return Ok(());
             }
-        };
+            process_at(
+                source,
+                types,
+                management,
+                &step,
+                collected,
+                next,
+                cycle_links,
+                pool,
+                pool_links,
+                skipper,
+                depth + 1,
+            )?;
+            // Upstream returns here rather than continuing the version loop, so a
+            // relocated range collapses to the one version it relocated from —
+            // which is what `transitiveDepsUseRangesAndRelocationDirtyTree`
+            // expects: three versions in, one node out.
+            return Ok(());
+        }
 
-        let mut node = Node::dependency(dependency.clone(), descriptor.artifact.clone());
+        let mut node = Node::dependency(dependency.clone(), artifact.clone());
         node.version_constraint = dependency.version.clone();
         node.managed = managed;
         node.premanaged = premanaged.clone();
-        node.relocations = descriptor.relocations.clone();
+        node.relocations = work.relocations.clone();
         let id = collected.graph.add(node);
         collected.graph.add_child(work.parent, id);
 
@@ -475,6 +582,8 @@ fn process(
                 selector: child_selector.clone(),
                 level: work.level + 1,
                 path: path.clone(),
+                relocations: Vec::new(),
+                disable_version_management: false,
             });
         }
         pool.insert(pooled, id);
@@ -495,6 +604,17 @@ struct PoolKey {
     artifact: Artifact,
     selector: Selector,
     management_stage: usize,
+}
+
+/// A dependency rewritten onto the coordinates it was relocated to.
+fn relocated(dependency: &Dependency, artifact: &Artifact) -> Dependency {
+    Dependency {
+        group_id: artifact.group_id.clone(),
+        artifact_id: artifact.artifact_id.clone(),
+        version: Some(artifact.version.clone()),
+        classifier: (!artifact.classifier.is_empty()).then(|| artifact.classifier.clone()),
+        ..dependency.clone()
+    }
 }
 
 /// The nearest ancestor with the same coordinates, ignoring the version.
@@ -633,7 +753,12 @@ impl Management {
     }
 
     /// Applies management to a dependency, reporting what it changed.
-    fn apply(&self, dependency: &mut Dependency, level: usize) -> (ManagedFlags, Premanaged) {
+    fn apply(
+        &self,
+        dependency: &mut Dependency,
+        level: usize,
+        disable_version_management: bool,
+    ) -> (ManagedFlags, Premanaged) {
         let key = gace(dependency);
         let mut flags = ManagedFlags::default();
         let mut premanaged = Premanaged::default();
@@ -658,7 +783,11 @@ impl Management {
             return (flags, premanaged);
         }
 
-        if let Some(version) = self.versions.get(&key) {
+        if let Some(version) = self
+            .versions
+            .get(&key)
+            .filter(|_| !disable_version_management)
+        {
             if dependency.version.as_deref() != Some(version.as_str()) {
                 premanaged.version = dependency.version.clone();
                 dependency.version = Some(version.clone());
@@ -772,7 +901,7 @@ mod tests {
         let management = Management::from(&managed);
         let mut target = dependency("a", "");
         target.version = None;
-        let (flags, premanaged) = management.apply(&mut target, 2);
+        let (flags, premanaged) = management.apply(&mut target, 2, false);
         assert_eq!(target.version.as_deref(), Some("1"));
         assert!(flags.version);
         assert_eq!(premanaged.version, None);
@@ -783,13 +912,13 @@ mod tests {
         let managed = vec![dependency("a", "9")];
         let management = Management::from(&managed);
         let mut direct = dependency("a", "1");
-        let (flags, _) = management.apply(&mut direct, 1);
+        let (flags, _) = management.apply(&mut direct, 1, false);
         // Level 1 is the model builder's business, not the resolver's.
         assert_eq!(direct.version.as_deref(), Some("1"));
         assert!(!flags.version);
 
         let mut transitive = dependency("a", "1");
-        let (flags, premanaged) = management.apply(&mut transitive, 2);
+        let (flags, premanaged) = management.apply(&mut transitive, 2, false);
         assert_eq!(transitive.version.as_deref(), Some("9"));
         assert!(flags.version);
         assert_eq!(premanaged.version.as_deref(), Some("1"));
@@ -802,7 +931,7 @@ mod tests {
         let management = Management::from(&[entry]);
 
         let mut direct = dependency("a", "1");
-        let (flags, _) = management.apply(&mut direct, 1);
+        let (flags, _) = management.apply(&mut direct, 1, false);
         // The one thing management does at level 1.
         assert!(flags.exclusions);
         assert_eq!(direct.exclusions, vec![Exclusion::new("x", "y")]);
@@ -816,7 +945,7 @@ mod tests {
         let management = Management::from(&[entry]);
 
         let mut target = dependency("a", "1");
-        let (flags, premanaged) = management.apply(&mut target, 2);
+        let (flags, premanaged) = management.apply(&mut target, 2, false);
         assert_eq!(target.scope, Some(Scope::Runtime));
         assert!(target.is_optional());
         assert!(flags.scope && flags.optional);

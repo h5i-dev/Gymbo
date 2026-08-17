@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 jv-model = { workspace = true }
+jv-version = { workspace = true }
 jv-resolver = { workspace = true }
 thiserror = { workspace = true }
 
