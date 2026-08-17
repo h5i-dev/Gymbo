@@ -28,7 +28,7 @@
 //! because the model builder already did that. What the resolver adds is
 //! reaching *transitive* dependencies, which the model builder cannot see.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use jv_model::{Artifact, Dependency, Exclusion, Scope, TypeRegistry};
 use jv_version::{Constraint, Version};
@@ -235,7 +235,10 @@ struct Skipper {
     leftmost: HashMap<Artifact, (usize, usize)>,
     /// Nodes expanded despite being duplicates, and everything below them, which
     /// must not displace the original winner.
-    forced: Vec<NodeId>,
+    /// A set, not a list: `cache` asks whether a node *or any of its ancestors*
+    /// is in here, once per node, so a list makes it O(forced x depth) per node
+    /// and quadratic over a deep graph. Upstream uses an identity map.
+    forced: HashSet<NodeId>,
 }
 
 impl Skipper {
@@ -265,7 +268,7 @@ impl Skipper {
             }
             // Left of where it won: expand anyway, because the leftmost path's
             // scope has to reach conflict resolution.
-            self.forced.push(node);
+            self.forced.insert(node);
         }
 
         self.leftmost.insert(artifact.clone(), coordinate);

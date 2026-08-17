@@ -147,7 +147,9 @@ fn build(
     visited[node.index()] = true;
     let depth = depth + 1;
 
-    for child in graph.children(node).to_vec() {
+    // By index: `pull_up` mutates `entries`, never the graph.
+    for index in 0..graph.children(node).len() {
+        let child = graph.children(node)[index];
         let Some(key) = conflict_ids.get(&child) else {
             continue;
         };
@@ -205,9 +207,13 @@ fn pull_up(entries: &mut Vec<Entry>, index: usize, depth: usize) {
 }
 
 /// A queue that always yields the id nearest the root, FIFO within one depth.
+///
+/// A deque rather than a vector: every id is popped from the front exactly once,
+/// and `Vec::remove(0)` shifts the whole queue each time, which is O(n^2) over a
+/// sort of n ids. Upstream uses an index-based ring buffer for the same reason.
 #[derive(Default)]
 struct RootQueue {
-    items: Vec<usize>,
+    items: std::collections::VecDeque<usize>,
 }
 
 impl RootQueue {
@@ -223,11 +229,7 @@ impl RootQueue {
     }
 
     fn pop(&mut self) -> Option<usize> {
-        if self.items.is_empty() {
-            None
-        } else {
-            Some(self.items.remove(0))
-        }
+        self.items.pop_front()
     }
 }
 

@@ -355,7 +355,11 @@ impl Resolver<'_> {
             return Ok(true);
         }
 
-        for child in graph.children(node).to_vec() {
+        // By index rather than through a copy: this runs once per node *per
+        // conflict id*, so the allocation was O(ids x edges) for a list nothing
+        // mutates — `gather` only ever adds to `round`.
+        for index in 0..graph.children(node).len() {
+            let child = graph.children(node)[index];
             if !self.gather(graph, round, child)? {
                 round.removals.push((node, child));
             }
