@@ -199,7 +199,12 @@ pub fn inject_default_values(model: &mut Model) {
         }
     }
     if let Some(build) = &mut model.build {
-        for plugin in build.plugins.iter_mut().chain(&mut build.plugin_management) {
+        // `<build><plugins>` only. `injectDefaultValues` walks the model's
+        // dependencies and the *build* plugins' dependencies, and leaves
+        // `<pluginManagement>` alone — checked against 3.9.9, whose effective POM
+        // shows a scope beside a build plugin's dependency and none beside the
+        // same dependency under pluginManagement.
+        for plugin in &mut build.plugins {
             for dependency in &mut plugin.dependencies {
                 if dependency.scope.is_none() {
                     dependency.scope = Some(Scope::Compile);
@@ -446,6 +451,30 @@ mod tests {
         assert_eq!(plugins.len(), 2);
         assert_eq!(plugins[0].artifact_id.as_deref(), Some("p"));
         assert_eq!(plugins[0].version.as_deref(), Some("2.0"));
+    }
+
+    #[test]
+    fn plugin_management_dependencies_keep_no_default_scope() {
+        // Maven's `injectDefaultValues` walks `model.dependencies` and
+        // `build.plugins[*].dependencies`, and stops there. Its effective POM
+        // shows `<scope>compile</scope>` beside a build plugin's dependency and
+        // nothing beside the same dependency under `<pluginManagement>`.
+        let mut model = model_of(
+            r#"<project><build>
+                 <pluginManagement><plugins><plugin><artifactId>managed</artifactId>
+                   <dependencies><dependency><groupId>d</groupId>
+                     <artifactId>a</artifactId></dependency></dependencies>
+                 </plugin></plugins></pluginManagement>
+                 <plugins><plugin><artifactId>built</artifactId>
+                   <dependencies><dependency><groupId>d</groupId>
+                     <artifactId>b</artifactId></dependency></dependencies>
+                 </plugin></plugins>
+               </build></project>"#,
+        );
+        inject_default_values(&mut model);
+        let build = model.build.as_ref().expect("a build section");
+        assert_eq!(build.plugins[0].dependencies[0].scope, Some(Scope::Compile));
+        assert_eq!(build.plugin_management[0].dependencies[0].scope, None);
     }
 
     #[test]
