@@ -245,6 +245,11 @@ fn build_node(line: usize, definition: &str) -> Result<Node, DslError> {
         artifact_id: artifact.artifact_id.clone(),
         version: Some(artifact.version.clone()),
         classifier: (!artifact.classifier.is_empty()).then(|| artifact.classifier.clone()),
+        // The coordinate's extension travels as the declared type, so that
+        // rebuilding the artifact from the dependency reproduces it. Upstream
+        // keeps the extension on the artifact and the type as a property of it;
+        // jv derives one from the other, so the type has to carry it.
+        type_: Some(artifact.extension.clone()),
         ..Default::default()
     };
     let mut node = Node {

@@ -32,6 +32,22 @@ pub struct Artifact {
     pub extension: String,
 }
 
+impl Default for Artifact {
+    /// An empty artifact whose extension is still `jar`.
+    ///
+    /// Deriving this would leave the extension empty, which is not a value any
+    /// Maven artifact has and would produce a file name ending in a bare dot.
+    fn default() -> Self {
+        Self {
+            group_id: String::new(),
+            artifact_id: String::new(),
+            version: String::new(),
+            classifier: String::new(),
+            extension: DEFAULT_EXTENSION.to_owned(),
+        }
+    }
+}
+
 impl Artifact {
     /// Builds a plain jar artifact.
     pub fn new(
