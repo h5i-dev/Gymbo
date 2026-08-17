@@ -556,12 +556,37 @@ sequentially in visit order.
 **Open:** the six Ring-3 projects end to end (the harness is built, the fixtures
 are synthetic); the benchmark table and its committed script.
 
-### M6 — `jv sync` + `setup-jv` GitHub Action
+### M6 — `jv sync` + `setup-jv` GitHub Action — built, gate blocked
 Both go-offline passes (§3.8), `_remote.repositories` writing, multi-module
 reactor, hardlink materialization.
-**Gate:** `jv sync && mvn -o verify` succeeds on all six Ring-3 projects;
-`setup-jv` action published with a real before/after CI-minutes number on a
-public repo.
+
+**Done:** `jv-driver`'s `sync` module runs both passes — the project's
+dependencies at test scope, then its plugins and their runtime dependencies —
+and hardlinks the result into `~/.m2/repository`, falling back to a copy across
+filesystems. `action.yml` is the `setup-jv` composite action, and
+`scripts/install.sh` is what it installs with.
+
+`_remote.repositories` is written, and `docs/spec/local-repository.md` records
+why it is written the way it is. The short version: Maven accepts a file that is
+mentioned *nowhere* in the tracking file, and rejects one that is mentioned but
+not under a repository the build has configured. So the dangerous state is a
+*partial* tracking file, and since a mirrored build's effective repository id is
+the mirror's rather than `central`, jv writes the unconditional
+locally-installed `<name>>=` form for everything it places.
+
+**Open:**
+
+- **The gate.** `crates/jv-driver/tests/sync_offline_maven.rs` runs real Maven
+  offline against a repository jv populated. It is `#[ignore]`d for one reason,
+  recorded on the test: jv does not yet inject lifecycle bindings, so
+  `maven-resources-plugin` is never in the effective model and never downloaded.
+  226 artifacts synced, none missing, and that plugin is the only error.
+- **Snapshots.** The file is placed under its timestamped name, but the
+  `maven-metadata-<repositoryId>.xml` Maven needs to find it offline is not
+  written, because the id in that file name is the effective (possibly mirror)
+  id and there is no unconditional fallback. `jv sync` warns rather than writing
+  something that would be right only sometimes.
+- The six Ring-3 projects, and the CI-minutes number.
 
 ### M7 — `jvx`
 Endpoint parsing, env store, main-class ladder, arg passthrough.
@@ -569,7 +594,15 @@ Endpoint parsing, env store, main-class ladder, arg passthrough.
 works from a cold cache; second run < 150ms to JVM exec; 20-tool smoke matrix
 (formatters, linters, checkstyle, pmd, jbang-style utilities) green.
 
-### M8 — v0.1 launch
+### M8 — v0.1 launch — mechanics done, launch not run
+**Done:** the benchmark table, from `scripts/benchmark.sh`, which refuses to
+report a time unless jv and Maven agree byte for byte first — 29x warm, 3.5x
+cold on the reference machine. `curl | sh` install with checksum verification,
+and a release workflow building the four supported targets.
+
+**Open:** Homebrew and binstall, the docs site, and the launch itself.
+
+Original scope, for the record:
 README (tree gif as `diff`-proof; honest cold/warm/startup benchmark table),
 `curl | sh` + Homebrew + binstall, docs site (own the search landing page),
 Show HN "jv: uv for the JVM", deep-dive blog post ("Why Maven has no lockfile —
