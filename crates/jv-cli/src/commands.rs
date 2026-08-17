@@ -1,19 +1,19 @@
 //! What each subcommand does.
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use jv_driver::{Config, Project, Session};
+use jv_driver::{Config, Project, Session, SyncRequest};
 use jv_model::{Artifact, Scope};
 use jv_resolver::{Graph, Verbosity};
 use jv_tree::{Options, render};
 use owo_colors::OwoColorize;
 
-use crate::args::{CommonArgs, ResolveArgs, TreeArgs};
+use crate::args::{CommonArgs, ResolveArgs, SyncArgs, TreeArgs};
 
 /// Builds the driver config the flags describe.
-fn config(common: &CommonArgs) -> Config {
+pub(crate) fn config(common: &CommonArgs) -> Config {
     let mut config = Config {
         user_settings: common.settings.clone(),
         global_settings: common.global_settings.clone(),
@@ -132,7 +132,7 @@ pub fn resolve(args: &ResolveArgs) -> Result<()> {
     if args.paths || args.classpath {
         let mut paths = Vec::new();
         for artifact in &artifacts {
-            let Some((_origin, path)) = session.source().materialize(artifact)? else {
+            let Some(materialized) = session.source().materialize(artifact)? else {
                 bail!(
                     "{}:{}:{} is not available in any configured repository",
                     artifact.group_id,
@@ -140,16 +140,13 @@ pub fn resolve(args: &ResolveArgs) -> Result<()> {
                     artifact.version
                 );
             };
-            paths.push(path);
+            paths.push(materialized.path);
         }
         if args.classpath {
-            let joined: Vec<String> = paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect();
-            // The platform separator, because this is meant to be pasted into a
-            // `java -cp` invocation.
-            out.push_str(&joined.join(if cfg!(windows) { ";" } else { ":" }));
+            // The same joining `jv exec` hands to the JVM, so a classpath pasted
+            // out of `jv resolve` and one built by `jvx` cannot disagree about
+            // the separator.
+            out.push_str(&jv_exec::class_path(&paths).to_string_lossy());
             out.push('\n');
         } else {
             for path in paths {
@@ -167,11 +164,91 @@ pub fn resolve(args: &ResolveArgs) -> Result<()> {
     Ok(())
 }
 
+/// `jv sync`.
+pub fn sync(args: &SyncArgs) -> Result<()> {
+    let mut config = config(&args.common);
+    // The plugins the lifecycle binds appear in no POM, and `mvn -o` stops at
+    // the first phase without them — so a sync that skips them produces a
+    // repository that looks complete and is not.
+    config.lifecycle_bindings = !args.no_plugins;
+
+    let session = Session::new(&config)?;
+    let root = project(&session, &args.common)?;
+    let targets: Vec<&Project> = if args.no_recursive {
+        vec![&root]
+    } else {
+        root.reactor()
+    };
+
+    let local_repository = if args.cache_only {
+        None
+    } else {
+        match args.local_repository.clone() {
+            Some(path) => Some(path),
+            None => Some(default_local_repository(&args.common)?),
+        }
+    };
+
+    let synced = jv_driver::sync(
+        &session,
+        &targets,
+        &SyncRequest {
+            plugins: !args.no_plugins,
+            plugin_dependencies: !args.no_plugins,
+            local_repository: local_repository.clone(),
+            ..SyncRequest::default()
+        },
+    )?;
+
+    report(&synced.warnings);
+    for missing in &synced.missing {
+        // Not an error: an optional dependency's jar and a plugin that lives in
+        // a repository this machine cannot see both land here, and neither
+        // should abort a sync of a thousand files.
+        eprintln!(
+            "{} {missing} is not in any configured repository",
+            "missing:".yellow()
+        );
+    }
+
+    match &local_repository {
+        Some(path) => println!(
+            "synced {} artifacts into {}",
+            synced.artifacts.len(),
+            path.display()
+        ),
+        None => println!(
+            "synced {} artifacts into jv's cache",
+            synced.artifacts.len()
+        ),
+    }
+    Ok(())
+}
+
+/// Where Maven keeps its local repository, according to the same settings the
+/// session read.
+fn default_local_repository(common: &CommonArgs) -> Result<PathBuf> {
+    let settings = config(common).load_settings()?;
+    match settings.local_repository.as_deref() {
+        Some(declared) if !declared.trim().is_empty() => Ok(PathBuf::from(declared.trim())),
+        _ => Ok(dirs_home()?.join(".m2").join("repository")),
+    }
+}
+
+fn dirs_home() -> Result<PathBuf> {
+    // The one place jv writes outside its own cache, so failing to find the home
+    // directory has to be an error rather than a silent no-op.
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| !home.as_os_str().is_empty())
+        .context("cannot find your home directory; pass --local-repository")
+}
+
 /// The artifacts a resolved graph selected, in preorder, excluding the root.
 ///
 /// Preorder rather than sorted, because that is the order Maven puts on a
 /// classpath and the order changes behaviour when two jars carry the same class.
-fn resolved_artifacts(graph: &Graph, scope: Option<Scope>) -> Vec<Artifact> {
+pub(crate) fn resolved_artifacts(graph: &Graph, scope: Option<Scope>) -> Vec<Artifact> {
     let mut artifacts = Vec::new();
     for (id, _depth) in graph.preorder() {
         if id == graph.root() {
@@ -251,7 +328,7 @@ fn write_output(path: Option<&Path>, text: &str) -> Result<()> {
 ///
 /// Standard error, not standard output, so `jv tree > file` still produces a
 /// file that is only the tree.
-fn report(warnings: &[String]) {
+pub(crate) fn report(warnings: &[String]) {
     for warning in warnings {
         eprintln!("{} {warning}", "warning:".yellow().bold());
     }

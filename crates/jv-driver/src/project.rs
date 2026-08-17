@@ -134,6 +134,7 @@ fn load_at(
 
     let built = ModelBuilder::new(source, source.context().clone())
         .with_settings_profiles(source.settings_profiles())
+        .with_lifecycle_bindings(source.lifecycle_bindings())
         .build(sourced)
         .map_err(|error| DriverError::Model {
             source_name: pom.display().to_string(),

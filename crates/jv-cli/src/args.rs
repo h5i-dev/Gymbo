@@ -25,6 +25,48 @@ pub enum Command {
     Tree(TreeArgs),
     /// List the resolved dependencies, one per line.
     Resolve(ResolveArgs),
+    /// Run a JVM tool straight from its Maven coordinates.
+    Exec(ExecArgs),
+    /// Download everything the build needs, so `mvn -o` works afterwards.
+    Sync(SyncArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SyncArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// Sync every module of a multi-module build.
+    #[arg(long, default_value_t = true)]
+    pub recursive: bool,
+
+    /// Only this module, even in a multi-module build.
+    #[arg(long, conflicts_with = "recursive")]
+    pub no_recursive: bool,
+
+    /// Where to put the artifacts. Defaults to Maven's local repository, which
+    /// is what makes `mvn -o` work.
+    #[arg(long, value_name = "DIR")]
+    pub local_repository: Option<PathBuf>,
+
+    /// Fill jv's own cache but do not touch Maven's local repository.
+    #[arg(long, conflicts_with = "local_repository")]
+    pub cache_only: bool,
+
+    /// Do not resolve the project's plugins.
+    ///
+    /// Faster, and enough for jv's own commands — but a repository synced this
+    /// way cannot run `mvn -o`, which is the usual reason to sync at all.
+    #[arg(long)]
+    pub no_plugins: bool,
+}
+
+/// The `jvx` binary: `jv exec` with the subcommand implied.
+#[derive(Debug, Parser)]
+#[command(name = "jvx", version, about = "Run a JVM tool straight from its Maven coordinates.", long_about = None)]
+pub struct Jvx {
+    #[command(flatten)]
+    pub exec: ExecArgs,
 }
 
 /// Options every command that resolves shares.
@@ -181,6 +223,38 @@ pub struct ResolveArgs {
     pub recursive: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct ExecArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// The class to run, overriding the jar's `Main-Class`.
+    ///
+    /// Also makes the endpoint's fields strictly positional, which is how a
+    /// classifier that looks like a class name is spelled.
+    #[arg(long = "main", value_name = "CLASS")]
+    pub main: Option<String>,
+
+    /// What to run: `group:artifact[:version[:classifier]][@mainClass]`.
+    #[arg(value_name = "ENDPOINT")]
+    pub endpoint: String,
+
+    /// Arguments for the tool, passed through untouched.
+    ///
+    /// Put `--` before any argument that starts with a dash, as `cargo run` and
+    /// `npx` do.
+    // That instruction is not a style preference. clap only starts reading this
+    // positional raw once it has taken a value, so `jvx tool --version` is the
+    // one arrangement where the flag is still jvx's, and no combination of clap
+    // settings fixes it while jvx has flags of its own. `--` always works.
+    #[arg(
+        value_name = "ARGS",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    pub args: Vec<String>,
+}
+
 /// The `--tokens` spellings, matching `dependency:tree`'s `-Dtokens`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum TokenStyle {
@@ -276,6 +350,80 @@ mod tests {
     #[test]
     fn asking_for_updates_and_no_updates_at_once_is_refused() {
         assert!(Cli::try_parse_from(["jv", "tree", "-U", "--no-update"]).is_err());
+    }
+
+    fn jvx(args: &[&str]) -> ExecArgs {
+        Jvx::try_parse_from(args).expect("valid arguments").exec
+    }
+
+    #[test]
+    fn the_jvx_command_definition_is_valid() {
+        Jvx::command().debug_assert();
+    }
+
+    #[test]
+    fn everything_after_a_double_dash_reaches_the_tool() {
+        let args = jvx(&["jvx", "g:a", "--", "--version"]);
+        assert_eq!(args.endpoint, "g:a");
+        // The `--` itself is jvx's separator and must not be forwarded, or every
+        // tool would see an argument it never expected.
+        assert_eq!(args.args, ["--version"]);
+    }
+
+    #[test]
+    fn a_plain_tool_argument_needs_no_double_dash() {
+        // Once the trailing positional has a value, everything after it is raw,
+        // flags included.
+        let args = jvx(&["jvx", "g:a", "Main.java", "--dry-run"]);
+        assert_eq!(args.args, ["Main.java", "--dry-run"]);
+    }
+
+    #[test]
+    fn a_flag_immediately_after_the_endpoint_is_still_jvxs() {
+        // Documented rather than fixed: clap has not entered raw mode yet, so
+        // `--version` here is jvx's own. The failure is loud, and `--` is the
+        // spelling that always reaches the tool.
+        assert!(Jvx::try_parse_from(["jvx", "g:a", "--version"]).is_err());
+    }
+
+    #[test]
+    fn jvx_options_are_read_before_the_endpoint() {
+        let args = jvx(&[
+            "jvx",
+            "-o",
+            "--main",
+            "com.example.Other",
+            "g:a:1.0",
+            "--",
+            "x",
+        ]);
+        assert!(args.common.offline);
+        assert_eq!(args.main.as_deref(), Some("com.example.Other"));
+        assert_eq!(args.endpoint, "g:a:1.0");
+        assert_eq!(args.args, ["x"]);
+    }
+
+    #[test]
+    fn a_double_dash_inside_the_tool_arguments_survives() {
+        // Only the first `--` is jvx's; a second one belongs to whatever the
+        // tool does with it.
+        let args = jvx(&["jvx", "g:a", "--", "run", "--", "nested"]);
+        assert_eq!(args.args, ["run", "--", "nested"]);
+    }
+
+    #[test]
+    fn jv_exec_takes_the_same_arguments_as_jvx() {
+        let cli = parse(&["jv", "exec", "g:a:1.0", "--", "--version"]);
+        let Command::Exec(exec) = cli.command else {
+            panic!("expected exec")
+        };
+        assert_eq!(exec.endpoint, "g:a:1.0");
+        assert_eq!(exec.args, ["--version"]);
+    }
+
+    #[test]
+    fn jvx_needs_an_endpoint() {
+        assert!(Jvx::try_parse_from(["jvx"]).is_err());
     }
 
     #[test]

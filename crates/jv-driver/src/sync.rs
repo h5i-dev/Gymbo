@@ -15,6 +15,22 @@
 //! plugins from three places — `<reporting><plugins>`, `<build><plugins>` and
 //! `<build><pluginManagement><plugins>` — in that order.
 //!
+//! # Plugins that choose dependencies at run time
+//!
+//! Surefire does not declare which test framework it will run. It inspects the
+//! test classpath at execution time and resolves a matching *provider* —
+//! `surefire-junit-platform` for JUnit 5, `surefire-testng` for TestNG, and so
+//! on — from coordinates that appear in no POM. `mvn dependency:go-offline` does
+//! not find them either: a repository it populated fails `mvn -o verify` at the
+//! test phase, which was confirmed by running it.
+//!
+//! jv does better rather than matching that, because "sync then build offline"
+//! is the entire proposition and a sync that cannot run tests does not deliver
+//! it. When surefire or failsafe is in the plugin set, jv fetches every provider
+//! at the plugin's own version. The list is small, stable, and versioned in
+//! lockstep with the plugin; a provider that does not exist for some version
+//! simply 404s and is skipped, which is already how a missing artifact behaves.
+//!
 //! # Known gap: snapshots
 //!
 //! A snapshot downloaded from a repository lives in Maven's local repository
@@ -160,6 +176,15 @@ pub fn sync(
                     for dependency in plugin_dependencies(session, &artifact, &plugin)? {
                         push(&mut wanted, &reactor, dependency);
                     }
+                    // And whatever the plugin will pick for itself at run time,
+                    // which is in no POM and which `go-offline` also misses.
+                    for extra in runtime_selected(&artifact) {
+                        push(&mut wanted, &reactor, extra.clone());
+                        for dependency in plugin_dependencies(session, &extra, &Plugin::default())?
+                        {
+                            push(&mut wanted, &reactor, dependency);
+                        }
+                    }
                 }
             }
         }
@@ -169,6 +194,8 @@ pub fn sync(
     // GAV, so they are collected as the artifacts are placed and written once at
     // the end. Writing per file would rewrite the same file three times.
     let mut tracking: BTreeMap<PathBuf, Tracking> = BTreeMap::new();
+    // What has already been dealt with, so the POM sweep below does not redo it.
+    let mut placed: BTreeSet<Artifact> = BTreeSet::new();
 
     for artifact in wanted {
         // The POM travels with the jar: Maven reads it on every resolve, and a
@@ -201,6 +228,7 @@ pub fn sync(
                             report.materialized.push(linked);
                         }
                     }
+                    placed.insert(candidate.clone());
                     report.artifacts.push(candidate);
                 }
                 None => report.missing.push(format!(
@@ -212,6 +240,27 @@ pub fn sync(
                 )),
             }
         }
+    }
+
+    // Every POM jv read on the way here, which is more than the POMs of the
+    // artifacts themselves: Maven walks each one's parents and imported BOMs
+    // when it re-reads them, and a missing grandparent POM fails a build whose
+    // jars are all present. jv already fetched them; they just have to travel.
+    for pom in session.source().read_poms() {
+        if placed.contains(&pom) {
+            continue;
+        }
+        let Some(found) = session.source().materialize(&pom)? else {
+            continue;
+        };
+        if let Some(local) = &request.local_repository {
+            let relative = session.source().repository_path(&pom)?;
+            if let Some(linked) = materialize(&found.path, local, &relative, &mut report)? {
+                record_tracking(&mut tracking, &linked, found.repository.as_deref())?;
+                report.materialized.push(linked);
+            }
+        }
+        report.artifacts.push(pom);
     }
 
     for (directory, entries) in &tracking {
@@ -298,6 +347,47 @@ fn project_plugins(project: &Project) -> Vec<Plugin> {
         }
     }
     plugins
+}
+
+/// Surefire's providers, which are versioned in lockstep with the plugin.
+///
+/// Surefire picks one of these at execution time by looking at what is on the
+/// test classpath, so none of them appears in any POM and no amount of static
+/// analysis finds them. Fetching all of them costs a few hundred kilobytes and
+/// is what lets `mvn -o test` run whichever framework the project actually uses.
+///
+/// `common-junit48` and `common-java5` are not providers but are what the JUnit
+/// providers depend on at the same version; they are listed because a provider's
+/// own POM is resolved through the same path and a missing one fails the same
+/// way.
+const SUREFIRE_PROVIDERS: &[&str] = &[
+    "surefire-junit-platform",
+    "surefire-junit47",
+    "surefire-junit4",
+    "surefire-junit3",
+    "surefire-testng",
+    "surefire-testng-utils",
+    "common-junit48",
+    "common-java5",
+];
+
+/// Artifacts a plugin will resolve for itself at execution time.
+///
+/// Returns nothing for every plugin but surefire and failsafe, which are the two
+/// in the default lifecycle that do this.
+fn runtime_selected(plugin: &Artifact) -> Vec<Artifact> {
+    let selects_providers = plugin.group_id == "org.apache.maven.plugins"
+        && matches!(
+            plugin.artifact_id.as_str(),
+            "maven-surefire-plugin" | "maven-failsafe-plugin"
+        );
+    if !selects_providers {
+        return Vec::new();
+    }
+    SUREFIRE_PROVIDERS
+        .iter()
+        .map(|provider| Artifact::new("org.apache.maven.surefire", *provider, &plugin.version))
+        .collect()
 }
 
 /// A plugin's own artifact, if it states a version.

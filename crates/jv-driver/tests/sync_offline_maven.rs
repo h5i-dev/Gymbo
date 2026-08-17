@@ -104,12 +104,6 @@ class GreetingTest {
     .unwrap();
 }
 
-// Blocked on lifecycle-bindings injection in `jv-model-builder`. Without it the
-// effective model carries no `maven-resources-plugin`, so `jv sync` never
-// downloads it and Maven stops at the first phase. The run is otherwise sound:
-// 226 artifacts synced, none missing, and the only error is that one plugin.
-// Remove this attribute when the bindings land.
-#[ignore = "needs lifecycle-bindings injection; see the comment above"]
 #[test]
 fn a_synced_repository_builds_offline() {
     let mvn = match maven() {
@@ -137,6 +131,9 @@ fn a_synced_repository_builds_offline() {
     let config = Config {
         cache: Some(cache.clone()),
         user_settings: Some(settings.clone()),
+        // The plugins the lifecycle binds appear in no POM, and `mvn -o` stops
+        // at the first phase without them.
+        lifecycle_bindings: true,
         ..Config::new().without_local_repository()
     };
     let session = Session::new(&config).expect("a session");

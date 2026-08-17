@@ -25,6 +25,23 @@ Mappings to default lifecycle, specific for each packaging.
 
 -->
 
+<!--
+Vendored verbatim from Maven 3.9.9, Apache-2.0 (the header above is Maven's own).
+
+  Source:     META-INF/plexus/default-bindings.xml in maven-core-3.9.9.jar
+  Regenerate: unzip -p $MAVEN_HOME/lib/maven-core-3.9.9.jar \
+                  META-INF/plexus/default-bindings.xml
+
+Only the `default` lifecycle is here. The `clean` and `site` lifecycles bind
+plugins from META-INF/plexus/components.xml in the same jar, are the same for
+every packaging, and are spelled out as constants in src/lifecycle.rs.
+
+Nothing below this comment has been edited, so a diff against a freshly
+extracted copy shows this comment block and nothing else. Keep it that way:
+correcting the data here rather than upstream would make jv bind plugins no
+Maven binds.
+-->
+
 <component-set>
   <components>
     <!--

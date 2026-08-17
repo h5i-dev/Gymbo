@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use jv_model::{Dependency, Model, parse_pom};
+use jv_model::{Dependency, Model, Plugin, PluginExecution, parse_pom};
 use jv_model_builder::{BuildContext, ModelBuilder, ModelSource, SourcedModel};
 
 /// Finds a Maven launcher, or explains why there is none.
@@ -141,7 +141,10 @@ fn jv_effective_pom(project: &Path) -> Result<Model, String> {
     let source = LocalModelSource {
         local_repository: local_repository(),
     };
+    // Maven builds a *project* model, which always has plugin processing on, so
+    // the comparison is only like-for-like with the bindings injected.
     let built = ModelBuilder::new(&source, BuildContext::from_environment())
+        .with_lifecycle_bindings(true)
         .build(SourcedModel::new(model, pom.display().to_string()).with_basedir(project))
         .map_err(|error| error.to_string())?;
     Ok(built.model)
@@ -163,6 +166,50 @@ fn describe(dependency: &Dependency) -> String {
         text.push_str(&format!(" excluding [{}]", exclusions.join(", ")));
     }
     text
+}
+
+/// A plugin rendered so that a mismatch reads clearly: coordinates, then every
+/// execution as `id@phase[goals]`.
+///
+/// Executions are the part worth comparing. The coordinates alone would pass with
+/// a plugin bound to no phase at all, which is exactly the mistake a hand-written
+/// binding table makes.
+fn describe_plugin(plugin: &Plugin) -> String {
+    let mut text = format!(
+        "{}:{}:{}",
+        plugin.group_id_or_default(),
+        plugin.artifact_id.as_deref().unwrap_or("?"),
+        plugin.version.as_deref().unwrap_or("?")
+    );
+    let executions: Vec<String> = plugin.executions.iter().map(describe_execution).collect();
+    if !executions.is_empty() {
+        text.push_str(&format!(" {{{}}}", executions.join(" ")));
+    }
+    text
+}
+
+fn describe_execution(execution: &PluginExecution) -> String {
+    format!(
+        "{}@{}[{}]",
+        execution.id_or_default(),
+        execution.phase.as_deref().unwrap_or("-"),
+        execution.goals.join(",")
+    )
+}
+
+fn describe_plugins(model: &Model) -> String {
+    model
+        .build
+        .as_ref()
+        .map(|build| {
+            build
+                .plugins
+                .iter()
+                .map(describe_plugin)
+                .collect::<Vec<_>>()
+                .join("\n       ")
+        })
+        .unwrap_or_default()
 }
 
 /// Compares the parts of a model jv claims to reproduce.
@@ -227,6 +274,14 @@ fn compare(project: &Path, expected: &Model, actual: &Model, failures: &mut Vec<
             .map(describe)
             .collect::<Vec<_>>()
             .join("\n       "),
+    );
+
+    // Build plugins, in order: this is the only check on the lifecycle bindings
+    // that does not just compare jv against jv's own copy of the binding table.
+    mismatch(
+        "build plugins",
+        describe_plugins(expected),
+        describe_plugins(actual),
     );
 
     // Properties: Maven adds a few of its own that jv has no reason to invent, so

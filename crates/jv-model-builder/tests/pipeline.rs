@@ -787,6 +787,61 @@ fn the_super_poms_plugin_management_is_available() {
 }
 
 #[test]
+fn lifecycle_bindings_stay_out_unless_asked_for() {
+    // Resolving dependencies never reads <build><plugins>, so the callers that
+    // only resolve must not start paying for a plugin list.
+    let built = build(
+        r#"<project><groupId>g</groupId><artifactId>a</artifactId><version>1.0</version></project>"#,
+        &[],
+    );
+    assert!(
+        built
+            .model
+            .build
+            .as_ref()
+            .is_none_or(|build| build.plugins.is_empty())
+    );
+}
+
+#[test]
+fn lifecycle_bindings_are_injected_after_plugin_management() {
+    // The pin is only reachable by the lifecycle merge: pluginManagement
+    // injection ran while <plugins> was still empty.
+    let mut source = MapModelSource::new();
+    source.insert(
+        "g",
+        "parent",
+        "1.0",
+        r#"<project>
+             <groupId>g</groupId><artifactId>parent</artifactId><version>1.0</version>
+             <build><pluginManagement><plugins>
+               <plugin><artifactId>maven-surefire-plugin</artifactId><version>3.5.0</version></plugin>
+             </plugins></pluginManagement></build>
+           </project>"#,
+    );
+    let child = parse_pom(
+        r#"<project>
+             <parent><groupId>g</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+             <artifactId>a</artifactId>
+           </project>"#,
+    )
+    .expect("child parses")
+    .model;
+    let built = ModelBuilder::new(&source, BuildContext::empty())
+        .with_lifecycle_bindings(true)
+        .build(SourcedModel::new(child, "test/pom.xml"))
+        .expect("build succeeds");
+
+    let plugins = &built.model.build.as_ref().expect("a build section").plugins;
+    let surefire = plugins
+        .iter()
+        .find(|plugin| plugin.artifact_id.as_deref() == Some("maven-surefire-plugin"))
+        .expect("surefire is bound to the jar lifecycle");
+    assert_eq!(surefire.version.as_deref(), Some("3.5.0"));
+    assert_eq!(surefire.executions[0].phase.as_deref(), Some("test"));
+}
+
+#[test]
 fn scope_and_optional_survive_the_pipeline_intact() {
     let built = build(
         r#"<project>

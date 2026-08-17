@@ -108,6 +108,9 @@ pub struct RepositorySource {
     /// applies to repositories discovered later too, which is why it lives here
     /// rather than being baked into the list once.
     forced_update: Option<jv_repo::UpdatePolicy>,
+    /// Whether effective models should carry the lifecycle's plugins. Only
+    /// `jv sync` wants them.
+    lifecycle_bindings: bool,
 }
 
 impl std::fmt::Debug for RepositorySource {
@@ -150,7 +153,20 @@ impl RepositorySource {
             warnings: Arc::default(),
             prefetch: true,
             forced_update: None,
+            lifecycle_bindings: false,
         }
+    }
+
+    /// Injects the plugins the packaging's lifecycle binds into every model this
+    /// source builds.
+    pub fn with_lifecycle_bindings(mut self, enabled: bool) -> Self {
+        self.lifecycle_bindings = enabled;
+        self
+    }
+
+    /// Whether lifecycle bindings are injected.
+    pub fn lifecycle_bindings(&self) -> bool {
+        self.lifecycle_bindings
     }
 
     /// Forces an update policy on every repository, present and future.
@@ -378,6 +394,7 @@ impl RepositorySource {
 
         let built = ModelBuilder::new(self, self.context.clone())
             .with_settings_profiles(&self.settings.profiles)
+            .with_lifecycle_bindings(self.lifecycle_bindings)
             .build(SourcedModel::new(parsed.model, source_name.clone()))
             .map_err(|source| DriverError::Model {
                 source_name,
@@ -392,6 +409,26 @@ impl RepositorySource {
         }
         self.register_repositories(&built.model);
         Ok(Some(built.model))
+    }
+
+    /// Every POM this source has successfully read.
+    ///
+    /// `jv sync` needs this and nothing else needs it. Maven re-reads every POM
+    /// in the local repository and walks its parents and its imported BOMs, so a
+    /// jar whose grandparent POM or whose surefire BOM is absent fails to
+    /// resolve offline even though the jar itself is right there. jv already
+    /// fetched every one of those POMs during resolution — the model builder
+    /// reaches parents and BOMs through the same `ModelSource::get` that fills
+    /// this memo — so the memo is exactly the set Maven will look for, and is a
+    /// superset of any per-artifact parent walk.
+    pub fn read_poms(&self) -> Vec<Artifact> {
+        self.poms
+            .lock()
+            .expect("poms")
+            .iter()
+            .filter(|(_, text)| text.is_some())
+            .filter_map(|(key, _)| parse_coordinates(key))
+            .collect()
     }
 
     /// Records the repositories a POM declares so later fetches can use them.
@@ -680,6 +717,26 @@ fn relocation_message(model: &Model) -> Option<&str> {
         .as_ref()?
         .message
         .as_deref()
+}
+
+/// Reads a `g:a:v` string back into an artifact.
+///
+/// The lineage records coordinates as strings because a POM's source may be a
+/// file path rather than coordinates; anything that is not three colon-separated
+/// fields is one of those and is skipped.
+fn parse_coordinates(text: &str) -> Option<Artifact> {
+    let mut fields = text.split(':');
+    let (group_id, artifact_id, version) = (fields.next()?, fields.next()?, fields.next()?);
+    if fields.next().is_some() || version.contains('$') {
+        return None;
+    }
+    Some(Artifact {
+        group_id: group_id.to_owned(),
+        artifact_id: artifact_id.to_owned(),
+        version: version.to_owned(),
+        classifier: String::new(),
+        extension: POM.to_owned(),
+    })
 }
 
 fn coordinates(artifact: &Artifact) -> String {

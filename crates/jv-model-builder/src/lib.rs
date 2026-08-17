@@ -27,11 +27,9 @@
 //!
 //! Deliberate, and disclosed rather than silently wrong:
 //!
-//! - **Lifecycle-bindings injection.** It decides which plugins a *build* runs;
-//!   jv does not run builds. This makes jv's plugin list narrower than Maven's,
-//!   which matters only to `jv sync`.
-//! - **Build extensions** are parsed but not loaded, so extension-contributed
-//!   packaging types and lifecycle plugins are invisible.
+//! - **Build extensions** are parsed but not loaded, so a packaging an extension
+//!   contributes — `bundle`, `nbm` — has no known lifecycle bindings, and the
+//!   plugins it would bind are reported as a warning instead of injected.
 //! - **`<scm>` and `<distributionManagement><site>`** are not modelled, so the
 //!   child-path URL appending Maven applies to them has nothing to apply to.
 //!   `project.url` *is* adjusted.
@@ -91,6 +89,7 @@ mod activation;
 mod builder;
 mod context;
 mod interpolate;
+mod lifecycle;
 mod management;
 mod merge;
 mod problem;
@@ -100,6 +99,7 @@ pub use activation::{ActivationContext, ProfileSource, select_active_profiles};
 pub use builder::{EffectiveModel, ModelBuilder, build_effective_model};
 pub use context::{BuildContext, JAVA_VERSION, OS_ARCH, OS_NAME, OS_VERSION};
 pub use interpolate::{Interpolator, interpolate_model, replace_ci_friendly_version};
+pub use lifecycle::{inject_lifecycle_bindings, lifecycle_plugins};
 pub use management::{
     extract_bom_imports, inject_default_values, inject_dependency_management,
     inject_plugin_management, merge_duplicates, merge_imported_management,

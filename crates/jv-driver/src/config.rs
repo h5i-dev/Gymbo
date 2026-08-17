@@ -43,6 +43,13 @@ pub struct Config {
     /// explicitly to resolve as a different JDK would — which is what makes a
     /// resolve reproducible across machines.
     pub java_version: Option<String>,
+    /// Inject the plugins the packaging's lifecycle binds.
+    ///
+    /// Off by default, because resolving dependencies never reads
+    /// `<build><plugins>` and `jv tree` would be paying for a list nothing looks
+    /// at. `jv sync` turns it on: those plugins are artifacts a later `mvn -o`
+    /// will demand from the local repository, and they appear in no POM.
+    pub lifecycle_bindings: bool,
     /// The repositories to start from, replacing Maven Central.
     ///
     /// POMs may still add more as they are read; this only decides where the

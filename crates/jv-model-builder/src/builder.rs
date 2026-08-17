@@ -21,14 +21,17 @@
 //! phase 2
 //!   translate relative build paths against the project directory
 //!   inject pluginManagement
+//!   inject the lifecycle bindings (opt-in)
 //!   import BOMs
 //!   inject dependencyManagement
 //!   materialize the compile scope default
 //! ```
 //!
-//! Lifecycle-bindings injection is absent on purpose: it exists to decide which
-//! plugins a build runs, and jv does not run builds. `jv sync` reports that as a
-//! known gap rather than pretending its plugin list is complete.
+//! Lifecycle bindings come *after* pluginManagement injection, and that is not an
+//! arrangement of convenience: the injection pass can only reach plugins already
+//! in `<plugins>`, so putting it first is what leaves the merge in
+//! [`crate::lifecycle`] responsible for letting a managed version beat the
+//! version a lifecycle binds.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -38,6 +41,7 @@ use jv_model::{Dependency, Model, Profile, SettingsProfile, parse_pom};
 use crate::activation::{ActivationContext, ProfileSource, select_active_profiles};
 use crate::context::BuildContext;
 use crate::interpolate::{interpolate_model, replace_ci_friendly_version};
+use crate::lifecycle::inject_lifecycle_bindings;
 use crate::management::{
     extract_bom_imports, inject_default_values, inject_dependency_management,
     inject_plugin_management, merge_duplicates, merge_imported_management,
@@ -95,6 +99,7 @@ pub struct ModelBuilder<'a> {
     source: &'a dyn ModelSource,
     context: BuildContext,
     external_profiles: Vec<Profile>,
+    lifecycle_bindings: bool,
 }
 
 impl std::fmt::Debug for ModelBuilder<'_> {
@@ -102,6 +107,7 @@ impl std::fmt::Debug for ModelBuilder<'_> {
         f.debug_struct("ModelBuilder")
             .field("context", &self.context)
             .field("external_profiles", &self.external_profiles.len())
+            .field("lifecycle_bindings", &self.lifecycle_bindings)
             .finish_non_exhaustive()
     }
 }
@@ -112,6 +118,7 @@ impl<'a> ModelBuilder<'a> {
             source,
             context,
             external_profiles: Vec::new(),
+            lifecycle_bindings: false,
         }
     }
 
@@ -124,9 +131,22 @@ impl<'a> ModelBuilder<'a> {
         self
     }
 
+    /// Adds the plugins the packaging's lifecycle binds, the way Maven does for a
+    /// request with `processPlugins` set.
+    ///
+    /// Off by default, matching `DefaultModelBuildingRequest`: resolving
+    /// dependencies never reads `<build><plugins>`, so `jv tree` and `jv resolve`
+    /// would be paying for a plugin list nothing looks at. `jv sync` needs it,
+    /// because the plugins are artifacts a later `mvn -o` will demand from the
+    /// local repository.
+    pub fn with_lifecycle_bindings(mut self, enabled: bool) -> Self {
+        self.lifecycle_bindings = enabled;
+        self
+    }
+
     /// Builds the effective model for an already-read POM.
     pub fn build(&self, root: SourcedModel) -> Result<EffectiveModel, BuildError> {
-        self.build_with_import_chain(root, &mut Vec::new())
+        self.build_with_import_chain(root, &mut Vec::new(), self.lifecycle_bindings)
     }
 
     /// The pipeline, threading the BOM-import chain so that a BOM's own imports
@@ -135,6 +155,7 @@ impl<'a> ModelBuilder<'a> {
         &self,
         root: SourcedModel,
         import_ids: &mut Vec<String>,
+        lifecycle_bindings: bool,
     ) -> Result<EffectiveModel, BuildError> {
         let mut problems = Vec::new();
         let mut active_profiles = Vec::new();
@@ -284,6 +305,9 @@ impl<'a> ModelBuilder<'a> {
         // Phase 2.
         translate_paths(&mut assembled, basedir.as_deref());
         inject_plugin_management(&mut assembled);
+        if lifecycle_bindings {
+            inject_lifecycle_bindings(&mut assembled, &source_name, &mut problems);
+        }
         self.import_boms(&mut assembled, &source_name, import_ids, &mut problems);
         inject_dependency_management(&mut assembled);
         inject_default_values(&mut assembled);
@@ -429,8 +453,10 @@ impl<'a> ModelBuilder<'a> {
         };
 
         // A BOM is built like any other POM, sharing the outer cycle-detection
-        // chain so that a loop spanning two levels is still caught.
-        let mut built = match self.build_with_import_chain(sourced, import_ids) {
+        // chain so that a loop spanning two levels is still caught. Its lifecycle
+        // bindings are never injected: only its `<dependencyManagement>` is read,
+        // and upstream builds an imported POM with plugin processing off too.
+        let mut built = match self.build_with_import_chain(sourced, import_ids, false) {
             Ok(built) => built,
             Err(error) => {
                 problems.push(Problem::error(

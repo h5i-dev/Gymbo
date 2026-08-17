@@ -230,7 +230,9 @@ fn build_source(
         &declared,
     );
 
-    Ok(source.with_forced_update(config.update))
+    Ok(source
+        .with_forced_update(config.update)
+        .with_lifecycle_bindings(config.lifecycle_bindings))
 }
 
 #[cfg(test)]

@@ -36,7 +36,12 @@ pub fn render(graph: &Graph, options: Options) -> String {
     );
     let mut path = Vec::new();
     write_edges(graph, root, &mut path, options.verbose, &mut out);
-    out.push_str(" }\x20\n");
+    // No newline after the footer. Upstream's `endVisit` appends a line
+    // separator, but the plugin writes the visitor's output verbatim and every
+    // released version through 3.8.1 produces a file whose last byte is the
+    // space in `" } "` — verified by running 3.6.1, 3.7.0 and 3.8.1. Adding one
+    // is a one-byte difference, and byte parity is the whole claim.
+    out.push_str(" }\x20");
     out
 }
 
@@ -107,7 +112,9 @@ mod tests {
                 "\t\"com.example:demo:jar:1.0\" -> \"g:a:jar:1.0:compile\" ;\x20\n",
                 "\t\"com.example:demo:jar:1.0\" -> \"g:b:jar:2.0:test\" ;\x20\n",
                 "\t\"g:a:jar:1.0:compile\" -> \"g:c:jar:3.0:compile\" ;\x20\n",
-                " }\x20\n",
+                // No trailing newline: verified against plugin 3.6.1, 3.7.0 and
+                // 3.8.1, whose output's last byte is this space.
+                " }\x20",
             )
         );
     }
@@ -117,7 +124,7 @@ mod tests {
         let graph = Graph::new(project_root("com.example", "demo", "1.0"));
         assert_eq!(
             render(&graph, Options::default()),
-            "digraph \"com.example:demo:jar:1.0\" {\x20\n }\x20\n"
+            "digraph \"com.example:demo:jar:1.0\" {\x20\n }\x20"
         );
     }
 

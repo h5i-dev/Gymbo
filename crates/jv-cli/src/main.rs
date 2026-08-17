@@ -4,40 +4,30 @@
 //! the crates beneath it, so that the same work is reachable from a library and
 //! testable without a subprocess.
 
-mod args;
-mod commands;
+use std::process::ExitCode;
 
 use clap::Parser;
+use jv_cli::args::{Cli, Command};
+use jv_cli::{commands, exec, report_error};
 
-use crate::args::{Cli, Command};
-
-fn main() -> std::process::ExitCode {
+fn main() -> ExitCode {
     // The driver blocks on async work, so the session must not run on a tokio
     // worker thread. Keeping `main` synchronous is what guarantees that.
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::Tree(args) => commands::tree(args),
-        Command::Resolve(args) => commands::resolve(args),
+        Command::Tree(args) => commands::tree(args).map(|()| ExitCode::SUCCESS),
+        Command::Resolve(args) => commands::resolve(args).map(|()| ExitCode::SUCCESS),
+        // `jv exec` reports the tool's exit code as its own, so unlike the other
+        // subcommands it decides the code rather than merely succeeding.
+        Command::Exec(args) => exec::run(args),
+        Command::Sync(args) => commands::sync(args).map(|()| ExitCode::SUCCESS),
     };
 
     match result {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
-            report(&error);
-            std::process::ExitCode::FAILURE
+            report_error(&error);
+            ExitCode::FAILURE
         }
-    }
-}
-
-/// Prints an error and everything that caused it.
-///
-/// The chain matters: "cannot resolve a project" alone sends someone looking in
-/// the wrong place, while the `checksum mismatch` three levels down is the
-/// actual answer.
-fn report(error: &anyhow::Error) {
-    use owo_colors::OwoColorize;
-    eprintln!("{} {error}", "error:".red().bold());
-    for cause in error.chain().skip(1) {
-        eprintln!("  {} {cause}", "caused by:".dimmed());
     }
 }

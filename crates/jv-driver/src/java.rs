@@ -26,12 +26,39 @@ pub fn detect_version() -> Option<String> {
     None
 }
 
+/// The `java` executable jv would launch, or `None` when there is none.
+///
+/// Same ladder as [`detect_version`], and deliberately not the same
+/// implementation: this one never starts a JVM. `jvx` is on a latency budget
+/// measured against `npx`, and `java -version` costs the better part of a
+/// hundred milliseconds — more than the whole warm path is allowed. So the
+/// executable is found by looking at the filesystem, and whether it runs is
+/// something the launch itself will report.
+pub fn executable() -> Option<PathBuf> {
+    if let Some(path) = java_home_executable() {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(EXECUTABLE))
+        .find(|candidate| candidate.is_file())
+}
+
+/// The file name a JVM is installed under.
+const EXECUTABLE: &str = if cfg!(windows) { "java.exe" } else { "java" };
+
+fn java_home_executable() -> Option<PathBuf> {
+    std::env::var_os("JAVA_HOME").map(|home| PathBuf::from(home).join("bin").join(EXECUTABLE))
+}
+
 fn candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(home) = std::env::var_os("JAVA_HOME") {
-        candidates.push(PathBuf::from(home).join("bin").join("java"));
+    if let Some(path) = java_home_executable() {
+        candidates.push(path);
     }
-    candidates.push(PathBuf::from("java"));
+    // Bare, so the OS resolves it against PATH the way a shell would.
+    candidates.push(PathBuf::from(EXECUTABLE));
     candidates
 }
 

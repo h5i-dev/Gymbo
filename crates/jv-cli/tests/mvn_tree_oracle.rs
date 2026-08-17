@@ -10,6 +10,12 @@
 //! is what CI does so that a missing Maven cannot quietly turn this into a
 //! no-op.
 //!
+//! Every output format is compared, not just text. `tgf` and `graphml` id their
+//! nodes with `Object.hashCode()`, which is a JVM identity hash and cannot be
+//! reproduced by anything; those two are compared with ids normalised to their
+//! order of first appearance, which still pins every label, every edge and the
+//! whole document structure. `text`, `dot` and `json` are compared byte for byte.
+//!
 //! # Why the fixtures are what they are
 //!
 //! Each project is chosen for a resolution behaviour, not for being popular:
@@ -215,21 +221,123 @@ impl Fixture {
     }
 }
 
-/// Runs `mvn dependency:tree` and returns just the tree.
+/// The output formats to compare, and how.
 ///
-/// Maven wraps every line in `[INFO] ` and surrounds the tree with build
-/// chatter, so the tree has to be cut out of the log. The root line is the
-/// project's own coordinates; the tree runs to the first blank or non-tree line.
-fn maven_tree(mvn: &Path, project: &Path, local_repository: &Path) -> Result<String, String> {
+/// `json` arrived in maven-dependency-plugin 3.7.0 — 3.6.1 silently falls back
+/// to text for an unknown `-DoutputType`, which is the behaviour jv's own
+/// `Format::from_str` deliberately refuses to copy.
+const FORMATS: &[(&str, Comparison)] = &[
+    ("text", Comparison::Bytes),
+    ("dot", Comparison::Bytes),
+    ("json", Comparison::Bytes),
+    ("tgf", Comparison::ModuloNodeIds),
+    ("graphml", Comparison::ModuloNodeIds),
+];
+
+/// How exactly a format can be compared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Comparison {
+    Bytes,
+    /// Upstream ids nodes with `Object.hashCode()` — a JVM identity hash, which
+    /// differs between runs of Maven itself. Everything except the id values is
+    /// still compared exactly.
+    ModuloNodeIds,
+}
+
+/// The plugin version to run.
+///
+/// Pinned so this test does not change meaning when a new plugin is released,
+/// and 3.7.0 rather than 3.6.1 because it is both what Maven 3.9.9's super POM
+/// selects and the first version that implements `-DoutputType=json`.
+const PLUGIN: &str = "org.apache.maven.plugins:maven-dependency-plugin:3.7.0:tree";
+
+/// Renumbers node ids in order of first appearance, so two documents that
+/// differ only in unreproducible ids compare equal.
+///
+/// Deliberately narrow. Only two shapes are rewritten: a line beginning with
+/// digits followed by a space (tgf's node line), and the value of an `id`,
+/// `source` or `target` attribute when it is entirely digits (graphml). A
+/// label, a coordinate or a version is never touched, so a real difference
+/// cannot hide behind this.
+fn normalize_ids(text: &str) -> String {
+    let mut ids: Vec<String> = Vec::new();
+    let mut out = String::with_capacity(text.len());
+
+    for line in text.lines() {
+        let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0 && line[digits..].starts_with(' ') {
+            out.push_str(&renumber(&mut ids, &line[..digits]));
+            out.push_str(&rewrite_attributes(&mut ids, &line[digits..]));
+        } else {
+            out.push_str(&rewrite_attributes(&mut ids, line));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Replaces each all-digit `id`/`source`/`target` attribute value.
+fn rewrite_attributes(ids: &mut Vec<String>, line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some((before, name, value, after)) = next_attribute(rest) {
+        out.push_str(before);
+        out.push_str(&format!("{name}=\"{}\"", renumber(ids, value)));
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The next `id="…"`, `source="…"` or `target="…"` whose value is all digits.
+fn next_attribute(text: &str) -> Option<(&str, &'static str, &str, &str)> {
+    let mut search_from = 0;
+    loop {
+        let (at, name) = ["id", "source", "target"]
+            .into_iter()
+            .filter_map(|name| {
+                text[search_from..]
+                    .find(&format!("{name}=\""))
+                    .map(|offset| (search_from + offset, name))
+            })
+            .min_by_key(|(at, _)| *at)?;
+        let value_start = at + name.len() + 2;
+        let value_end = value_start + text[value_start..].find('"')?;
+        let value = &text[value_start..value_end];
+        if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Some((&text[..at], name, value, &text[value_end + 1..]));
+        }
+        // Not an id we rewrite; keep looking past it.
+        search_from = value_end + 1;
+    }
+}
+
+/// `N0`, `N1`, … in order of first appearance.
+fn renumber(ids: &mut Vec<String>, value: &str) -> String {
+    let index = match ids.iter().position(|held| held == value) {
+        Some(index) => index,
+        None => {
+            ids.push(value.to_owned());
+            ids.len() - 1
+        }
+    };
+    format!("N{index}")
+}
+
+/// Runs `mvn dependency:tree` in one output format and returns what it wrote.
+fn maven_tree(
+    mvn: &Path,
+    project: &Path,
+    local_repository: &Path,
+    format: &str,
+) -> Result<String, String> {
     let output = Command::new(mvn)
         .current_dir(project)
         .arg("-q")
         .arg("--batch-mode")
-        .arg("-Dmaven.repo.local")
         .arg(format!("-Dmaven.repo.local={}", local_repository.display()))
-        // Pinning the plugin version keeps this test from changing meaning when
-        // a new dependency-plugin is released.
-        .arg("org.apache.maven.plugins:maven-dependency-plugin:3.6.1:tree")
+        .arg(PLUGIN)
+        .arg(format!("-DoutputType={format}"))
         .arg("-DoutputFile=tree.txt")
         .arg("-DappendOutput=false")
         .output()
@@ -254,10 +362,12 @@ fn maven_tree(mvn: &Path, project: &Path, local_repository: &Path) -> Result<Str
 /// nothing and neither is advantaged by a cache the other does not have. `HOME`
 /// is redirected at the project so a developer's own `settings.xml` cannot
 /// change what this resolves.
-fn jv_tree(project: &Path, cache: &Path) -> Result<String, String> {
+fn jv_tree(project: &Path, cache: &Path, format: &str) -> Result<String, String> {
     let output = Command::new(jv_binary())
         .current_dir(project)
         .arg("tree")
+        .arg("--output-type")
+        .arg(format)
         .arg("--cache-dir")
         .arg(cache)
         .arg("--no-local-repository")
@@ -275,9 +385,18 @@ fn jv_tree(project: &Path, cache: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Trailing whitespace and line endings differ between the plugin's file output
-/// and jv's stdout; neither is a resolution difference.
-fn normalize(text: &str) -> String {
+/// The comparable form of a document.
+///
+/// Line endings and trailing whitespace differ between the plugin's file writer
+/// and jv's stdout, and neither is a resolution difference. Everything else is
+/// left exactly as written — the trailing spaces *inside* a dot line are
+/// upstream's and are load-bearing, which is why only the line end is trimmed
+/// and only trailing blank lines are dropped.
+fn normalize(text: &str, comparison: Comparison) -> String {
+    let text = match comparison {
+        Comparison::Bytes => text.to_owned(),
+        Comparison::ModuloNodeIds => normalize_ids(text),
+    };
     let mut lines: Vec<&str> = text
         .lines()
         .map(str::trim_end)
@@ -316,53 +435,54 @@ fn jv_tree_matches_mvn_dependency_tree() {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("pom.xml"), fixture.pom()).unwrap();
 
-        let expected = match maven_tree(&mvn, &project, &local_repository) {
-            Ok(tree) => tree,
-            Err(reason) => {
-                differences.push(format!("{}: {reason}", fixture.name));
+        for (format, comparison) in FORMATS {
+            let what = format!("{} / {format}", fixture.name);
+            let expected = match maven_tree(&mvn, &project, &local_repository, format) {
+                Ok(tree) => tree,
+                Err(reason) => {
+                    differences.push(format!("{what}: {reason}"));
+                    continue;
+                }
+            };
+            let actual = match jv_tree(&project, &cache, format) {
+                Ok(tree) => tree,
+                Err(reason) => {
+                    differences.push(format!("{what}: {reason}"));
+                    continue;
+                }
+            };
+
+            // Two empty strings compare equal, so a case where both tools
+            // produced nothing would pass while proving nothing.
+            let lines = normalize(&expected, *comparison).lines().count();
+            if lines < 2 {
+                differences.push(format!(
+                    "{what}: mvn produced {lines} line(s), which cannot be a real comparison:\n{expected}"
+                ));
                 continue;
             }
-        };
-        let actual = match jv_tree(&project, &cache) {
-            Ok(tree) => tree,
-            Err(reason) => {
-                differences.push(format!("{}: {reason}", fixture.name));
-                continue;
+            compared += 1;
+
+            if normalize(&expected, *comparison) != normalize(&actual, *comparison) {
+                differences.push(format!(
+                    "{what} ({}):\n--- mvn ---\n{}\n--- jv ---\n{}",
+                    fixture.covers,
+                    normalize(&expected, *comparison),
+                    normalize(&actual, *comparison)
+                ));
             }
-        };
-
-        // Two empty strings compare equal, so a fixture where both tools
-        // produced nothing would pass while proving nothing.
-        let lines = normalize(&expected).lines().count();
-        if lines < 2 {
-            differences.push(format!(
-                "{}: mvn produced a {lines}-line tree, which cannot be a real comparison:\n{expected}",
-                fixture.name
-            ));
-            continue;
-        }
-        compared += 1;
-
-        if normalize(&expected) != normalize(&actual) {
-            differences.push(format!(
-                "{} ({}):\n--- mvn ---\n{}\n--- jv ---\n{}",
-                fixture.name,
-                fixture.covers,
-                normalize(&expected),
-                normalize(&actual)
-            ));
         }
     }
 
     eprintln!(
-        "compared {compared} of {} fixtures against mvn",
-        FIXTURES.len()
+        "compared {compared} of {} fixture/format pairs against mvn",
+        FIXTURES.len() * FORMATS.len()
     );
     assert!(
         differences.is_empty(),
-        "{} of {} fixtures differ from mvn dependency:tree:\n\n{}",
+        "{} of {} fixture/format pairs differ from mvn dependency:tree:\n\n{}",
         differences.len(),
-        FIXTURES.len(),
+        FIXTURES.len() * FORMATS.len(),
         differences.join("\n\n")
     );
 }
