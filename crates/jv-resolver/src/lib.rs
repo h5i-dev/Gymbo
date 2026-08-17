@@ -5,6 +5,8 @@
 
 mod conflict_id;
 mod graph;
+mod scope_rules;
 
 pub use conflict_id::{ConflictId, mark_conflict_ids};
 pub use graph::{Graph, ManagedFlags, Node, NodeId, Premanaged};
+pub use scope_rules::{choose_effective_scope, derive_scope};
