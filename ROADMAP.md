@@ -367,10 +367,12 @@ Quick-reference table for implementers; all paths relative to `_reference/`.
 | tree rendering | `maven-dependency-plugin/.../tree/TreeMojo.java` + external `maven-dependency-tree` (clone needed) |
 | Design prose | `maven-resolver/src/site/markdown/{how-resolver-works,dependency-graph,common-misconceptions}.md` |
 
-License note: all upstream sources are Apache-2.0. The rule for agents:
-**extract behavior and test cases as a spec; do not translate code verbatim.**
-jv ships MIT/Apache-2.0 dual; test fixtures (data files) are ported with
-attribution in `jv-testkit`.
+License note: jv and all the upstream sources it mirrors are Apache-2.0, so
+copying would be permitted. The rule for agents is nonetheless
+**extract behavior and test cases as a spec; do not translate code verbatim** —
+a port that reasons from the behavior catches the quirks that matter, where a
+transliteration inherits structure jv has no use for. Test fixtures (data files)
+are carried across with attribution.
 
 ---
 

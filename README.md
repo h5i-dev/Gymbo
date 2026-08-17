@@ -46,4 +46,4 @@ to run the tests.
 
 ## License
 
-MIT or Apache-2.0, at your option.
+Apache-2.0.

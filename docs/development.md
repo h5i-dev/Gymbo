@@ -102,9 +102,9 @@ When implementing behavior that has to match Maven:
 
 1. Find the authoritative upstream source (ROADMAP.md §4 is the index) and cite
    its path in a module-level doc comment.
-2. Port the *behavior*, not the code — upstream is Apache-2.0 and jv is
-   MIT/Apache-2.0 dual, so verbatim translation is avoided by policy, not just
-   by licence arithmetic.
+2. Port the *behavior*, not the code. Both jv and upstream are Apache-2.0, so
+   this is a quality rule rather than a licensing one: reasoning from the
+   behavior is what surfaces the quirks worth reproducing.
 3. Bring the upstream test cases across as a corpus data file, noting the source
    test for each directive.
 4. Where the upstream implementation is cheap to isolate, add an oracle test.

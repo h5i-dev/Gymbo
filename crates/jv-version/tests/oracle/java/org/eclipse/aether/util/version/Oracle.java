@@ -1,5 +1,5 @@
 /*
- * Copyright the jv contributors. Licensed under MIT OR Apache-2.0.
+ * Copyright the jv contributors. Licensed under the Apache License 2.0.
  *
  * A test oracle: exposes Maven Resolver's own GenericVersion behavior over a
  * line protocol so jv's Rust port can be compared against it directly, rather
