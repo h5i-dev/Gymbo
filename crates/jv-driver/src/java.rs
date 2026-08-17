@@ -6,8 +6,21 @@
 //! different effective model than Maven does on the same machine. That is
 //! exactly the kind of divergence that is invisible until it isn't, so jv asks
 //! the JDK rather than leaving the property unset.
+//!
+//! # Without starting a JVM
+//!
+//! Asking used to mean running `java -version`, which costs 35–40 ms because it
+//! boots a JVM to print one line. On a warm `jv tree` that was the single largest
+//! cost — more than resolution, parsing and rendering put together — and it is a
+//! particularly bad one for a tool whose whole claim is not paying for JVM
+//! startup.
+//!
+//! Every JDK since 9 ships a `release` file in its home directory containing
+//! `JAVA_VERSION="21.0.11"`, which is the same string `java.version` reports.
+//! Reading it costs a `stat` and a short read. The subprocess is still there for
+//! a JDK 8, which has no `release` file.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The `java.version` of the JDK jv would use, as the JVM spells it.
@@ -18,9 +31,51 @@ use std::process::Command;
 /// can resolve dependencies without one, it just cannot match `<jdk>`
 /// activators.
 pub fn detect_version() -> Option<String> {
+    // The cheap route first: a file, not a process.
+    for home in homes() {
+        if let Some(version) = read_release(&home) {
+            return Some(version);
+        }
+    }
     for candidate in candidates() {
         if let Some(version) = probe(&candidate) {
             return Some(version);
+        }
+    }
+    None
+}
+
+/// The JDK home directories to look in, most authoritative first.
+fn homes() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    if let Some(home) = std::env::var_os("JAVA_HOME") {
+        homes.push(PathBuf::from(home));
+    }
+    // The `java` on the path is usually a symlink into the real JDK — on Debian
+    // two of them — so the home is found by resolving it and going up from
+    // `bin/java`. Without the resolve this lands in `/usr/bin`, which has no
+    // `release` file, and the probe would run after all.
+    if let Some(executable) = executable() {
+        let resolved = executable.canonicalize().unwrap_or(executable);
+        if let Some(home) = resolved.parent().and_then(Path::parent) {
+            homes.push(home.to_path_buf());
+        }
+    }
+    homes
+}
+
+/// Reads `JAVA_VERSION` out of a JDK's `release` file.
+///
+/// The format is shell-style `KEY="value"` lines. Only this one key is wanted,
+/// so the file is scanned rather than parsed.
+fn read_release(home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(home.join("release")).ok()?;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("JAVA_VERSION=") {
+            let version = value.trim().trim_matches('"');
+            if !version.is_empty() {
+                return Some(version.to_owned());
+            }
         }
     }
     None
@@ -93,6 +148,51 @@ fn parse_version(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_file_is_read_without_starting_a_jvm() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("release"),
+            "IMPLEMENTOR=\"Ubuntu\"\nJAVA_VERSION=\"21.0.11\"\nOS_ARCH=\"aarch64\"\n",
+        )
+        .unwrap();
+        assert_eq!(read_release(dir.path()).as_deref(), Some("21.0.11"));
+    }
+
+    #[test]
+    fn a_home_without_a_release_file_yields_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        // A JDK 8 has no `release` file, which is what the subprocess is still
+        // there for.
+        assert_eq!(read_release(dir.path()), None);
+
+        std::fs::write(dir.path().join("release"), "IMPLEMENTOR=\"x\"\n").unwrap();
+        assert_eq!(read_release(dir.path()), None);
+    }
+
+    #[test]
+    fn an_early_access_release_file_keeps_its_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("release"), "JAVA_VERSION=\"24-ea\"\n").unwrap();
+        assert_eq!(read_release(dir.path()).as_deref(), Some("24-ea"));
+    }
+
+    #[test]
+    fn detection_agrees_with_the_jvm_it_describes() {
+        // The point of reading the file is to get the same answer the subprocess
+        // would. If a JDK is present, check that they actually agree, because a
+        // silent disagreement changes which profiles activate.
+        let Some(from_file) = homes().iter().find_map(|home| read_release(home)) else {
+            eprintln!("no JDK with a release file; skipping");
+            return;
+        };
+        let Some(from_jvm) = candidates().iter().find_map(probe) else {
+            eprintln!("no runnable JDK; skipping");
+            return;
+        };
+        assert_eq!(from_file, from_jvm);
+    }
 
     #[test]
     fn a_modern_jdk_banner_parses() {

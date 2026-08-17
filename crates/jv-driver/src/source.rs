@@ -86,9 +86,9 @@ pub struct RepositorySource {
     context: BuildContext,
     types: Arc<TypeRegistry>,
     repositories: Arc<Mutex<Repositories>>,
-    /// Raw POM text by `g:a:v`, so a POM read as a parent is not read again as a
-    /// descriptor. Diamond-shaped parent chains make this worth having.
-    poms: Arc<Mutex<HashMap<String, Option<String>>>>,
+    /// POMs parsed once, by `g:a:v`. `None` records a coordinate no repository
+    /// has, so an absence is not re-requested either.
+    poms: Arc<Mutex<HashMap<String, Option<Arc<Model>>>>>,
     /// Built descriptors by `g:a:v`, which is the expensive half.
     descriptors: Arc<Mutex<HashMap<String, Descriptor>>>,
     /// Version lists by `g:a`, for ranges.
@@ -302,27 +302,56 @@ impl RepositorySource {
         }
     }
 
-    /// The repository text of a POM, memoized.
-    fn pom_text(&self, artifact: &Artifact) -> Result<Option<String>, DriverError> {
+    /// A POM, parsed once and shared.
+    ///
+    /// Memoizing the *parsed* model rather than its text is worth a good deal
+    /// more than it looks. A parent POM is read once per child that inherits from
+    /// it — `spring-boot-dependencies` by every Spring module in the graph — and
+    /// the old memo handed back a fresh `String` copy of the file each time for
+    /// the caller to re-parse. Parsing several hundred kilobytes of XML fifty
+    /// times over was the largest cost of a warm resolve after JVM startup.
+    fn cached_pom(&self, artifact: &Artifact) -> Result<Option<Arc<Model>>, DriverError> {
         let key = coordinates(artifact);
-        if let Some(from_reactor) = self.reactor.lock().expect("reactor").get(&key) {
-            return Ok(Some(from_reactor.clone()));
-        }
         if let Some(cached) = self.poms.lock().expect("poms").get(&key) {
             return Ok(cached.clone());
         }
 
-        let pom_artifact = Artifact {
-            classifier: String::new(),
-            extension: POM.to_owned(),
-            version: self.resolved_version(artifact)?,
-            ..artifact.clone()
+        // The working tree wins over any repository, which is what makes a
+        // multi-module build resolve its own modules.
+        let text = match self.reactor.lock().expect("reactor").get(&key).cloned() {
+            Some(text) => Some(text),
+            None => {
+                let pom_artifact = Artifact {
+                    classifier: String::new(),
+                    extension: POM.to_owned(),
+                    version: self.resolved_version(artifact)?,
+                    ..artifact.clone()
+                };
+                self.bytes(&pom_artifact)?
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            }
         };
-        let text = self
-            .bytes(&pom_artifact)?
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-        self.poms.lock().expect("poms").insert(key, text.clone());
-        Ok(text)
+
+        let parsed = match &text {
+            Some(text) => {
+                let parsed = parse_pom(text).map_err(|source| DriverError::Pom {
+                    source_name: key.clone(),
+                    source,
+                })?;
+                // Reported here, and only here: the memo means this runs once per
+                // POM however many times it is inherited from. Discarding them —
+                // which is what happened before — hid every problem the parser
+                // knows how to report.
+                for warning in parsed.warnings {
+                    self.warn(format!("{key}: {warning}"));
+                }
+                Some(Arc::new(parsed.model))
+            }
+            None => None,
+        };
+
+        self.poms.lock().expect("poms").insert(key, parsed.clone());
+        Ok(parsed)
     }
 
     /// The concrete version to request from a repository.
@@ -391,19 +420,15 @@ impl RepositorySource {
     /// Builds the effective model for an artifact, or `None` when no repository
     /// has its POM.
     pub fn effective_model(&self, artifact: &Artifact) -> Result<Option<Model>, DriverError> {
-        let Some(text) = self.pom_text(artifact)? else {
+        let Some(model) = self.cached_pom(artifact)? else {
             return Ok(None);
         };
         let source_name = coordinates(artifact);
-        let parsed = parse_pom(&text).map_err(|source| DriverError::Pom {
-            source_name: source_name.clone(),
-            source,
-        })?;
 
         let built = ModelBuilder::new(self, self.context.clone())
             .with_settings_profiles(&self.settings.profiles)
             .with_lifecycle_bindings(self.lifecycle_bindings)
-            .build(SourcedModel::new(parsed.model, source_name.clone()))
+            .build(SourcedModel::new((*model).clone(), source_name.clone()))
             .map_err(|source| DriverError::Model {
                 source_name,
                 source,
@@ -434,7 +459,7 @@ impl RepositorySource {
             .lock()
             .expect("poms")
             .iter()
-            .filter(|(_, text)| text.is_some())
+            .filter(|(_, parsed)| parsed.is_some())
             .filter_map(|(key, _)| parse_coordinates(key))
             .collect()
     }
@@ -493,15 +518,14 @@ impl ModelSource for RepositorySource {
         version: &str,
     ) -> Result<SourcedModel, String> {
         let artifact = Artifact::new(group_id, artifact_id, version);
-        let text = self
-            .pom_text(&artifact)
+        let model = self
+            .cached_pom(&artifact)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {
                 format!("{group_id}:{artifact_id}:{version} is not in any configured repository")
             })?;
-        let parsed = parse_pom(&text).map_err(|error| error.to_string())?;
         Ok(SourcedModel::new(
-            parsed.model,
+            (*model).clone(),
             format!("{group_id}:{artifact_id}:{version}"),
         ))
     }
