@@ -43,6 +43,11 @@ not a download race.
   winnable hill; resolution compatibility is.)
 - A daemon. Single-shot process must be fast enough that a daemon is pointless —
   that *is* the pitch.
+- Windows support. v0.x targets Linux and macOS only — the initial audience
+  (CI runners, Show HN readers, Spring/backend devs on dev containers) is
+  overwhelmingly Linux/macOS, and rv launched the same way. Windows lands
+  post-v0.3; until then, avoid gratuitous portability blockers (no Unix-only
+  path assumptions baked into `jv-cache`/`jv-install` core types).
 
 **Positioning rule:** marketed against `mvn` (and mvnd), never as "Coursier in
 Rust". Coursier appears only in the benchmark table and as a test oracle. FAQ
@@ -396,7 +401,7 @@ oracle for its `PythonResolver`).
 Not ported wholesale; grep-selected when a Ring-3 diff needs adjudication
 (`*Inheritance*`, `*Interpolation*`, `*ProfileActivation*`, `*DepMgmt*`).
 
-CI gates from M2 onward: all rings green on Linux/macOS/Windows, plus a
+CI gates from M2 onward: all rings green on Linux/macOS, plus a
 benchmark job (criterion + hyperfine) tracking `jv tree` warm latency so
 performance regressions are caught like correctness regressions.
 
@@ -411,7 +416,8 @@ Workspace layout (§3.2), CI matrix, cargo-dist + release profile,
 `jv-testkit` corpus parsers (graph DSL, `.ini` descriptors, coursier fixtures,
 mvn-output differ), clone `maven-dependency-tree` into `_reference/`.
 **Gate:** all four corpus parsers round-trip their upstream files; `cargo dist`
-produces runnable binaries on all three OSes.
+produces runnable binaries for Linux (x86_64 + aarch64, musl static) and macOS
+(x86_64 + aarch64).
 
 ### M1 — `jv-version`
 GenericVersion + scheme/ranges/constraints/unions.
@@ -493,7 +499,8 @@ tool installs à la `uv tool install` / coursier `InstallDir`).
 | `mvn dependency:tree` output differs across Maven versions | Pin the oracle (Maven 3.9.x) in the harness; document the pinned version in the README benchmark table. |
 | Enterprise settings.xml complexity (mirrors-of-mirrors, encrypted creds, proxies) | Minimal-but-real subset in v0.1 (§3.6); loud, specific errors for unsupported constructs rather than silent misresolution. |
 | yummy or wukong pivots into the same wedge | Speed to M5/M8; the moat is the corpus-backed compatibility test suite, which is expensive to replicate and compounds. |
-| Windows (hardlink availability, path length, file locking) | CI matrix includes Windows from M0; link ladder degrades hard→soft→copy per volume (jgo pattern). |
+| Hardlinks unavailable across volumes / filesystems | Link ladder degrades hard→reflink→copy per volume (jgo pattern). |
+| "No Windows?" pushback at launch | State it plainly in the README with a tracking issue; keep core types path-portable so the port is mechanical, not architectural. |
 | HN skepticism ("Coursier exists", "benchmarks are cherry-picked") | FAQ pre-emption; benchmarks split cold/warm/startup with a committed reproduction script; never headline cold-download numbers. |
 
 Open questions to settle during M2–M4 (tracked as issues, not blockers):
