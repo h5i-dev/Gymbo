@@ -862,3 +862,90 @@ fn scope_and_optional_survive_the_pipeline_intact() {
     assert_eq!(dependency.exclusions.len(), 1);
     assert!(dependency.exclusions[0].matches("e", "anything"));
 }
+
+// ---------------------------------------------------------------- activation
+//
+// Every case below was checked against a real Maven 3.9.9 before being written
+// down. These are the activators whose rules are surprising enough that reading
+// the source got them wrong at least once.
+
+/// The property that nothing declares and everything can activate on.
+#[test]
+fn packaging_activates_a_profile_without_anyone_declaring_it() {
+    // `getProfileActivationContext` seeds `packaging` into the user properties.
+    // Without it this activator can never fire, which is how it read before —
+    // silently, since an activator that never matches looks exactly like one
+    // whose condition is false.
+    let built = build_with(
+        r#"<project>
+             <groupId>g</groupId><artifactId>a</artifactId><version>1</version>
+             <packaging>war</packaging>
+             <profiles><profile><id>wars</id>
+               <activation><property><name>packaging</name><value>war</value></property></activation>
+               <properties><marker>yes</marker></properties>
+             </profile></profiles>
+           </project>"#,
+        &[],
+        BuildContext::empty(),
+    );
+    assert_eq!(built.active_profiles, ["wars"]);
+    assert_eq!(
+        built.model.properties.get("marker").map(String::as_str),
+        Some("yes")
+    );
+}
+
+#[test]
+fn an_explicit_packaging_property_beats_the_seeded_one() {
+    // `computeIfAbsent`, so `-Dpackaging=...` wins.
+    let mut context = BuildContext::empty();
+    context
+        .user_properties
+        .insert("packaging".to_owned(), "jar".to_owned());
+    let built = build_with(
+        r#"<project>
+             <groupId>g</groupId><artifactId>a</artifactId><version>1</version>
+             <packaging>war</packaging>
+             <profiles><profile><id>wars</id>
+               <activation><property><name>packaging</name><value>war</value></property></activation>
+             </profile></profiles>
+           </project>"#,
+        &[],
+        context,
+    );
+    assert!(built.active_profiles.is_empty());
+}
+
+#[test]
+fn an_activation_value_reads_the_poms_property_before_the_command_lines() {
+    // Verified: with `<flavour>frompom</flavour>` in the POM and
+    // `-Dflavour=fromcli -Dmarker=fromcli`, Maven leaves this profile inactive,
+    // because it interpolates the *value* against the POM's properties first.
+    // That is the reverse of interpolation proper, where `-D` wins.
+    let mut context = BuildContext::empty();
+    context
+        .user_properties
+        .insert("flavour".to_owned(), "fromcli".to_owned());
+    context
+        .user_properties
+        .insert("marker".to_owned(), "fromcli".to_owned());
+
+    let pom = r#"<project>
+         <groupId>g</groupId><artifactId>a</artifactId><version>1</version>
+         <properties><flavour>frompom</flavour></properties>
+         <profiles><profile><id>p</id>
+           <activation><property><name>marker</name><value>${flavour}</value></property></activation>
+         </profile></profiles>
+       </project>"#;
+    assert!(build_with(pom, &[], context).active_profiles.is_empty());
+
+    // And it activates when the command line names what the POM says.
+    let mut context = BuildContext::empty();
+    context
+        .user_properties
+        .insert("flavour".to_owned(), "fromcli".to_owned());
+    context
+        .user_properties
+        .insert("marker".to_owned(), "frompom".to_owned());
+    assert_eq!(build_with(pom, &[], context).active_profiles, ["p"]);
+}

@@ -50,6 +50,10 @@ use crate::merge::assemble_inheritance;
 use crate::problem::{BuildError, Problem};
 use crate::source::{ModelSource, SourcedModel};
 
+/// The user property Maven seeds so `<activation><property><name>packaging</name>`
+/// has something to match against.
+const PACKAGING_PROPERTY: &str = "packaging";
+
 /// Bounds the parent chain. Real chains are single digits deep; anything near
 /// this is a cycle the identity checks somehow missed.
 const MAX_LINEAGE: usize = 64;
@@ -191,6 +195,21 @@ impl<'a> ModelBuilder<'a> {
                 context.user_properties.insert(key.clone(), value.clone());
             }
         }
+
+        // `<property><name>packaging</name>` is activated against a property
+        // Maven seeds rather than one anybody declares:
+        // `getProfileActivationContext` does
+        // `userProperties.computeIfAbsent("packaging", …)`. Without it that
+        // activator never fires at all.
+        //
+        // It is the *root* POM's packaging, for the whole lineage — so a
+        // parent's profile testing `packaging=jar` activates while building a
+        // jar child of a pom parent. `computeIfAbsent` also means an explicit
+        // `-Dpackaging` wins, which is why this does not overwrite.
+        context
+            .user_properties
+            .entry(PACKAGING_PROPERTY.to_owned())
+            .or_insert_with(|| root.model.packaging_or_default().to_owned());
 
         // Phase 1: walk the lineage, transforming each model in place.
         let basedir = root.basedir.clone();
