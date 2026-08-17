@@ -949,3 +949,109 @@ fn an_activation_value_reads_the_poms_property_before_the_command_lines() {
         .insert("marker".to_owned(), "frompom".to_owned());
     assert_eq!(build_with(pom, &[], context).active_profiles, ["p"]);
 }
+
+// ------------------------------------------------- duplicates and basedir
+
+#[test]
+fn a_duplicated_managed_key_resolves_to_the_last_when_management_is_inherited() {
+    // Checked against 3.9.9 both ways, because the rule is conditional and
+    // reads like a bug either way you find it. Maven's generated merger seeds
+    // its list with `mergeAll(target, sourceDominant=true)` — which collapses
+    // the target's duplicates last-wins — but only when there is a source list
+    // to merge, i.e. only when something was inherited.
+    let built = build_with(
+        r#"<project>
+             <parent><groupId>g</groupId><artifactId>parent</artifactId><version>1</version></parent>
+             <artifactId>child</artifactId>
+             <dependencyManagement><dependencies>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId><version>FIRST</version></dependency>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId><version>SECOND</version></dependency>
+             </dependencies></dependencyManagement>
+             <dependencies>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId></dependency>
+             </dependencies>
+           </project>"#,
+        &[(
+            "g",
+            "parent",
+            "1",
+            r#"<project><groupId>g</groupId><artifactId>parent</artifactId><version>1</version>
+                 <dependencyManagement><dependencies>
+                   <dependency><groupId>other</groupId><artifactId>other</artifactId><version>9</version></dependency>
+                 </dependencies></dependencyManagement>
+               </project>"#,
+        )],
+        BuildContext::empty(),
+    );
+    assert_eq!(
+        built.model.dependencies[0].version.as_deref(),
+        Some("SECOND")
+    );
+}
+
+#[test]
+fn a_duplicated_managed_key_resolves_to_the_first_when_nothing_is_inherited() {
+    // The other half of the same rule: with no parent management the merge never
+    // runs, the duplicates are never collapsed, and injection finds the first.
+    let built = build_with(
+        r#"<project>
+             <groupId>g</groupId><artifactId>solo</artifactId><version>1</version>
+             <dependencyManagement><dependencies>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId><version>FIRST</version></dependency>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId><version>SECOND</version></dependency>
+             </dependencies></dependencyManagement>
+             <dependencies>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId></dependency>
+             </dependencies>
+           </project>"#,
+        &[],
+        BuildContext::empty(),
+    );
+    assert_eq!(
+        built.model.dependencies[0].version.as_deref(),
+        Some("FIRST")
+    );
+}
+
+#[test]
+fn a_parents_file_activation_looks_beside_the_child() {
+    // `<file><exists>` in a *parent* resolves against the directory of the POM
+    // being built, not the parent's own — Maven sets `projectDirectory` once,
+    // from the request's POM file. Checked against 3.9.9: a marker beside the
+    // parent leaves the profile inactive when the child is built.
+    let workspace = tempfile::tempdir().expect("a temp dir");
+    let child_dir = workspace.path().join("child");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    std::fs::write(workspace.path().join("marker.txt"), b"beside the parent").unwrap();
+
+    let parent = r#"<project><groupId>g</groupId><artifactId>parent</artifactId><version>1</version>
+         <profiles><profile><id>has-marker</id>
+           <activation><file><exists>marker.txt</exists></file></activation>
+         </profile></profiles></project>"#;
+    let child = r#"<project>
+         <parent><groupId>g</groupId><artifactId>parent</artifactId><version>1</version></parent>
+         <artifactId>child</artifactId></project>"#;
+
+    // Registered *at a path*, so it is found through `<relativePath>` and
+    // carries a basedir of its own — which is exactly the case the two rules
+    // differ on. A parent looked up by coordinates has no directory, so the old
+    // code fell back to the child's and looked right.
+    let mut source = MapModelSource::new();
+    source.insert_at_path(workspace.path().join("pom.xml"), parent);
+    let model = parse_pom(child).expect("child parses").model;
+    let built = ModelBuilder::new(&source, BuildContext::empty())
+        .build(SourcedModel::new(model, "child/pom.xml").with_basedir(&child_dir))
+        .expect("build succeeds");
+    assert!(
+        built.active_profiles.is_empty(),
+        "the marker beside the parent should not activate while building the child"
+    );
+
+    // And it does activate once the marker is beside the child.
+    std::fs::write(child_dir.join("marker.txt"), b"beside the child").unwrap();
+    let model = parse_pom(child).expect("child parses").model;
+    let built = ModelBuilder::new(&source, BuildContext::empty())
+        .build(SourcedModel::new(model, "child/pom.xml").with_basedir(&child_dir))
+        .expect("build succeeds");
+    assert_eq!(built.active_profiles, ["has-marker"]);
+}

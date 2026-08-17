@@ -219,6 +219,20 @@ fn merge_dependencies(target: &mut Vec<Dependency>, source: &[Dependency], sourc
     if source.is_empty() {
         return;
     }
+
+    // The target's own duplicates collapse first — last value, first position —
+    // because Maven's generated merger seeds its list with
+    // `mergeAll(target, sourceDominant=true)` before merging the source in.
+    //
+    // Only when there *is* a source, which is not an optimization but the
+    // observed rule: with an inherited `<dependencyManagement>` a POM declaring
+    // `d:d` twice resolves to the second, and with nothing inherited it resolves
+    // to the first, because then this merge never runs. Both checked against
+    // 3.9.9. `<dependencies>` never reaches here with duplicates — phase 1's
+    // `merge_duplicates` has already collapsed those — so this is management's
+    // rule in practice.
+    collapse_duplicates(target);
+
     // First occurrence wins, which is what `Iterator::find` did.
     let mut at: HashMap<ManagementKey, usize> = HashMap::with_capacity(target.len());
     for (index, existing) in target.iter().enumerate() {
@@ -242,6 +256,22 @@ fn merge_dependencies(target: &mut Vec<Dependency>, source: &[Dependency], sourc
             }
         }
     }
+}
+
+/// Keeps one entry per management key: the last value, at the first position.
+fn collapse_duplicates(entries: &mut Vec<Dependency>) {
+    let mut at: HashMap<ManagementKey, usize> = HashMap::with_capacity(entries.len());
+    let mut collapsed: Vec<Dependency> = Vec::with_capacity(entries.len());
+    for entry in std::mem::take(entries) {
+        match at.get(&entry.management_key()) {
+            Some(index) => collapsed[*index] = entry,
+            None => {
+                at.insert(entry.management_key(), collapsed.len());
+                collapsed.push(entry);
+            }
+        }
+    }
+    *entries = collapsed;
 }
 
 // ------------------------------------------------------------- repositories

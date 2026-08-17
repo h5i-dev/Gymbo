@@ -853,6 +853,7 @@ dependencies = [
  "jv-model",
  "jv-version",
  "quick-xml",
+ "tempfile",
  "thiserror",
 ]
 

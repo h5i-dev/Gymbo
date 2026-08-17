@@ -247,7 +247,15 @@ impl<'a> ModelBuilder<'a> {
             let own_properties = model.model.properties.clone();
             let activation = ActivationContext {
                 context: &context,
-                basedir: model.basedir.as_deref().or(basedir.as_deref()),
+                // The directory of the POM being *built*, for every model in the
+                // lineage — not each model's own. Maven sets `projectDirectory`
+                // once from the request's POM file, so a parent's
+                // `<file><exists>marker.txt</exists></file>` looks for
+                // `marker.txt` beside the child, and `${basedir}` in an
+                // ancestor's activation means the child's directory too.
+                // Verified: a marker file next to the parent does *not* activate
+                // that profile when Maven builds the child.
+                basedir: basedir.as_deref(),
                 model_properties: &own_properties,
             };
             let active = select_active_profiles(
