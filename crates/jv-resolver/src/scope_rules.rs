@@ -99,12 +99,10 @@ pub fn choose_effective_scope(scopes: &[Scope]) -> Option<Scope> {
     if unique.len() == 1 {
         return unique.first().copied();
     }
-    for candidate in [Scope::Compile, Scope::Runtime, Scope::Provided, Scope::Test] {
-        if unique.contains(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    // Widest wins, in this order.
+    [Scope::Compile, Scope::Runtime, Scope::Provided, Scope::Test]
+        .into_iter()
+        .find(|candidate| unique.contains(candidate))
 }
 
 #[cfg(test)]
