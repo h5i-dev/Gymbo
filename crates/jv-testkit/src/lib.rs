@@ -6,5 +6,9 @@
 //! shipped crates because nothing but a test has any use for them.
 
 pub mod graph_dsl;
+pub mod ini_descriptors;
 
 pub use graph_dsl::{DslError, dump, parse, parse_all, parse_with};
+pub use ini_descriptors::{
+    ArtifactDescription, DescriptorReader, IniError, TestRepository, parse_description,
+};
