@@ -34,15 +34,45 @@
 //! Two bounds keep the approximation from becoming waste: a total budget on how
 //! many POMs it may fetch, and a cap on how many requests are in flight. Both
 //! are per session.
+//!
+//! # It parses, too
+//!
+//! The crawler has to parse each POM anyway to know what to fetch next, so it
+//! hands the parsed model to the same memo the collector reads. That turns out
+//! to matter more than the fetching on a *warm* run, where there is no network
+//! to hide: reading and parsing a few hundred cached POMs was 42 ms of a 60 ms
+//! resolve, all of it on the synchronous critical path, and all of it work the
+//! crawler was already doing and discarding.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use jv_cache::Fetcher;
 use jv_model::{Artifact, Model, Scope, parse_pom};
 use jv_repo::Repository;
 use tokio::sync::Semaphore;
+
+/// Where the crawler leaves what it has parsed.
+///
+/// The same maps `RepositorySource` reads from, shared rather than copied, so a
+/// POM the crawler reached first is never parsed again.
+#[derive(Clone, Default)]
+pub struct Sink {
+    /// Parsed POMs by `g:a:v`. `None` records a coordinate no repository has.
+    pub poms: Arc<Mutex<HashMap<String, Option<Arc<Model>>>>>,
+    /// Problems the parser reported, to show once at the end.
+    pub warnings: Arc<Mutex<Vec<String>>>,
+}
+
+impl std::fmt::Debug for Sink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Sink").finish_non_exhaustive()
+    }
+}
 
 /// How many POM requests may be in flight at once.
 ///
@@ -69,6 +99,7 @@ pub struct Prefetcher {
     seen: Arc<std::sync::Mutex<HashSet<String>>>,
     remaining: Arc<AtomicUsize>,
     permits: Arc<Semaphore>,
+    sink: Sink,
     enabled: bool,
 }
 
@@ -83,13 +114,19 @@ impl std::fmt::Debug for Prefetcher {
 }
 
 impl Prefetcher {
-    pub fn new(fetcher: Arc<Fetcher>, runtime: tokio::runtime::Handle, enabled: bool) -> Self {
+    pub fn new(
+        fetcher: Arc<Fetcher>,
+        runtime: tokio::runtime::Handle,
+        sink: Sink,
+        enabled: bool,
+    ) -> Self {
         Self {
             fetcher,
             runtime,
             seen: Arc::default(),
             remaining: Arc::new(AtomicUsize::new(BUDGET)),
             permits: Arc::new(Semaphore::new(IN_FLIGHT)),
+            sink,
             enabled,
         }
     }
@@ -156,13 +193,36 @@ impl Prefetcher {
         // permit per level and starve the pool.
         drop(permit);
 
+        let key = format!(
+            "{}:{}:{}",
+            artifact.group_id, artifact.artifact_id, artifact.version
+        );
         let Ok(fetched) = fetched else { return };
         let Ok(text) = std::str::from_utf8(&fetched.bytes) else {
             return;
         };
         let Ok(parsed) = parse_pom(text) else { return };
 
-        for next in follow(&parsed.model) {
+        // Published before recursing, so the collector can pick it up while this
+        // task is still working out what to fetch next.
+        {
+            let mut warnings = self.sink.warnings.lock().expect("warnings");
+            for warning in &parsed.warnings {
+                let message = format!("{key}: {warning}");
+                if !warnings.contains(&message) {
+                    warnings.push(message);
+                }
+            }
+        }
+        let model = Arc::new(parsed.model);
+        self.sink
+            .poms
+            .lock()
+            .expect("poms")
+            .entry(key)
+            .or_insert_with(|| Some(Arc::clone(&model)));
+
+        for next in follow(&model) {
             self.spawn(repositories.clone(), next);
         }
     }
@@ -300,6 +360,7 @@ mod tests {
                 Box::new(jv_cache::MapTransport::new()),
             )),
             dummy_handle(),
+            Sink::default(),
             true,
         );
         // `${spring.version}` addresses nothing; fetching it would 404 once per
@@ -318,6 +379,7 @@ mod tests {
                 Box::new(jv_cache::MapTransport::new()),
             )),
             dummy_handle(),
+            Sink::default(),
             true,
         );
         assert!(prefetcher.claim(&pom("g", "a", "1.0")));
@@ -334,6 +396,7 @@ mod tests {
                 Box::new(jv_cache::MapTransport::new()),
             )),
             dummy_handle(),
+            Sink::default(),
             true,
         );
         prefetcher.remaining.store(2, Ordering::Relaxed);

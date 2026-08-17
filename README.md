@@ -24,8 +24,8 @@ com.example:demo:jar:1.0
 
 |  | jv | `mvn dependency:tree` | |
 |---|---|---|---|
-| Warm | **44 ms** | 1,623 ms | 37× |
-| Cold | **1.0 s** | 15.2 s | 15× |
+| Warm | **26 ms** | 1,778 ms | 69× |
+| Cold | **0.75 s** | 11.3 s | 15× |
 
 Median of five warm runs on one project (Jackson, HttpClient 5, Guava, JUnit 5;
 23 nodes), 10-core aarch64 Linux, Maven 3.9.9. Both tools start from an empty
@@ -34,11 +34,12 @@ to report a time unless the two tools' output matches first — a benchmark
 against wrong output measures nothing. Cold timings are network-bound and will
 differ on your machine; the warm row is the one that reflects the tool.
 
-The cold figure is what it is because jv crawls POMs ahead of the resolver
-rather than fetching them one round trip at a time; a 104-node Spring Boot
-project went from 22.4 s to 3.5 s the same way. The warm figure is what it is
-partly because jv stopped booting a JVM on every run just to read one line out
-of it.
+Both figures come from the same idea: jv crawls POMs ahead of the resolver
+instead of fetching them one round trip at a time, and the crawler hands over
+what it parsed rather than parsing everything twice. A 104-node Spring Boot
+project went from 22.4 s to 3.5 s cold and 150 ms to 59 ms warm that way. The
+warm figure also stopped including a JVM boot, which jv used to pay on every
+run to read one line out of it.
 
 ## Commands
 

@@ -90,6 +90,9 @@ pub struct RepositorySource {
     repositories: Arc<Mutex<Repositories>>,
     /// POMs parsed once, by `g:a:v`. `None` records a coordinate no repository
     /// has, so an absence is not re-requested either.
+    ///
+    /// Shared with the crawler, which fills it in from background threads — see
+    /// `prefetch.rs`.
     poms: Arc<Mutex<HashMap<String, Option<Arc<Model>>>>>,
     /// Built descriptors by `g:a:v`, which is the expensive half.
     descriptors: Arc<Mutex<HashMap<String, Descriptor>>>,
@@ -140,12 +143,16 @@ impl RepositorySource {
         context: BuildContext,
         declared: &[Repository],
     ) -> Self {
+        let sink = crate::prefetch::Sink::default();
         Self {
             prefetcher: crate::prefetch::Prefetcher::new(
                 Arc::clone(&fetcher),
                 runtime.clone(),
+                sink.clone(),
                 true,
             ),
+            poms: Arc::clone(&sink.poms),
+            warnings: Arc::clone(&sink.warnings),
             fetcher,
             runtime,
             repositories: Arc::new(Mutex::new(Repositories {
@@ -154,12 +161,10 @@ impl RepositorySource {
             settings,
             context,
             types: Arc::new(TypeRegistry::default()),
-            poms: Arc::default(),
             descriptors: Arc::default(),
             versions: Arc::default(),
             snapshots: Arc::default(),
             reactor: Arc::default(),
-            warnings: Arc::default(),
             forced_update: None,
             lifecycle_bindings: false,
             allow_insecure_http: false,
@@ -217,6 +222,10 @@ impl RepositorySource {
         let prefetcher = crate::prefetch::Prefetcher::new(
             Arc::clone(&self.fetcher),
             self.runtime.clone(),
+            crate::prefetch::Sink {
+                poms: Arc::clone(&self.poms),
+                warnings: Arc::clone(&self.warnings),
+            },
             false,
         );
         Self { prefetcher, ..self }
