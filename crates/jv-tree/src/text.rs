@@ -110,8 +110,8 @@ fn render_node(
 ) {
     let depth = last.len();
     // Ancestors first: one fill per level above this node.
-    for level in 0..depth.saturating_sub(1) {
-        out.push_str(options.tokens.fill_indent(last[level]));
+    for ancestor_is_last in last.iter().take(depth.saturating_sub(1)) {
+        out.push_str(options.tokens.fill_indent(*ancestor_is_last));
     }
     if depth > 0 {
         out.push_str(options.tokens.node_indent(is_last));
