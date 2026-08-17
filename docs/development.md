@@ -54,8 +54,17 @@ Override source discovery with `JV_MAVEN_RESOLVER_SRC=/path/to/maven-resolver`.
 
 ## The Maven oracle
 
-Effective-POM tests diff jv against real Maven. Put a Maven 3.9 on `PATH`, or
-point `JV_MVN` at one:
+Four tests run real Maven and demand agreement. They are the ones that decide
+whether jv is actually compatible, so they are worth knowing individually:
+
+| Test | What it asks Maven |
+|---|---|
+| `jv-model-builder/tests/mvn_oracle.rs` | `mvn help:effective-pom` on 10 projects, plugins included |
+| `jv-cli/tests/mvn_tree_oracle.rs` | `mvn dependency:tree` in all five output types, on 8 projects — 40 pairs |
+| `jv-driver/tests/sync_offline_maven.rs` | whether `mvn -o verify` succeeds against a repository `jv sync` populated |
+| `jv-cli/tests/jvx_launch.rs` | whether `jvx` actually launches a real tool from Maven Central |
+
+Put a Maven 3.9 on `PATH`, or point `JV_MVN` at one:
 
 ```sh
 curl -sSLo maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz
@@ -72,7 +81,17 @@ behavior, and Maven 4 differs in ways that would show up as failures here.
 
 The first run downloads the help plugin and the fixtures' BOMs into `~/.m2`;
 after that it needs no network. `JV_LOCAL_REPO` overrides where jv looks for
-them.
+them. The tree, sync and jvx oracles each build their own throwaway repository
+and cache, so they take a minute or two apiece on a cold machine and need
+network access — which is deliberate. A test that let either tool reuse a warm
+repository the other filled would be measuring the wrong thing.
+
+A note on reading Maven's sources: **run the version you are targeting, do not
+trust the source you cloned**. Two byte-parity bugs got through review because
+the upstream code says one thing and the shipped plugin does another — the dot
+renderer's `endVisit` appends a line separator that never reaches the file, and
+`maven-dependency-plugin` 3.6.1 silently renders text for an output type it does
+not recognise. Both were caught only by diffing against a real run.
 
 ## Known upstream divergences
 
