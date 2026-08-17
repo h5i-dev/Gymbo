@@ -217,6 +217,15 @@ fn build_source(
         context.user_properties.insert(key.clone(), value.clone());
     }
     context.active_profiles = config.active_profiles.clone();
+    // `<activeProfiles>` in settings.xml turns a profile on unconditionally, and
+    // it is how most people attach a corporate repository. It was being parsed
+    // and then ignored, so such a repository was never contacted and its
+    // artifacts came back "not in any configured repository".
+    for id in &settings.active_profiles {
+        if !context.active_profiles.contains(id) {
+            context.active_profiles.push(id.clone());
+        }
+    }
     context.inactive_profiles = config.inactive_profiles.clone();
 
     let settings = Arc::new(settings);

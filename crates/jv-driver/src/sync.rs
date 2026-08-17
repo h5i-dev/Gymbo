@@ -61,6 +61,7 @@ use jv_resolver::{CollectRequest, Verbosity};
 use crate::error::DriverError;
 use crate::project::Project;
 use crate::session::Session;
+use crate::snapshot::LocalSnapshot;
 use crate::tracking::Tracking;
 
 /// What to sync.
@@ -209,6 +210,9 @@ pub fn sync(
     // GAV, so they are collected as the artifacts are placed and written once at
     // the end. Writing per file would rewrite the same file three times.
     let mut tracking: BTreeMap<PathBuf, Tracking> = BTreeMap::new();
+    // One per snapshot version directory, written once every file of that
+    // version has been placed.
+    let mut snapshots: BTreeMap<String, LocalSnapshot> = BTreeMap::new();
     // What has already been dealt with, so the POM sweep below does not redo it.
     let mut placed: BTreeSet<Artifact> = BTreeSet::new();
 
@@ -229,13 +233,30 @@ pub fn sync(
                         // and placing it under the base name would give Maven a
                         // file it never looks for.
                         let relative = session.source().repository_path(&candidate)?;
-                        if is_snapshot_version(&candidate.version) {
-                            report.warnings.push(format!(
-                                "{}:{}:{} is a snapshot; jv placed the file but not the \
-                                 maven-metadata-<repository>.xml Maven needs to find it offline",
-                                candidate.group_id, candidate.artifact_id, candidate.version
-                            ));
-                        }
+                        // A snapshot is installed rather than cached: base-version
+                        // file name, and a `maven-metadata-local.xml` written
+                        // below once every file of that version is placed.
+                        let relative = if is_snapshot_version(&candidate.version) {
+                            let base = Artifact {
+                                version: candidate.base_version(),
+                                ..candidate.clone()
+                            };
+                            let placed = jv_repo::artifact_path(&base);
+                            // The version directory, which is the path without
+                            // the file name — one metadata file serves every
+                            // file of one snapshot version.
+                            let directory = placed
+                                .rsplit_once('/')
+                                .map(|(head, _)| head.to_owned())
+                                .unwrap_or_default();
+                            snapshots
+                                .entry(directory)
+                                .or_insert_with(|| LocalSnapshot::new(&base))
+                                .record(&base);
+                            placed
+                        } else {
+                            relative
+                        };
                         if let Some(linked) =
                             materialize(&found.path, local, &relative, &mut report)?
                         {
@@ -276,6 +297,19 @@ pub fn sync(
             }
         }
         report.artifacts.push(pom);
+    }
+
+    if let Some(local) = &request.local_repository {
+        for (directory, snapshot) in &snapshots {
+            if snapshot.is_empty() {
+                continue;
+            }
+            if let Err(error) = snapshot.write(&local.join(directory)) {
+                report
+                    .warnings
+                    .push(format!("cannot write the snapshot metadata: {error}"));
+            }
+        }
     }
 
     for (directory, entries) in &tracking {

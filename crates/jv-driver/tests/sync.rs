@@ -17,6 +17,49 @@ struct FakeRepository {
 }
 
 impl FakeRepository {
+    /// Deploys a snapshot the way a repository serves one: timestamped file
+    /// names, with the metadata that says which timestamp is current.
+    fn snapshot(&self, group_id: &str, artifact_id: &str, base: &str, resolved: &str) {
+        let directory = self
+            .root
+            .join(group_id.replace('.', "/"))
+            .join(artifact_id)
+            .join(base);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join(format!("{artifact_id}-{resolved}.pom")),
+            format!(
+                "<project><modelVersion>4.0.0</modelVersion><groupId>{group_id}</groupId>\
+                 <artifactId>{artifact_id}</artifactId><version>{base}</version></project>"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join(format!("{artifact_id}-{resolved}.jar")),
+            b"snapshot jar",
+        )
+        .unwrap();
+        let stamp = resolved.rsplit_once('-').unwrap();
+        std::fs::write(
+            directory.join("maven-metadata.xml"),
+            format!(
+                r#"<metadata modelVersion="1.1.0"><groupId>{group_id}</groupId>
+                     <artifactId>{artifact_id}</artifactId><version>{base}</version>
+                     <versioning><snapshot><timestamp>{}</timestamp>
+                       <buildNumber>{}</buildNumber></snapshot>
+                     <snapshotVersions>
+                       <snapshotVersion><extension>pom</extension><value>{resolved}</value></snapshotVersion>
+                       <snapshotVersion><extension>jar</extension><value>{resolved}</value></snapshotVersion>
+                     </snapshotVersions></versioning></metadata>"#,
+                stamp.0.rsplit_once('-').map(|(_, t)| t).unwrap_or(stamp.0),
+                stamp.1
+            ),
+        )
+        .unwrap();
+    }
+}
+
+impl FakeRepository {
     /// Writes a POM and a jar at some coordinates.
     fn artifact(&self, group_id: &str, artifact_id: &str, version: &str, body: &str) -> &Self {
         let directory = self
@@ -340,4 +383,39 @@ fn the_reactors_own_modules_are_not_looked_for() {
         "the reactor's own module was looked for: {:?}",
         report.missing
     );
+}
+
+#[test]
+fn a_snapshot_is_placed_as_a_locally_installed_one() {
+    // A downloaded snapshot's file name carries a deployment timestamp, and
+    // Maven only learns which timestamp is current from metadata whose *file
+    // name* carries the effective repository id — which jv cannot know the next
+    // `mvn` will be configured with. So jv writes the shape `mvn install`
+    // produces instead: base-version file names and a `maven-metadata-local.xml`
+    // declaring a local copy, which Maven accepts from any configuration.
+    let fixture = fixture(
+        "<dependencies><dependency><groupId>org.test</groupId>\
+           <artifactId>snap</artifactId><version>1.0-SNAPSHOT</version></dependency></dependencies>",
+        |repository| {
+            repository.snapshot("org.test", "snap", "1.0-SNAPSHOT", "1.0-20240115.103000-7");
+        },
+    );
+    let report = fixture.sync();
+    assert!(report.missing.is_empty(), "missing: {:?}", report.missing);
+
+    let directory = fixture.local("org/test/snap/1.0-SNAPSHOT");
+    // The base name, not the timestamped one.
+    assert!(directory.join("snap-1.0-SNAPSHOT.jar").is_file());
+    assert!(directory.join("snap-1.0-SNAPSHOT.pom").is_file());
+    assert!(!directory.join("snap-1.0-20240115.103000-7.jar").exists());
+
+    let metadata = std::fs::read_to_string(directory.join("maven-metadata-local.xml"))
+        .expect("snapshot metadata");
+    // `localCopy` is the part that makes this resolvable without a repository id
+    // anywhere in the file to get wrong.
+    assert!(metadata.contains("<localCopy>true</localCopy>"));
+    assert!(metadata.contains("<version>1.0-SNAPSHOT</version>"));
+    assert!(metadata.contains("<extension>jar</extension>"));
+    assert!(metadata.contains("<extension>pom</extension>"));
+    assert!(!metadata.contains("20240115.103000-7"));
 }
