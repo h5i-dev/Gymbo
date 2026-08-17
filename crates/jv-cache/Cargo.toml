@@ -1,0 +1,28 @@
+[package]
+name = "jv-cache"
+description = "Content store and download driver for Maven repositories"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+jv-model = { workspace = true }
+jv-repo = { workspace = true }
+dirs = { workspace = true }
+fs4 = { workspace = true }
+hex = { workspace = true }
+md-5 = { workspace = true }
+reqwest = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
