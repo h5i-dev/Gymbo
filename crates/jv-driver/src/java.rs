@@ -116,8 +116,9 @@ fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        return metadata.permissions().mode() & 0o111 != 0;
+        metadata.permissions().mode() & 0o111 != 0
     }
+    // Windows has no execute bit; being a file is the whole test there.
     #[cfg(not(unix))]
     true
 }
