@@ -280,12 +280,19 @@ impl<'i> XmlParser<'i> {
                 model.dependency_management = parser.parse_dependency_management()?;
                 Ok(true)
             }
-            // Maven 4 renamed <modules> to <subprojects>; both are accepted, and
-            // a POM using both simply contributes from each.
-            b"modules" | b"subprojects" => {
+            // Maven 4 renamed <modules> to <subprojects>, and renamed the item
+            // element with it. Both are accepted; a POM using both contributes
+            // from each, which Maven 4 rejects but Maven 3.9 never sees.
+            b"modules" => {
                 model
                     .modules
                     .extend(parser.text_list("modules", b"module")?);
+                Ok(true)
+            }
+            b"subprojects" => {
+                model
+                    .modules
+                    .extend(parser.text_list("subprojects", b"subproject")?);
                 Ok(true)
             }
             b"build" => {
@@ -509,10 +516,16 @@ impl<'i> XmlParser<'i> {
                 profile.dependency_management = parser.parse_dependency_management()?;
                 Ok(true)
             }
-            b"modules" | b"subprojects" => {
+            b"modules" => {
                 profile
                     .modules
                     .extend(parser.text_list("modules", b"module")?);
+                Ok(true)
+            }
+            b"subprojects" => {
+                profile
+                    .modules
+                    .extend(parser.text_list("subprojects", b"subproject")?);
                 Ok(true)
             }
             b"build" => {
@@ -842,13 +855,21 @@ mod tests {
 
     #[test]
     fn modules_accept_both_spellings() {
+        // Maven 4 renamed the wrapper *and* the item element, so <subprojects>
+        // holds <subproject>, not <module>.
         let pom = parse(
             r#"<project>
                  <modules><module>a</module><module>b</module></modules>
-                 <subprojects><module>c</module></subprojects>
+                 <subprojects><subproject>c</subproject></subprojects>
                </project>"#,
         );
         assert_eq!(pom.model.modules, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn subprojects_ignores_the_wrong_item_element() {
+        let pom = parse(r#"<project><subprojects><module>c</module></subprojects></project>"#);
+        assert!(pom.model.modules.is_empty());
     }
 
     #[test]
