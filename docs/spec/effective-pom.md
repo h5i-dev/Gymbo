@@ -311,6 +311,13 @@ Generic rules from the generated base, by field kind:
    that preceded it, then the merged plugin; finally any remaining child-only plugins.
    **Net effect: parent plugin order dominates, child-only plugins keep their relative position.**
 
+**Profile injection (`ProfileModelMerger.mergePluginContainer_Plugins`)** is the mirror image: the
+master map is seeded from the **model's** plugins (so model order dominates), then the profile's
+plugins are merged over them with `mergePlugin(existing, profilePlugin, true)`; profile-only plugins
+are buffered as predecessors of the next colliding key and appended at the end otherwise. Note that
+`ProfileModelMerger` does **not** override `mergePlugin`, so the `isInherited()` gate of §2.5 does not
+apply and `<configuration>`/`<inherited>` are always merged with the profile dominant.
+
 **`InheritanceModelMerger.mergePlugin(target=child, source=parent, false)`** merges, in order:
 `ConfigurationContainer` fields (`inherited`, `configuration`) **only if `source.isInherited()`**,
 then `groupId`, `artifactId`, `version`, `extensions`, `executions`, `dependencies`.
@@ -337,10 +344,12 @@ then `groupId`, `artifactId`, `version`, `extensions`, `executions`, `dependenci
   values win, management only fills gaps.
 * *Profile injection* (`ProfileModelMerger`): model executions first, then the profile's; collision →
   `mergePluginExecution(modelExec, profileExec, true)` → **profile wins**.
-* *Lifecycle bindings* (`LifecycleBindingsMerger`): the POM's plugins are the target and dominate;
-  lifecycle plugins not present in the POM are appended, and if such a plugin is present in
-  `<pluginManagement>` the managed declaration is merged in. `PluginExecution.priority` uses a
-  special rule: the **lower** priority number wins.
+* *Lifecycle bindings* (`LifecycleBindingsMerger`): the POM's plugins are the target and dominate
+  (`mergePlugin(pomPlugin, lifecyclePlugin, false)`); lifecycle plugins not present in the POM are
+  appended, and for each such added plugin that *is* declared in `<pluginManagement>` the merge is
+  redone as `mergePlugin(managedPlugin, addedPlugin, false)` — the **managed declaration becomes the
+  base and wins**, with the lifecycle plugin only filling gaps. `PluginExecution.priority` uses a
+  special rule here: the **lower** priority number wins.
 
 `PluginExecution` fields: `id` and `phase` plain `String`; `priority` `int` → not inherited (see the
 lifecycle exception above); `goals` union (target first, duplicates removed);
@@ -635,6 +644,10 @@ Consequences:
 * The suppression is evaluated **per call**, i.e. per profile list. `activeByDefault` in a parent POM
   is evaluated when the parent's own profile list is processed (§6.8), independently of the child's.
 * Profiles keep declaration order, and the by-default ones are appended at the end.
+* `profile.getSource()` is a **transient, non-XML** field on `Profile` that defaults to `"pom"`;
+  `SettingsUtilsV4` sets it to `"settings.xml"` when converting `settings.xml` profiles. Because POM
+  profiles and settings profiles are always selected in *separate* `getActiveProfiles` calls, the
+  suppression above can only ever fire within a single POM's profile list.
 
 `isActive(profile, context)`: `false` unless at least one activator reports `presentInConfig`, and
 **all** activators that report `presentInConfig` return `true` → **the activators inside one
@@ -674,8 +687,10 @@ integers. On full equality, a non-closed bound returns `-1` for the left / `+1` 
 exclusive). `isInRange`: left relation `0` ⇒ in range; `< 0` ⇒ out; else the right relation must be
 `<= 0`. `NumberFormatException` ⇒ WARNING problem, inactive.
 
-Note the filtering means `[1.8,)` matches `1.8.0_292` (`1.8.0292` → `1,8,0292`? no — the `_` is kept by
-`FILTER_1` and used as a separator by `FILTER_2`, giving `1,8,0,292` → first three `1,8,0`).
+Worked example: `java.version = 1.8.0_292` against the range `[1.8,)`. `FILTER_1` keeps digits, `.`,
+`_` and `-`, so the string is unchanged; `FILTER_2` splits on `[._-]` → `["1","8","0","292"]`; only the
+first three tokens are compared, i.e. `1.8.0`. The lower bound `1.8` is padded to `1.8.0` → equal →
+`leftRelation == 0` (the bound is closed) → in range.
 
 ### 6.3 `os` (`OperatingSystemProfileActivator`)
 
@@ -948,7 +963,7 @@ Ordered by how likely they are to bite a 3.9-compatible implementation.
 | 11 | **`file` activation with both `exists` and `missing`** | `missing` silently ignored. | Same behaviour plus a WARNING. |
 | 12 | **BOM import exclusions (MNG-5600)** | Not supported — `<exclusions>` on an import entry is ignored. | Supported: matching managed entries are filtered out and the exclusions are appended to the survivors. |
 | 13 | **Conflicting BOM imports** | Silently first-wins. | First-wins **plus** a WARNING (MNG-8004). |
-| 14 | **`<type>bom</type>` in dependencyManagement** | No such type. | Skipped by the import scan (left in `dependencyManagement`). |
+| 14 | **`<type>bom</type>` in dependencyManagement** | No such type; any non-`pom` type is simply not an import. | Explicitly excluded from the import scan and left in `dependencyManagement`. The extra clause is redundant with the `type == "pom"` test, so **no behavioural difference**. |
 | 15 | **Reporting steps in phase 2** | `reportConfigurationExpander` and `reportingConverter` run between `injectDefaultValues` and `pluginConfigurationExpander`. | Both removed. Also, `DefaultPluginConfigurationExpander.expandReport` computes a new reporting-plugin list and **discards it**, so reporting `<configuration>` is *not* pushed into report sets at all. |
 | 16 | **URL child-path adjustment source list** | `parent.getModules()` — the only option. | Still `parent.getModules()` only, so a 4.1.0 parent using `<subprojects>` gets an empty adjustment. Implement `modules`. |
 | 17 | **XML `<configuration>` merge** | `plexus-utils` `Xpp3DomUtils.mergeIntoXpp3Dom`; no `combine.self="remove"`. | `DefaultXmlService.doMerge`; adds `combine.self="remove"`, and the dominant's text value always wins. |

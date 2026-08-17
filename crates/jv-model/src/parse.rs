@@ -18,7 +18,8 @@ use quick_xml::name::QName;
 use crate::coordinates::{Dependency, Exclusion};
 use crate::model::{
     Activation, ActivationFile, ActivationOs, ActivationProperty, Build, DistributionManagement,
-    Extension, Model, Parent, Plugin, Profile, Relocation, Repository, RepositoryPolicy,
+    Extension, Model, Parent, Plugin, PluginExecution, Profile, Relocation, Repository,
+    RepositoryPolicy,
 };
 use crate::scope::Scope;
 
@@ -478,11 +479,34 @@ impl<'i> XmlParser<'i> {
                 plugin.dependencies = parser.parse_dependencies()?;
                 Ok(true)
             }
-            // <configuration> and <executions> are skipped: nothing jv does
-            // depends on them, and they are the bulk of a real POM's bytes.
+            b"executions" => {
+                plugin.executions = parser.list(
+                    "executions",
+                    b"execution",
+                    XmlParser::parse_plugin_execution,
+                )?;
+                Ok(true)
+            }
+            // <configuration> is skipped: nothing jv does depends on it, and it
+            // is the bulk of a real POM's bytes.
             _ => Ok(false),
         })?;
         Ok(plugin)
+    }
+
+    pub(crate) fn parse_plugin_execution(&mut self) -> Result<PluginExecution, ParseError> {
+        let mut execution = PluginExecution::default();
+        self.children("execution", |parser, name| match name {
+            b"id" => parser.text_into(&mut execution.id),
+            b"phase" => parser.text_into(&mut execution.phase),
+            b"inherited" => parser.bool_into(&mut execution.inherited),
+            b"goals" => {
+                execution.goals = parser.text_list("goals", b"goal")?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        })?;
+        Ok(execution)
     }
 
     fn parse_extension(&mut self) -> Result<Extension, ParseError> {

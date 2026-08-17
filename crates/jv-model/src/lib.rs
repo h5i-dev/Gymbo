@@ -64,7 +64,8 @@ pub use metadata::{
 pub use model::{
     Activation, ActivationFile, ActivationOs, ActivationProperty, Build, DEFAULT_PACKAGING,
     DEFAULT_PARENT_RELATIVE_PATH, DEFAULT_PLUGIN_GROUP_ID, DistributionManagement, Extension,
-    Model, Parent, Plugin, Profile, Properties, Relocation, Repository, RepositoryPolicy,
+    Model, Parent, Plugin, PluginExecution, Profile, Properties, Relocation, Repository,
+    RepositoryPolicy,
 };
 pub use parse::{ParseError, ParsedPom, parse_pom};
 pub use scope::{Scope, UnknownScope, is_maven_4_scope};

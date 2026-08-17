@@ -146,8 +146,11 @@ impl Build {
 
 /// A `<plugin>`.
 ///
-/// Only the fields needed to resolve the plugin and its dependencies are
-/// modelled; `<configuration>` and `<executions>` are skipped.
+/// Only what is needed to resolve the plugin and its dependencies is modelled.
+/// `<configuration>` is skipped entirely — jv never writes POMs, so opaque
+/// configuration has no consumer — but `<executions>` are kept, because plugin
+/// inheritance consults them: a parent plugin marked `<inherited>false</inherited>`
+/// is still inherited when it declares executions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plugin {
     pub group_id: Option<String>,
@@ -158,6 +161,32 @@ pub struct Plugin {
     /// Whether child projects inherit this plugin declaration.
     pub inherited: Option<bool>,
     pub dependencies: Vec<Dependency>,
+    pub executions: Vec<PluginExecution>,
+}
+
+/// A `<execution>` within a plugin.
+///
+/// Modelled only so plugin inheritance and management can merge executions by
+/// id; jv does not run them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PluginExecution {
+    pub id: Option<String>,
+    pub phase: Option<String>,
+    pub goals: Vec<String>,
+    pub inherited: Option<bool>,
+}
+
+impl PluginExecution {
+    /// The id executions merge on, defaulting to Maven's `default`.
+    pub fn id_or_default(&self) -> &str {
+        self.id.as_deref().unwrap_or("default")
+    }
+
+    /// Whether this execution is inherited, falling back to the plugin's own
+    /// setting when it states nothing.
+    pub fn is_inherited(&self, plugin: &Plugin) -> bool {
+        self.inherited.unwrap_or_else(|| plugin.is_inherited())
+    }
 }
 
 impl Plugin {
