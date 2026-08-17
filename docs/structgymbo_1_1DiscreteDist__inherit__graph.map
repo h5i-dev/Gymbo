@@ -1,6 +1,0 @@
-<map id="gymbo::DiscreteDist" name="gymbo::DiscreteDist">
-<area shape="rect" id="node1" title="Represents a discrete probability distribution." alt="" coords="190,5,345,32"/>
-<area shape="rect" id="node2" href="$structgymbo_1_1BernoulliDist.html" title="Represents a bernoulli distribution derived from DiscreteDist." alt="" coords="5,80,164,107"/>
-<area shape="rect" id="node3" href="$structgymbo_1_1BinomialDist.html" title="Represents a binomial distribution derived from DiscreteDist." alt="" coords="188,80,347,107"/>
-<area shape="rect" id="node4" href="$structgymbo_1_1DiscreteUniformDist.html" title="Represents a discrete uniform distribution derived from DiscreteDist." alt="" coords="371,80,579,107"/>
-</map>

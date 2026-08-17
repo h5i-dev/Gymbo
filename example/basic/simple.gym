@@ -1,7 +1,0 @@
-a = 1;
-b = a + 3;
-c = b;
-e = c + d;
-
-if (f > e)
-    return 1;

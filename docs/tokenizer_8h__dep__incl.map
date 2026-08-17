@@ -1,6 +1,0 @@
-<map id="libgymbo/tokenizer.h" name="libgymbo/tokenizer.h">
-<area shape="rect" id="node1" title="Implementation of tokenizer." alt="" coords="5,5,164,32"/>
-<area shape="rect" id="node2" href="$parser_8h.html" title="Implementation of parser." alt="" coords="15,80,154,107"/>
-<area shape="rect" id="node3" href="$compiler_8h.html" title="Implementation of compiler." alt="" coords="7,155,162,181"/>
-<area shape="rect" id="node4" href="$pipeline_8h.html" title="Basic workloads of gradient&#45;based symbolic execution." alt="" coords="9,229,160,256"/>
-</map>

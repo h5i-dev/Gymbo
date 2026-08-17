@@ -1,4 +1,0 @@
-<map id="gymbo::PSExecutor" name="gymbo::PSExecutor">
-<area shape="rect" id="node1" title="Represents a derived class for symbolic execution engine for probabilistic programs." alt="" coords="13,80,160,107"/>
-<area shape="rect" id="node2" href="$structgymbo_1_1BaseExecutor.html" title="Represents the base class for symbolic execution engine." alt="" coords="5,5,168,32"/>
-</map>

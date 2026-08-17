@@ -1,9 +1,0 @@
-<map id="Graphical Class Hierarchy" name="Graphical Class Hierarchy">
-<area shape="rect" id="node1" title=" " alt="" coords="5,99,151,141"/>
-<area shape="rect" id="node2" href="$classgymbosat_1_1Expr.html" title="Base class for representing logical expressions." alt="" coords="199,107,323,133"/>
-<area shape="rect" id="node3" href="$classgymbosat_1_1And.html" title="Class representing the logical AND operation." alt="" coords="377,5,497,32"/>
-<area shape="rect" id="node4" href="$classgymbosat_1_1Const.html" title="Class representing a boolean constant in a logical expression." alt="" coords="371,56,503,83"/>
-<area shape="rect" id="node5" href="$classgymbosat_1_1Not.html" title="Class representing the logical NOT operation." alt="" coords="377,107,496,133"/>
-<area shape="rect" id="node6" href="$classgymbosat_1_1Or.html" title="Class representing the logical OR operation." alt="" coords="381,157,492,184"/>
-<area shape="rect" id="node7" href="$classgymbosat_1_1Var.html" title="Class representing a variable in a logical expression." alt="" coords="379,208,495,235"/>
-</map>

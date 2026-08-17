@@ -1,5 +1,0 @@
-<map id="libgymbo/smt.h" name="libgymbo/smt.h">
-<area shape="rect" id="node1" title="Core implementation of gradient&#45;based smt solver." alt="" coords="27,5,151,32"/>
-<area shape="rect" id="node2" href="$symbolic_8h.html" title="Core implementation of gradient&#45;based symbolic execution." alt="" coords="9,80,168,107"/>
-<area shape="rect" id="node3" href="$psymbolic_8h.html" title="Implementation of symbolic execution for randomized programs." alt="" coords="5,155,172,181"/>
-</map>

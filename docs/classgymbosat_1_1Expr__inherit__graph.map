@@ -1,9 +1,0 @@
-<map id="gymbosat::Expr" name="gymbosat::Expr">
-<area shape="rect" id="node1" title="Base class for representing logical expressions." alt="" coords="303,95,427,121"/>
-<area shape="rect" id="node3" href="$classgymbosat_1_1And.html" title="Class representing the logical AND operation." alt="" coords="5,169,125,196"/>
-<area shape="rect" id="node4" href="$classgymbosat_1_1Const.html" title="Class representing a boolean constant in a logical expression." alt="" coords="150,169,282,196"/>
-<area shape="rect" id="node5" href="$classgymbosat_1_1Not.html" title="Class representing the logical NOT operation." alt="" coords="306,169,425,196"/>
-<area shape="rect" id="node6" href="$classgymbosat_1_1Or.html" title="Class representing the logical OR operation." alt="" coords="449,169,559,196"/>
-<area shape="rect" id="node7" href="$classgymbosat_1_1Var.html" title="Class representing a variable in a logical expression." alt="" coords="583,169,699,196"/>
-<area shape="rect" id="node2" title=" " alt="" coords="290,5,441,47"/>
-</map>

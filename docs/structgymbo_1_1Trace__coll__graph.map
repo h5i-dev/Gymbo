@@ -1,7 +1,0 @@
-<map id="gymbo::Trace" name="gymbo::Trace">
-<area shape="rect" id="node1" title="Struct representing a trace in symbolic execution." alt="" coords="100,320,209,347"/>
-<area shape="rect" id="node2" href="$structgymbo_1_1SymState.html" title="Struct representing the symbolic state of the symbolic execution." alt="" coords="85,231,224,257"/>
-<area shape="rect" id="node3" href="$structgymbo_1_1SymProb.html" title="Represents a symbolic probability with a numerator and denominator." alt="" coords="5,119,139,146"/>
-<area shape="rect" id="node4" href="$structgymbo_1_1Sym.html" title="Struct representing a symbolic expression." alt="" coords="20,7,124,33"/>
-<area shape="rect" id="node5" href="$classgymbo_1_1Linkedlist.html" title=" " alt="" coords="163,112,311,153"/>
-</map>

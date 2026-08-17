@@ -1,6 +1,0 @@
-<map id="Graphical Class Hierarchy" name="Graphical Class Hierarchy">
-<area shape="rect" id="node1" href="$structgymbo_1_1DiscreteDist.html" title="Represents a discrete probability distribution." alt="" coords="5,56,160,83"/>
-<area shape="rect" id="node2" href="$structgymbo_1_1BernoulliDist.html" title="Represents a bernoulli distribution derived from DiscreteDist." alt="" coords="233,5,391,32"/>
-<area shape="rect" id="node3" href="$structgymbo_1_1BinomialDist.html" title="Represents a binomial distribution derived from DiscreteDist." alt="" coords="233,56,391,83"/>
-<area shape="rect" id="node4" href="$structgymbo_1_1DiscreteUniformDist.html" title="Represents a discrete uniform distribution derived from DiscreteDist." alt="" coords="208,107,416,133"/>
-</map>
