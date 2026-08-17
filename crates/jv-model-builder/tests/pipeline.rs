@@ -1055,3 +1055,53 @@ fn a_parents_file_activation_looks_beside_the_child() {
         .expect("build succeeds");
     assert_eq!(built.active_profiles, ["has-marker"]);
 }
+
+#[test]
+fn derived_build_paths_and_system_properties_resolve_like_mavens() {
+    // All four checked against a real Maven 3.9.9 in one POM. These are the
+    // values a POM *derives* — the fields themselves were already right, which
+    // is why the gap went unnoticed.
+    let workspace = tempfile::tempdir().expect("a temp dir");
+    let pom = r#"<project>
+         <groupId>g</groupId><artifactId>i</artifactId><version>1</version>
+         <build><directory>tgt</directory></build>
+         <properties>
+           <derived.dir>${project.build.directory}/foo</derived.dir>
+           <derived.uri>${project.baseUri}</derived.uri>
+           <derived.separator>${file.separator}</derived.separator>
+         </properties>
+       </project>"#;
+    let model = parse_pom(pom).expect("parses").model;
+    let built = ModelBuilder::new(&MapModelSource::new(), BuildContext::from_environment())
+        .build(SourcedModel::new(model, "test").with_basedir(workspace.path()))
+        .expect("build succeeds");
+
+    let derived = |key: &str| built.model.properties.get(key).cloned().unwrap_or_default();
+
+    // `alignToBaseDirectory` runs over the resolved value, so an expression
+    // reading `<directory>tgt</directory>` gets a real path — jv used to hand
+    // back the fragment `tgt/foo`.
+    let expected_dir = workspace.path().join("tgt").join("foo");
+    assert_eq!(derived("derived.dir"), expected_dir.to_string_lossy());
+    // And the field itself is absolute in the effective model, which Maven's
+    // own `help:effective-pom` confirms — path translation aligns it in phase 2.
+    assert_eq!(
+        built
+            .model
+            .build
+            .as_ref()
+            .and_then(|b| b.directory.as_deref()),
+        Some(workspace.path().join("tgt").to_string_lossy().as_ref())
+    );
+
+    // A directory URI ends in a slash.
+    assert!(
+        derived("derived.uri").ends_with('/'),
+        "got {:?}",
+        derived("derived.uri")
+    );
+
+    // A JVM system property jv has no JVM for, but the process knows anyway.
+    // Leaving it literal put a `${...}` where Maven puts a separator.
+    assert_eq!(derived("derived.separator"), std::path::MAIN_SEPARATOR_STR);
+}

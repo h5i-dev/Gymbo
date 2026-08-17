@@ -262,6 +262,18 @@ impl<'a> Interpolator<'a> {
         self.basedir.map(|dir| dir.to_string_lossy().into_owned())
     }
 
+    /// A build path, resolved against the project directory.
+    ///
+    /// Left alone when it is already absolute, or when there is no directory to
+    /// resolve against — a POM read out of a repository has none.
+    fn aligned(&self, path: Option<&str>) -> Option<String> {
+        let path = path?;
+        let (Some(basedir), false) = (self.basedir, Path::new(path).is_absolute()) else {
+            return Some(path.to_owned());
+        };
+        Some(basedir.join(path).to_string_lossy().into_owned())
+    }
+
     /// Evaluates a path against the model.
     ///
     /// `basedir` and `baseUri` resolve only when reached through a `project.` or
@@ -274,8 +286,11 @@ impl<'a> Interpolator<'a> {
                 "basedir" => return self.basedir_string(),
                 "baseUri" => {
                     return self.basedir.map(|dir| {
-                        // Maven renders this as a file: URI.
-                        format!("file://{}", dir.to_string_lossy())
+                        // Maven renders this as a directory URI, and a directory
+                        // URI ends in `/`. Without it, `${project.baseUri}src`
+                        // yields a sibling of the project rather than a path
+                        // inside it.
+                        format!("file://{}/", dir.to_string_lossy().trim_end_matches('/'))
                     });
                 }
                 _ => {}
@@ -294,10 +309,21 @@ impl<'a> Interpolator<'a> {
             "parent.groupId" => model.parent.as_ref()?.group_id.clone(),
             "parent.artifactId" => model.parent.as_ref()?.artifact_id.clone(),
             "parent.version" => model.parent.as_ref()?.version.clone(),
-            "build.directory" => model.build.as_ref()?.directory.clone(),
-            "build.outputDirectory" => model.build.as_ref()?.output_directory.clone(),
-            "build.testOutputDirectory" => model.build.as_ref()?.test_output_directory.clone(),
-            "build.sourceDirectory" => model.build.as_ref()?.source_directory.clone(),
+            // Build paths come back absolute. Maven's `alignToBaseDirectory`
+            // runs over the *resolved* value, so `${project.build.directory}/x`
+            // is a real path and not a fragment relative to nothing — the POM's
+            // own `<directory>` stays as written, but every expression reading it
+            // gets the aligned form.
+            "build.directory" => self.aligned(model.build.as_ref()?.directory.as_deref()),
+            "build.outputDirectory" => {
+                self.aligned(model.build.as_ref()?.output_directory.as_deref())
+            }
+            "build.testOutputDirectory" => {
+                self.aligned(model.build.as_ref()?.test_output_directory.as_deref())
+            }
+            "build.sourceDirectory" => {
+                self.aligned(model.build.as_ref()?.source_directory.as_deref())
+            }
             "build.testSourceDirectory" => model.build.as_ref()?.test_source_directory.clone(),
             "build.scriptSourceDirectory" => model.build.as_ref()?.script_source_directory.clone(),
             "build.finalName" => model.build.as_ref()?.final_name.clone(),
@@ -674,7 +700,9 @@ mod tests {
         );
         assert_eq!(
             interpolator.interpolate("${project.baseUri}", &mut problems),
-            "file:///work/project"
+            // Trailing slash: it is a *directory* URI, and Maven writes one.
+            // `${project.baseUri}src` must land inside the project.
+            "file:///work/project/"
         );
         // baseUri has no un-prefixed spelling.
         assert_eq!(

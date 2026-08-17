@@ -12,6 +12,7 @@ authors.workspace = true
 jv-model = { workspace = true }
 jv-version = { workspace = true }
 # Only for the vendored plexus lifecycle bindings; POMs are parsed by jv-model.
+dirs = { workspace = true }
 quick-xml = { workspace = true }
 thiserror = { workspace = true }
 

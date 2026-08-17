@@ -56,6 +56,38 @@ impl BuildContext {
         if let Some(version) = os_version() {
             system_properties.insert(OS_VERSION.to_owned(), version);
         }
+        // A POM interpolating `${user.home}` or `${line.separator}` is
+        // interpolating a JVM system property, and Maven resolves it. jv has no
+        // JVM, but these are all things the process already knows, and leaving
+        // them literal put a `${...}` into a path where Maven puts a directory.
+        // `java.version` is not here: it depends on which JDK the build will
+        // use, which is the caller's to decide — see `with_java_version`.
+        for (key, value) in [
+            ("file.separator", std::path::MAIN_SEPARATOR_STR.to_owned()),
+            (
+                "path.separator",
+                if cfg!(windows) { ";" } else { ":" }.to_owned(),
+            ),
+            (
+                "line.separator",
+                if cfg!(windows) { "\r\n" } else { "\n" }.to_owned(),
+            ),
+        ] {
+            system_properties.insert(key.to_owned(), value);
+        }
+        for (key, value) in [
+            ("user.home", dirs::home_dir()),
+            ("user.dir", std::env::current_dir().ok()),
+            ("java.home", std::env::var_os("JAVA_HOME").map(Into::into)),
+        ] {
+            if let Some(value) = value {
+                system_properties.insert(key.to_owned(), value.to_string_lossy().into_owned());
+            }
+        }
+        if let Some(user) = std::env::var_os("USER").or_else(|| std::env::var_os("LOGNAME")) {
+            system_properties.insert("user.name".to_owned(), user.to_string_lossy().into_owned());
+        }
+
         // Maven exposes environment variables as `env.NAME` system properties,
         // which is how `<property><name>env.CI</name></property>` works.
         for (key, value) in std::env::vars() {

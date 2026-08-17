@@ -850,6 +850,7 @@ dependencies = [
 name = "jv-model-builder"
 version = "0.1.0-dev"
 dependencies = [
+ "dirs",
  "jv-model",
  "jv-version",
  "quick-xml",
