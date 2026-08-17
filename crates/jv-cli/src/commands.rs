@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use jv_driver::{Config, Project, Session, SyncRequest};
 use jv_model::{Artifact, Scope};
 use jv_resolver::{Graph, Verbosity};
-use jv_tree::{Options, render};
+use jv_tree::{Format, Options, render};
 use owo_colors::OwoColorize;
 
 use crate::args::{CommonArgs, ResolveArgs, SyncArgs, TreeArgs};
@@ -34,15 +34,19 @@ pub(crate) fn config(common: &CommonArgs) -> Config {
 }
 
 /// Loads the project the flags point at.
-fn project(session: &Session, common: &CommonArgs) -> Result<Project> {
-    match &common.file {
+///
+/// `file` is passed separately rather than living in `CommonArgs`, because
+/// `jvx` and `jv exec` share those args and resolve an endpoint rather than a
+/// project — `-f` there accepted a path and silently did nothing with it.
+fn project(session: &Session, file: Option<&Path>) -> Result<Project> {
+    match file {
         Some(path) => {
             // A directory is accepted where a POM is expected, because `-f
             // ../other-module` is what people type.
             let pom = if path.is_dir() {
                 path.join("pom.xml")
             } else {
-                path.clone()
+                path.to_path_buf()
             };
             session
                 .project_at(&pom)
@@ -60,7 +64,7 @@ fn project(session: &Session, common: &CommonArgs) -> Result<Project> {
 /// `jv tree`.
 pub fn tree(args: &TreeArgs) -> Result<()> {
     let session = Session::new(&config(&args.common))?;
-    let root = project(&session, &args.common)?;
+    let root = project(&session, args.file.as_deref())?;
 
     // Verbose output needs the losing nodes kept, which is a different
     // resolution, not just a different renderer.
@@ -79,6 +83,21 @@ pub fn tree(args: &TreeArgs) -> Result<()> {
     } else {
         vec![&root]
     };
+
+    // Several trees need separating, but only `text` tolerates a separator: a
+    // heading line between two JSON documents is not JSON, and the same holds
+    // for dot, graphml and tgf. Maven writes one document per module rather than
+    // interleaving them, and cannot express this at all.
+    if targets.len() > 1 && args.output_type != Format::Text {
+        bail!(
+            "--recursive cannot be combined with --output-type {}: {} modules would produce {} \
+             documents in one stream, which no reader of that format accepts. Resolve one module \
+             at a time with -f, or use --output-type text.",
+            args.output_type,
+            targets.len(),
+            targets.len()
+        );
+    }
 
     let mut out = String::new();
     for (index, target) in targets.iter().enumerate() {
@@ -106,7 +125,7 @@ pub fn tree(args: &TreeArgs) -> Result<()> {
 /// `jv resolve`.
 pub fn resolve(args: &ResolveArgs) -> Result<()> {
     let session = Session::new(&config(&args.common))?;
-    let root = project(&session, &args.common)?;
+    let root = project(&session, args.file.as_deref())?;
 
     let scope = match &args.scope {
         Some(text) => Some(parse_scope(text)?),
@@ -174,7 +193,7 @@ pub fn sync(args: &SyncArgs) -> Result<()> {
     config.lifecycle_bindings = !args.no_plugins;
 
     let session = Session::new(&config)?;
-    let root = project(&session, &args.common)?;
+    let root = project(&session, args.file.as_deref())?;
     let targets: Vec<&Project> = if args.no_recursive {
         vec![&root]
     } else {

@@ -318,6 +318,10 @@ impl<'a> ModelBuilder<'a> {
             });
         }
 
+        // Last, on the effective model, where Maven validates: `${...}` has to
+        // be resolved and management applied before a coordinate can be judged.
+        problems.extend(crate::validate::validate(&mut assembled, &source_name));
+
         Ok(EffectiveModel {
             model: assembled,
             active_profiles,

@@ -36,6 +36,11 @@ pub struct SyncArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
+    /// The pom.xml to read. Defaults to the nearest one at or above the working
+    /// directory.
+    #[arg(short = 'f', long = "file", value_name = "POM")]
+    pub file: Option<PathBuf>,
+
     /// Sync every module of a multi-module build.
     #[arg(long, default_value_t = true)]
     pub recursive: bool,
@@ -72,11 +77,6 @@ pub struct Jvx {
 /// Options every command that resolves shares.
 #[derive(Args, Debug, Clone)]
 pub struct CommonArgs {
-    /// The pom.xml to read. Defaults to the nearest one at or above the working
-    /// directory.
-    #[arg(short = 'f', long = "file", value_name = "POM")]
-    pub file: Option<PathBuf>,
-
     /// Work offline; fail rather than contact a repository.
     #[arg(short = 'o', long)]
     pub offline: bool,
@@ -182,6 +182,11 @@ pub struct TreeArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
+    /// The pom.xml to read. Defaults to the nearest one at or above the working
+    /// directory.
+    #[arg(short = 'f', long = "file", value_name = "POM")]
+    pub file: Option<PathBuf>,
+
     /// Show why each version was chosen, and which ones lost.
     #[arg(long)]
     pub verbose: bool,
@@ -213,6 +218,11 @@ pub struct TreeArgs {
 pub struct ResolveArgs {
     #[command(flatten)]
     pub common: CommonArgs,
+
+    /// The pom.xml to read. Defaults to the nearest one at or above the working
+    /// directory.
+    #[arg(short = 'f', long = "file", value_name = "POM")]
+    pub file: Option<PathBuf>,
 
     /// Download the artifacts and print their paths in the cache.
     #[arg(long)]

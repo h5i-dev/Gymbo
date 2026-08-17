@@ -94,6 +94,7 @@ mod management;
 mod merge;
 mod problem;
 mod source;
+mod validate;
 
 pub use activation::{ActivationContext, ProfileSource, select_active_profiles};
 pub use builder::{EffectiveModel, ModelBuilder, build_effective_model};
@@ -107,3 +108,4 @@ pub use management::{
 pub use merge::{assemble_inheritance, inject_profile};
 pub use problem::{BuildError, Problem, Severity};
 pub use source::{MapModelSource, ModelSource, SourcedModel};
+pub use validate::{is_valid_id, is_valid_version};
