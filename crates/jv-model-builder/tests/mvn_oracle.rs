@@ -29,7 +29,10 @@ fn maven() -> Result<PathBuf, String> {
         if path.is_file() {
             return Ok(path);
         }
-        return Err(format!("JV_MVN points at {}, which is not a file", path.display()));
+        return Err(format!(
+            "JV_MVN points at {}, which is not a file",
+            path.display()
+        ));
     }
     let probe = Command::new("mvn").arg("-v").output();
     match probe {
@@ -41,9 +44,7 @@ fn maven() -> Result<PathBuf, String> {
 fn local_repository() -> PathBuf {
     std::env::var_os("JV_LOCAL_REPO")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".m2/repository"))
-        })
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".m2/repository")))
         .expect("a home directory")
 }
 
@@ -57,7 +58,12 @@ struct LocalModelSource {
 }
 
 impl ModelSource for LocalModelSource {
-    fn get(&self, group_id: &str, artifact_id: &str, version: &str) -> Result<SourcedModel, String> {
+    fn get(
+        &self,
+        group_id: &str,
+        artifact_id: &str,
+        version: &str,
+    ) -> Result<SourcedModel, String> {
         let path = self
             .local_repository
             .join(group_id.replace('.', "/"))
@@ -85,7 +91,10 @@ impl ModelSource for LocalModelSource {
         let xml = std::fs::read_to_string(&candidate)
             .map_err(|error| format!("{}: {error}", candidate.display()))?;
         let parsed = parse_pom(&xml).map_err(|error| error.to_string())?;
-        let basedir = candidate.parent().map(Path::to_path_buf).unwrap_or_default();
+        let basedir = candidate
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         Ok(Some(
             SourcedModel::new(parsed.model, candidate.display().to_string()).with_basedir(basedir),
         ))
@@ -126,7 +135,8 @@ fn maven_effective_pom(mvn: &Path, project: &Path) -> Result<Model, String> {
 /// jv's answer for the same project.
 fn jv_effective_pom(project: &Path) -> Result<Model, String> {
     let pom = project.join("pom.xml");
-    let xml = std::fs::read_to_string(&pom).map_err(|error| format!("{}: {error}", pom.display()))?;
+    let xml =
+        std::fs::read_to_string(&pom).map_err(|error| format!("{}: {error}", pom.display()))?;
     let model = parse_pom(&xml).map_err(|error| error.to_string())?.model;
     let source = LocalModelSource {
         local_repository: local_repository(),
@@ -307,7 +317,10 @@ fn effective_poms_match_maven() {
         let actual = match jv_effective_pom(project) {
             Ok(model) => model,
             Err(why) => {
-                failures.push(format!("{}: jv could not build the model: {why}", project.display()));
+                failures.push(format!(
+                    "{}: jv could not build the model: {why}",
+                    project.display()
+                ));
                 continue;
             }
         };

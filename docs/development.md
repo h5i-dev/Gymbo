@@ -53,6 +53,28 @@ JV_REQUIRE_ORACLE=1 cargo test --workspace
 
 Override source discovery with `JV_MAVEN_RESOLVER_SRC=/path/to/maven-resolver`.
 
+## The Maven oracle
+
+Effective-POM tests diff jv against real Maven. Put a Maven 3.9 on `PATH`, or
+point `JV_MVN` at one:
+
+```sh
+curl -sSLo maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz
+curl -sSLo maven.tar.gz.sha512 https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz.sha512
+echo "$(cat maven.tar.gz.sha512)  maven.tar.gz" | sha512sum -c -
+tar xzf maven.tar.gz
+export JV_MVN="$PWD/apache-maven-3.9.9/bin/mvn"
+```
+
+Pin the version rather than taking whatever is installed: the point of the test
+is that jv agrees with a *known* Maven, and a floating oracle turns a
+compatibility regression into a mystery. Maven 3.9 specifically — jv targets its
+behavior, and Maven 4 differs in ways that would show up as failures here.
+
+The first run downloads the help plugin and the fixtures' BOMs into `~/.m2`;
+after that it needs no network. `JV_LOCAL_REPO` overrides where jv looks for
+them.
+
 ## Known upstream divergences
 
 Maven has two version implementations that do not agree with each other:

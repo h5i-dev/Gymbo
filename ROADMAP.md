@@ -122,9 +122,11 @@ real win; yummy/wukong use blocking reqwest and it shows in their fetch
 batching), `quick-xml` for streaming POM parsing (coursier's SAX
 `PomParser.scala` proves DOM is unnecessary; POMs are numerous and small),
 `clap`, `sha1`/`sha2`, `zip`, `fs4` file locks, `dirs`, `rayon` for CPU-side
-work. Release profile copied from wukong's `Cargo.toml`: `opt-level="z"`,
-`lto=true`, `panic="abort"`, `codegen-units=1`; distribution via `cargo-dist`
-(+ `cargo binstall`, Homebrew tap, `curl | sh`).
+work. The release profile deliberately departs from wukong's size-tuned one:
+jv's product claim is latency, so it optimizes for speed (`opt-level=3`,
+`lto="fat"`, `codegen-units=1`, `panic="abort"`, `strip`) rather than for
+`opt-level="z"`. Distribution via `cargo-dist` (+ `cargo binstall`, Homebrew
+tap, `curl | sh`).
 
 ### 3.3 Effective POM pipeline (`jv-model-builder`)
 
