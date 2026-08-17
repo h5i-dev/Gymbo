@@ -54,6 +54,11 @@ use crate::source::{ModelSource, SourcedModel};
 /// this is a cycle the identity checks somehow missed.
 const MAX_LINEAGE: usize = 64;
 
+/// Bounds nested BOM imports, for the same reason and with more urgency: the
+/// import path recurses, so an unbounded chain is a stack overflow rather than a
+/// slow build. Real nesting is two or three deep.
+const MAX_IMPORT_DEPTH: usize = 64;
+
 /// Maven 3.9's super POM, the implicit root of every parent chain.
 ///
 /// Embedded verbatim from `maven-model-builder-3.9.9.jar`
@@ -392,6 +397,23 @@ impl<'a> ModelBuilder<'a> {
     ) {
         let imports = extract_bom_imports(model, source_name, problems);
         if imports.is_empty() {
+            return;
+        }
+
+        // Bounded like the parent chain is. A BOM that imports a BOM that
+        // imports a BOM recurses through `build_bom`, and a repository serving a
+        // long enough chain overflowed the stack — which with `panic = "abort"`
+        // is a process abort an embedder cannot catch, not a build failure.
+        // Maven throws a `StackOverflowError` and reports it; jv reports it
+        // before the stack runs out.
+        if import_ids.len() >= MAX_IMPORT_DEPTH {
+            problems.push(Problem::error(
+                source_name,
+                format!(
+                    "dependencies of type=pom and scope=import are nested more than \
+                     {MAX_IMPORT_DEPTH} deep; the rest were not read"
+                ),
+            ));
             return;
         }
 
