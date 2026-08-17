@@ -16,9 +16,9 @@ com.example:demo:jar:1.0
    ...
 ```
 
-> **Status: early development.** `jv tree` and `jv resolve` work and match
-> Maven's output byte for byte. There are no prebuilt binaries yet; build with
-> `cargo build --release` and the binary lands at `target/release/jv`.
+> **Status: early development.** `jv tree`, `jv resolve`, `jv sync` and `jvx`
+> work. There are no prebuilt binaries yet; build with `cargo build --release`
+> and the binaries land in `target/release/`.
 
 ## Speed
 
@@ -33,6 +33,15 @@ cache for the cold row. `scripts/benchmark.sh` produces this table, and refuses
 to report a time unless the two tools' output matches first — a benchmark
 against wrong output measures nothing. Cold timings are network-bound and will
 differ on your machine; the warm row is the one that reflects the tool.
+
+## Commands
+
+```console
+$ jv tree                     # the dependency tree, byte-identical to Maven's
+$ jv resolve --classpath      # a classpath you can paste into java -cp
+$ jv sync && mvn -o verify    # jv downloads, Maven builds, no network
+$ jvx com.google.googlejavaformat:google-java-format -- --version
+```
 
 ## Why
 
@@ -51,7 +60,8 @@ reproduce `mvn dependency:tree`.
 | `jv-resolver` | Dependency collection, nearest-wins conflict resolution | ✅ |
 | `jv-repo`, `jv-cache` | Repositories, downloads, integrity, caching | ✅ |
 | `jv-tree`, `jv-driver`, `jv-cli` | `jv tree`, `jv resolve` | ✅ |
-| `jv sync`, `jvx` | The remaining commands | |
+| `jv-driver` sync | `jv sync` — populate `~/.m2` so `mvn -o` works | ✅ |
+| `jv-exec` | `jvx` — run a tool from its coordinates | ✅ |
 
 `ROADMAP.md` holds the architecture and the milestones.
 

@@ -135,6 +135,8 @@ pub fn sync(
     };
 
     let mut wanted: Vec<Artifact> = Vec::new();
+    // Whether any plugin in the build resolves a test provider at run time.
+    let mut selects_providers = false;
 
     for project in projects {
         // Test scope, because a build runs tests: it is the widest composition
@@ -185,7 +187,20 @@ pub fn sync(
                             push(&mut wanted, &reactor, dependency);
                         }
                     }
+                    selects_providers |= selects_providers_for(&artifact);
                 }
+            }
+        }
+    }
+
+    // Surefire aligns its JUnit Platform launcher to the platform version it
+    // finds on the *test classpath*, not to anything the provider declares — so
+    // the version can only be read off the graph, after it is collected.
+    if selects_providers {
+        for launcher in aligned_launchers(&wanted) {
+            push(&mut wanted, &reactor, launcher.clone());
+            for dependency in plugin_dependencies(session, &launcher, &Plugin::default())? {
+                push(&mut wanted, &reactor, dependency);
             }
         }
     }
@@ -371,23 +386,58 @@ const SUREFIRE_PROVIDERS: &[&str] = &[
     "common-java5",
 ];
 
-/// Artifacts a plugin will resolve for itself at execution time.
+/// Whether a plugin picks a test provider at execution time.
 ///
-/// Returns nothing for every plugin but surefire and failsafe, which are the two
-/// in the default lifecycle that do this.
-fn runtime_selected(plugin: &Artifact) -> Vec<Artifact> {
-    let selects_providers = plugin.group_id == "org.apache.maven.plugins"
+/// Surefire and failsafe are the two in the default lifecycle that do.
+fn selects_providers_for(plugin: &Artifact) -> bool {
+    plugin.group_id == "org.apache.maven.plugins"
         && matches!(
             plugin.artifact_id.as_str(),
             "maven-surefire-plugin" | "maven-failsafe-plugin"
-        );
-    if !selects_providers {
+        )
+}
+
+/// Artifacts a plugin will resolve for itself at execution time.
+fn runtime_selected(plugin: &Artifact) -> Vec<Artifact> {
+    if !selects_providers_for(plugin) {
         return Vec::new();
     }
     SUREFIRE_PROVIDERS
         .iter()
         .map(|provider| Artifact::new("org.apache.maven.surefire", *provider, &plugin.version))
         .collect()
+}
+
+/// The JUnit Platform launcher, at the platform version already in the graph.
+///
+/// Surefire's JUnit Platform provider does not depend on the launcher at a fixed
+/// version: it reads the platform version off the test classpath and resolves a
+/// matching launcher, so that a project pinning JUnit 5.10 is not run by a
+/// launcher built for 5.12. The version is therefore knowable only from the
+/// resolved graph, which is why this runs after collection rather than beside
+/// the plugin that needs it.
+fn aligned_launchers(wanted: &[Artifact]) -> Vec<Artifact> {
+    let mut launchers: Vec<Artifact> = Vec::new();
+    for artifact in wanted {
+        if artifact.group_id != "org.junit.platform" {
+            continue;
+        }
+        if !matches!(
+            artifact.artifact_id.as_str(),
+            "junit-platform-commons" | "junit-platform-engine"
+        ) {
+            continue;
+        }
+        let launcher = Artifact::new(
+            "org.junit.platform",
+            "junit-platform-launcher",
+            &artifact.version,
+        );
+        if !launchers.contains(&launcher) {
+            launchers.push(launcher);
+        }
+    }
+    launchers
 }
 
 /// A plugin's own artifact, if it states a version.
