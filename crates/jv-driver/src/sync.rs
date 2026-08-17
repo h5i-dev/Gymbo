@@ -566,6 +566,12 @@ fn materialize(
     }
     match copy_new(cached, &destination) {
         Ok(()) => Ok(Some(destination)),
+        // Somebody else placed it between the check above and the create. That
+        // is another `jv sync` — or a Maven — winning a race jv does not need to
+        // win, so it is a success with nothing to report. Treating it as a
+        // failure produced a warning per artifact whenever two syncs shared a
+        // local repository, which is the CI case this command exists for.
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
         Err(source) => {
             // One unwritable file should not abort a sync of a thousand.
             report
@@ -718,6 +724,35 @@ mod tests {
         let placed = materialize(&cached, &local, &artifact_path(&artifact), &mut report).unwrap();
         assert_eq!(placed, None);
         assert!(!victim.exists(), "the write followed the symlink");
+    }
+
+    #[test]
+    fn losing_the_race_to_place_a_file_is_not_a_complaint() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("https/host/a.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"payload").unwrap();
+
+        let local = dir.path().join("m2");
+        let artifact = Artifact::new("org.slf4j", "slf4j-api", "2.0.9");
+        let relative = artifact_path(&artifact);
+        let destination = local.join(&relative);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+        // First placement succeeds; the second finds it already there. Two
+        // concurrent syncs sharing a local repository hit this on nearly every
+        // artifact, and reporting it warned once per file for nothing.
+        let mut report = SyncReport::default();
+        assert!(
+            materialize(&cached, &local, &relative, &mut report)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            materialize(&cached, &local, &relative, &mut report).unwrap(),
+            None
+        );
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
     #[test]
