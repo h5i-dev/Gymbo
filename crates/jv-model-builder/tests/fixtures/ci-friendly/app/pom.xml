@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>dev.jv.itest</groupId><artifactId>ci-parent</artifactId><version>${revision}</version>
+  </parent>
+  <artifactId>ci-app</artifactId>
+  <dependencies>
+    <dependency><groupId>dev.jv</groupId><artifactId>lib</artifactId></dependency>
+  </dependencies>
+</project>

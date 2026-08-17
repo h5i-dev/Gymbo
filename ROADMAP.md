@@ -455,12 +455,26 @@ ordering assertions) with the 2 known legacy disagreements marked and excluded;
 with the real `GenericVersion` compiled from the reference clone. The original
 gate ("100% on both corpora") was unreachable as written — see §3.5.
 
-### M2 — `jv-model` + `jv-model-builder`
+### M2 — `jv-model` + `jv-model-builder` ✅
 Streaming POM parser; full effective-POM pipeline (§3.3); settings.xml and
 maven-metadata.xml models.
-**Gate:** adapted `PomConstructionTest` corpus passes (dependency-affecting
-subset ≥ 95%, every skip documented); parent chains of camel/flink/hadoop
-build correct effective POMs offline (recorded fixtures).
+**Gate:** met by a stronger route than planned. Rather than adapting
+`PomConstructionTest`'s harness, jv is diffed against **real Maven 3.9.9**:
+`mvn help:effective-pom` emits a POM, jv's own parser reads it, and the two
+`Model` values are compared field by field. Nine fixture projects agree exactly,
+covering multi-module inheritance, a real Central BOM import with local override,
+`activeByDefault` suppression against file activation, `${revision}` across a
+parent boundary, and a three-level chain carrying a version from a grandparent
+property through management into a declaration. The parser is separately verified
+against every POM in the reference clones (2865 of 2867; the two exceptions are
+not POMs).
+
+Two ROADMAP assumptions were corrected while implementing this. Maven 3.9 and
+Maven 4 order interpolation sources differently — 3.9 ranks `${project.*}` above
+both user and POM properties, Maven 4 below both — so following the wrong one
+would silently change resolved versions. And Maven 4 removed `central` from the
+super POM, so the super POM has to come from a real 3.9 distribution rather than
+from the reference clone, or no project would have any repository at all.
 
 ### M3 — `jv-resolver` (pure core)
 BF collection + skipper, exclusions, classic depth-1 depMgmt, ranges,

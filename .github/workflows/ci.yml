@@ -47,6 +47,18 @@ jobs:
           mkdir -p _reference
           git clone --depth 1 https://github.com/apache/maven-resolver _reference/maven-resolver
 
+      # A real Maven 3.9 is the oracle for effective POMs and, later, for
+      # `dependency:tree` output parity. Pinned and checksum-verified because the
+      # answers jv is compared against must not drift silently.
+      - name: Install Maven 3.9.9
+        run: |
+          set -euo pipefail
+          curl -sSLo maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz
+          curl -sSLo maven.tar.gz.sha512 https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz.sha512
+          echo "$(cat maven.tar.gz.sha512)  maven.tar.gz" | shasum -a 512 -c -
+          tar xzf maven.tar.gz
+          echo "JV_MVN=$PWD/apache-maven-3.9.9/bin/mvn" >> "$GITHUB_ENV"
+
       - run: cargo test --workspace --all-features
         env:
           JV_REQUIRE_ORACLE: "1"
