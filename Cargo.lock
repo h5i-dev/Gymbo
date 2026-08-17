@@ -776,6 +776,7 @@ version = "0.1.0-dev"
 dependencies = [
  "dirs",
  "fs4",
+ "futures-util",
  "hex",
  "jv-model",
  "jv-repo",
@@ -810,6 +811,7 @@ name = "jv-driver"
 version = "0.1.0-dev"
 dependencies = [
  "dirs",
+ "futures-util",
  "jv-cache",
  "jv-model",
  "jv-model-builder",

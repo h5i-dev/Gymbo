@@ -16,6 +16,7 @@ jv-repo = { workspace = true }
 jv-resolver = { workspace = true }
 jv-version = { workspace = true }
 dirs = { workspace = true }
+futures-util = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 

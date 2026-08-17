@@ -219,11 +219,23 @@ pub fn resolve_with_trust(
     resolved
 }
 
-/// The first mirror that claims this repository.
+/// The mirror that claims this repository.
+///
+/// Two passes, as `DefaultMirrorSelector.findMirror` does: a mirror whose
+/// `<mirrorOf>` is exactly this repository's id wins over any pattern, wherever
+/// the two sit in the file. Taking the first match in file order instead sent
+/// Central's traffic — and the wildcard mirror's credentials — to the wildcard
+/// host in the very ordinary configuration where `<mirrorOf>*</mirrorOf>` is
+/// listed above a `<mirrorOf>central</mirrorOf>`.
 fn select_mirror<'a>(repository: &Repository, mirrors: &'a [Mirror]) -> Option<&'a Mirror> {
     mirrors
         .iter()
-        .find(|mirror| mirror.matches(&repository.id, &repository.url))
+        .find(|mirror| mirror.mirror_of.as_deref() == Some(repository.id.as_str()))
+        .or_else(|| {
+            mirrors
+                .iter()
+                .find(|mirror| mirror.matches(&repository.id, &repository.url))
+        })
 }
 
 fn apply_mirror(repository: &Repository, mirror: &Mirror) -> Repository {
@@ -402,6 +414,27 @@ mod tests {
         assert_eq!(resolved[0].credentials.username.as_deref(), Some("ci"));
         // Sending ciphertext would authenticate as nobody and report a 401.
         assert_eq!(resolved[0].credentials.password, None);
+    }
+
+    #[test]
+    fn an_exact_mirror_wins_over_a_wildcard_listed_before_it() {
+        let settings = settings(
+            r#"<settings><mirrors>
+                 <mirror><id>catch-all</id><url>https://catchall</url><mirrorOf>*</mirrorOf></mirror>
+                 <mirror><id>for-central</id><url>https://central-mirror</url>
+                   <mirrorOf>central</mirrorOf></mirror>
+               </mirrors></settings>"#,
+        );
+        let resolved = resolve_repositories(&[Repository::central()], &settings);
+        // Upstream matches exact ids in a first pass, so file order does not
+        // decide this. Getting it wrong sends Central's traffic — and the
+        // catch-all's credentials — to the wrong host.
+        assert_eq!(resolved[0].id, "for-central");
+        assert_eq!(resolved[0].url, "https://central-mirror");
+
+        // A repository the exact mirror does not name still takes the wildcard.
+        let other = resolve_repositories(&[Repository::new("other", "https://other")], &settings);
+        assert_eq!(other[0].id, "catch-all");
     }
 
     #[test]

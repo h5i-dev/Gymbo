@@ -398,13 +398,20 @@ impl Fetcher {
             return Ok(Vec::new());
         }
 
-        for algorithm in checksum::PREFERRED {
-            let checksum_url = checksum_path(url, *algorithm);
-            let published = match self
-                .transport
-                .get(&checksum_url, &repository.credentials)
-                .await
-            {
+        // All algorithms at once. Asking in turn cost the common case — an
+        // artifact publishing only `.sha1` — two sequential 404s before the one
+        // that answers, on the critical path of every single download.
+        let published = futures_util::future::join_all(checksum::PREFERRED.iter().map(
+            |algorithm| async move {
+                self.transport
+                    .get(&checksum_path(url, *algorithm), &repository.credentials)
+                    .await
+            },
+        ))
+        .await;
+
+        for (algorithm, published) in checksum::PREFERRED.iter().zip(published) {
+            let published = match published {
                 Ok(Some(bytes)) => bytes,
                 // Not published, or the request failed: try a weaker algorithm.
                 Ok(None) | Err(_) => continue,

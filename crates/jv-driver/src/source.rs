@@ -427,13 +427,23 @@ impl RepositorySource {
     /// taken from the first hit: each repository knows only about the versions it
     /// holds, and a range must see all of them.
     fn metadata(&self, path: &str, version_hint: &str) -> Result<Vec<Metadata>, DriverError> {
+        let repositories = self.repositories();
+        // All at once, not one after another. This sits on the synchronous
+        // critical path — every version range and every snapshot resolution goes
+        // through it — so asking three repositories in turn spent three round
+        // trips where one would do, and unlike a POM fetch there is no
+        // prefetcher running ahead to hide them.
+        let fetched: Vec<_> =
+            self.runtime
+                .block_on(futures_util::future::join_all(repositories.iter().map(
+                    |repository| {
+                        self.fetcher
+                            .optional(std::slice::from_ref(repository), path, version_hint)
+                    },
+                )));
+
         let mut found = Vec::new();
-        for repository in self.repositories() {
-            let fetched = self.runtime.block_on(self.fetcher.optional(
-                std::slice::from_ref(&repository),
-                path,
-                version_hint,
-            ));
+        for (repository, fetched) in repositories.iter().zip(fetched) {
             let Some(fetched) = fetched? else { continue };
             match parse_metadata(&String::from_utf8_lossy(&fetched.bytes)) {
                 Ok(metadata) => found.push(metadata),

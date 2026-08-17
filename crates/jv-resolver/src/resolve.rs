@@ -594,6 +594,11 @@ impl Resolver<'_> {
             // verbose tree shows the loser without re-printing its subtree.
             let mut copy = graph.node(node).clone();
             copy.children = Vec::new();
+            // The clone brought the original's child-list identity with it, but
+            // not its children — so the copy would claim to *be* a list it does
+            // not have, and anything keying on that identity would find an empty
+            // subtree where the real one is.
+            copy.children_key = None;
             copy.original_scope = copy.scope_of_dependency();
             copy.omitted_for = graph
                 .node(winner_node)

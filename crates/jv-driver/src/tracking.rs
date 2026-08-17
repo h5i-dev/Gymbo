@@ -107,6 +107,18 @@ impl Tracking {
     }
 
     /// Writes the file, replacing whatever was there.
+    ///
+    /// Through a temp file and a rename, because a truncating write here is not
+    /// a recoverable loss. Interrupt one mid-write and the truncation can land
+    /// inside a key — leaving a file *mentioned* under an id no configured
+    /// repository has, and with no locally-installed form beside it. That is
+    /// precisely the state `docs/spec/local-repository.md` records as fatal:
+    /// `mvn -o` then refuses an artifact that is physically present, and no
+    /// amount of re-running fixes it because the artifact is already there so jv
+    /// never rewrites the file.
+    ///
+    /// This directory belongs to Maven, so the temp name is unique per writer and
+    /// the rename is atomic: a concurrent Maven never sees a partial file.
     pub fn write(&self, directory: &Path) -> Result<PathBuf, DriverError> {
         let path = directory.join(TRACKING_FILE);
         let mut text = String::with_capacity(64 + self.entries.len() * 48);
@@ -116,10 +128,25 @@ impl Tracking {
             text.push_str(key);
             text.push_str("=\n");
         }
-        std::fs::write(&path, text).map_err(|source| DriverError::Io {
-            path: path.clone(),
-            source,
-        })?;
+
+        let temporary = directory.join(format!("{TRACKING_FILE}.jv{}.tmp", std::process::id()));
+        let write = || -> std::io::Result<()> {
+            let mut file = std::fs::File::create(&temporary)?;
+            std::io::Write::write_all(&mut file, text.as_bytes())?;
+            // The content must reach disk before the rename publishes it;
+            // otherwise a crash can leave the new name pointing at nothing.
+            file.sync_all()?;
+            std::fs::rename(&temporary, &path)
+        };
+        if let Err(source) = write() {
+            // Leaving a stray temp file in Maven's tree would be its own small
+            // rudeness.
+            let _ = std::fs::remove_file(&temporary);
+            return Err(DriverError::Io {
+                path: path.clone(),
+                source,
+            });
+        }
         Ok(path)
     }
 }
@@ -260,6 +287,49 @@ mod tests {
         // The timestamp comment is not reproduced: it would rewrite every file
         // on every sync for no reason.
         assert!(!written.contains("EDT"));
+    }
+
+    #[test]
+    fn writing_leaves_no_temporary_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracking = Tracking::default();
+        tracking.record("a-1.0.jar", Some("central"));
+        tracking.write(dir.path()).unwrap();
+
+        let strays: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != TRACKING_FILE)
+            .collect();
+        assert!(strays.is_empty(), "left behind: {strays:?}");
+    }
+
+    #[test]
+    fn a_rewrite_is_never_observed_half_written() {
+        // The failure this guards is not theoretical: a truncation landing inside
+        // a key leaves a file mentioned under an id no repository has, which
+        // makes `mvn -o` refuse an artifact that is physically present — and jv
+        // never rewrites it, because the artifact is already in place.
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = Tracking::default();
+        for index in 0..200 {
+            first.record(&format!("artifact-{index}.jar"), Some("central"));
+        }
+        first.write(dir.path()).unwrap();
+
+        let mut second = Tracking::read(dir.path()).unwrap();
+        second.record("late-arrival.jar", Some("central"));
+        second.write(dir.path()).unwrap();
+
+        // Every line is complete: a key, then `=`, and nothing truncated.
+        let written = std::fs::read_to_string(dir.path().join(TRACKING_FILE)).unwrap();
+        for line in written.lines().filter(|line| !line.starts_with('#')) {
+            assert!(line.ends_with('='), "truncated line: {line:?}");
+            assert!(line.contains('>'), "malformed key: {line:?}");
+        }
+        assert!(written.contains("late-arrival.jar>="));
+        assert!(written.contains("artifact-199.jar>="));
     }
 
     #[test]
