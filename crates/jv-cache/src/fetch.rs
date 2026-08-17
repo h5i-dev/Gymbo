@@ -137,6 +137,55 @@ impl Fetcher {
         self.fetch(&usable, &path, &artifact.version, true).await
     }
 
+    /// Puts an artifact in the cache and returns where it landed, without
+    /// reading it.
+    ///
+    /// `jv sync` wants a few hundred files on disk so it can link them into
+    /// `~/.m2`; it never looks inside one. Going through [`Fetcher::artifact`]
+    /// for that meant loading every jar into memory and then reading the same
+    /// file again to copy it — hundreds of megabytes allocated and discarded on a
+    /// build with fat jars.
+    ///
+    /// A cache hit costs a `stat` here rather than a full read. A miss still
+    /// downloads through the same path, because the bytes have to be verified and
+    /// written whether or not the caller wants them.
+    pub async fn locate(
+        &self,
+        repositories: &[Repository],
+        artifact: &Artifact,
+    ) -> Result<Fetched, FetchError> {
+        let path = artifact_path(artifact);
+        for repository in repositories
+            .iter()
+            .filter(|repository| repository.accepts(&artifact.version))
+        {
+            let url = join_url(&repository.url, &path);
+            let is_mutable = jv_model::is_snapshot_version(&artifact.version);
+            if self.is_fresh(&url, repository.policy_for(&artifact.version), is_mutable)? {
+                return Ok(Fetched {
+                    bytes: Vec::new(),
+                    origin: Origin::Cache,
+                    repository: Some(repository.id.clone()),
+                    path: self.store.path_for(&url)?,
+                    warnings: Vec::new(),
+                });
+            }
+        }
+        if let Some(local) = &self.local_repository {
+            let candidate = local.join(&path);
+            if candidate.is_file() {
+                return Ok(Fetched {
+                    bytes: Vec::new(),
+                    origin: Origin::LocalRepository,
+                    repository: None,
+                    path: candidate,
+                    warnings: Vec::new(),
+                });
+            }
+        }
+        self.artifact(repositories, artifact).await
+    }
+
     /// Fetches a repository-relative path that is not an artifact, such as
     /// `maven-metadata.xml`.
     ///
@@ -331,6 +380,24 @@ impl Fetcher {
             }
         }
         Ok(None)
+    }
+
+    /// Whether a cached entry is present and usable, without reading it.
+    ///
+    /// The same rules as [`Fetcher::cached`], asked of the filesystem metadata
+    /// rather than the contents.
+    fn is_fresh(&self, url: &str, policy: &Policy, is_mutable: bool) -> Result<bool, StoreError> {
+        if !self.store.path_for(url)?.is_file() {
+            return Ok(false);
+        }
+        if !is_mutable || self.offline {
+            return Ok(true);
+        }
+        Ok(match self.store.checked_at(url)? {
+            Some(checked) => !policy.update.is_stale(checked, SystemTime::now()),
+            // As in `cached`: a mutable entry with no stamp is stale.
+            None => false,
+        })
     }
 
     /// The cached bytes, if present and usable.

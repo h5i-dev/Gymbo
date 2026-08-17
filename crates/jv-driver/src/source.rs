@@ -714,9 +714,12 @@ impl RepositorySource {
             ..artifact.clone()
         };
         let repositories = self.repositories();
+        // `locate`, not `artifact`: the caller wants the file on disk, not its
+        // contents, and reading a few hundred jars into memory to throw them away
+        // is the whole cost of a large `jv sync`.
         match self
             .runtime
-            .block_on(self.fetcher.artifact(&repositories, &resolved))
+            .block_on(self.fetcher.locate(&repositories, &resolved))
         {
             Ok(fetched) => {
                 for warning in &fetched.warnings {

@@ -52,7 +52,7 @@
 //! that directory belongs to Maven, and a file already there is Maven's answer,
 //! not jv's to correct.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use jv_model::{Artifact, Dependency, Plugin, Scope, is_snapshot_version};
@@ -134,7 +134,7 @@ pub fn sync(
         BTreeSet::new()
     };
 
-    let mut wanted: Vec<Artifact> = Vec::new();
+    let mut wanted = Wanted::default();
     // Whether any plugin in the build resolves a test provider at run time.
     let mut selects_providers = false;
 
@@ -155,7 +155,7 @@ pub fn sync(
             let Some(artifact) = &node.artifact else {
                 continue;
             };
-            push(&mut wanted, &reactor, artifact.clone());
+            wanted.push(&reactor, artifact.clone());
         }
 
         if request.plugins {
@@ -172,19 +172,19 @@ pub fn sync(
                     ));
                     continue;
                 };
-                push(&mut wanted, &reactor, artifact.clone());
+                wanted.push(&reactor, artifact.clone());
 
                 if request.plugin_dependencies {
                     for dependency in plugin_dependencies(session, &artifact, &plugin)? {
-                        push(&mut wanted, &reactor, dependency);
+                        wanted.push(&reactor, dependency);
                     }
                     // And whatever the plugin will pick for itself at run time,
                     // which is in no POM and which `go-offline` also misses.
                     for extra in runtime_selected(&artifact) {
-                        push(&mut wanted, &reactor, extra.clone());
+                        wanted.push(&reactor, extra.clone());
                         for dependency in plugin_dependencies(session, &extra, &Plugin::default())?
                         {
-                            push(&mut wanted, &reactor, dependency);
+                            wanted.push(&reactor, dependency);
                         }
                     }
                     selects_providers |= selects_providers_for(&artifact);
@@ -197,10 +197,10 @@ pub fn sync(
     // finds on the *test classpath*, not to anything the provider declares — so
     // the version can only be read off the graph, after it is collected.
     if selects_providers {
-        for launcher in aligned_launchers(&wanted) {
-            push(&mut wanted, &reactor, launcher.clone());
+        for launcher in aligned_launchers(&wanted.ordered) {
+            wanted.push(&reactor, launcher.clone());
             for dependency in plugin_dependencies(session, &launcher, &Plugin::default())? {
-                push(&mut wanted, &reactor, dependency);
+                wanted.push(&reactor, dependency);
             }
         }
     }
@@ -212,7 +212,7 @@ pub fn sync(
     // What has already been dealt with, so the POM sweep below does not redo it.
     let mut placed: BTreeSet<Artifact> = BTreeSet::new();
 
-    for artifact in wanted {
+    for artifact in std::mem::take(&mut wanted.ordered) {
         // The POM travels with the jar: Maven reads it on every resolve, and a
         // local repository holding jars without POMs is one `mvn -o` rejects.
         let pom = Artifact {
@@ -319,13 +319,27 @@ fn record_tracking(
     Ok(())
 }
 
-/// Adds an artifact once, skipping anything the reactor produces.
-fn push(wanted: &mut Vec<Artifact>, reactor: &BTreeSet<String>, artifact: Artifact) {
-    if reactor.contains(&format!("{}:{}", artifact.group_id, artifact.artifact_id)) {
-        return;
-    }
-    if !wanted.contains(&artifact) {
-        wanted.push(artifact);
+/// The queue of artifacts to fetch: a list for order, a set for membership.
+///
+/// Order matters — it is the order things are downloaded and reported in — but
+/// `Vec::contains` on a struct of five `String`s is a full comparison per entry,
+/// and a real build queues a few thousand. The set makes the membership test
+/// constant.
+#[derive(Debug, Default)]
+struct Wanted {
+    ordered: Vec<Artifact>,
+    seen: HashSet<Artifact>,
+}
+
+impl Wanted {
+    /// Adds an artifact once, skipping anything the reactor produces.
+    fn push(&mut self, reactor: &BTreeSet<String>, artifact: Artifact) {
+        if reactor.contains(&format!("{}:{}", artifact.group_id, artifact.artifact_id)) {
+            return;
+        }
+        if self.seen.insert(artifact.clone()) {
+            self.ordered.push(artifact);
+        }
     }
 }
 
@@ -661,34 +675,25 @@ mod tests {
     #[test]
     fn the_reactors_own_artifacts_are_not_queued() {
         let reactor: BTreeSet<String> = ["com.example:lib".to_owned()].into_iter().collect();
-        let mut wanted = Vec::new();
-        push(
-            &mut wanted,
-            &reactor,
-            Artifact::new("com.example", "lib", "1.0"),
-        );
-        push(
-            &mut wanted,
-            &reactor,
-            Artifact::new("org.slf4j", "slf4j-api", "2.0.9"),
-        );
+        let mut wanted = Wanted::default();
+        wanted.push(&reactor, Artifact::new("com.example", "lib", "1.0"));
+        wanted.push(&reactor, Artifact::new("org.slf4j", "slf4j-api", "2.0.9"));
         // Nothing has published the reactor's own module; asking for it produces
         // a 404 that means nothing.
-        assert_eq!(wanted.len(), 1);
-        assert_eq!(wanted[0].artifact_id, "slf4j-api");
+        assert_eq!(wanted.ordered.len(), 1);
+        assert_eq!(wanted.ordered[0].artifact_id, "slf4j-api");
     }
 
     #[test]
     fn an_artifact_is_queued_once_however_often_it_appears() {
-        let mut wanted = Vec::new();
+        let mut wanted = Wanted::default();
         for _ in 0..3 {
-            push(
-                &mut wanted,
+            wanted.push(
                 &BTreeSet::new(),
                 Artifact::new("org.slf4j", "slf4j-api", "2.0.9"),
             );
         }
-        assert_eq!(wanted.len(), 1);
+        assert_eq!(wanted.ordered.len(), 1);
     }
 
     #[test]
