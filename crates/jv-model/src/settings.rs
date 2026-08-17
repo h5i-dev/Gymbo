@@ -155,12 +155,16 @@ impl Mirror {
                 }
             } else if entry == repository_id {
                 return true;
-            } else if entry == "external:*" && is_external(repository_url) {
-                matched = true;
-            } else if entry == "external:http:*" && is_external_http(repository_url) {
-                matched = true;
-            } else if entry == "*" {
-                matched = true;
+            } else {
+                // The wildcards do not stop the scan, so a later negation can
+                // still veto one. That asymmetry with an exact match is
+                // upstream's and is the whole reason `*,!internal` works.
+                matched |= match entry {
+                    "*" => true,
+                    "external:*" => is_external(repository_url),
+                    "external:http:*" => is_external_http(repository_url),
+                    _ => false,
+                };
             }
         }
         matched
