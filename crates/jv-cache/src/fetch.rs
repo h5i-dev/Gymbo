@@ -165,6 +165,11 @@ impl Fetcher {
         version: &str,
         verify_checksums: bool,
     ) -> Result<Fetched, FetchError> {
+        // Metadata changes whenever something is deployed, and a snapshot
+        // changes whenever it is rebuilt. Everything else in a Maven repository
+        // is immutable by convention, and jv relies on that.
+        let is_mutable = !verify_checksums || jv_model::is_snapshot_version(version);
+
         // 1. jv's cache, per repository, respecting the update policy.
         for repository in repositories {
             let url = join_url(&repository.url, path);
@@ -204,14 +209,36 @@ impl Fetcher {
         let mut transport_error = None;
         for repository in repositories {
             let url = join_url(&repository.url, path);
-            if self.recently_missing(&url)? {
+            if self.recently_missing(&url, repository.policy_for(version))? {
                 continue;
             }
 
             // Held for the duration of this repository's download so that a
-            // second jv process waits rather than fetching the same file.
-            let _lock = self.store.lock(&url)?;
-            // It may have arrived while this process was waiting for the lock.
+            // second downloader waits rather than fetching the same file.
+            //
+            // Non-blocking, and it has to be: `flock` inside a future parks a
+            // runtime worker, and this fetcher runs many downloads at once, so
+            // blocking here would let the prefetcher deadlock against itself.
+            // When somebody else holds it, `await_download` waits for their
+            // result to appear instead of waiting on the lock.
+            let lock = self.store.try_lock(&url)?;
+            if lock.is_none() {
+                if let Some(bytes) = self
+                    .await_download(&url, repository.policy_for(version))
+                    .await?
+                {
+                    return Ok(Fetched {
+                        bytes,
+                        origin: Origin::Cache,
+                        repository: Some(repository.id.clone()),
+                        path: self.store.path_for(&url)?,
+                        warnings: Vec::new(),
+                    });
+                }
+                // They gave up or failed; fetching it again is better than
+                // reporting an absence that is not real.
+            }
+            // It may have arrived while this task was yielding.
             if let Some(bytes) = self.cached(&url, repository.policy_for(version))? {
                 return Ok(Fetched {
                     bytes,
@@ -230,6 +257,13 @@ impl Fetcher {
                         Vec::new()
                     };
                     let path = self.store.write(&url, &bytes)?;
+                    // Only what can change is stamped. A release artifact is
+                    // immutable, so there is nothing for an update policy to
+                    // re-check and the stamp would be a second file and a second
+                    // directory walk per artifact for nothing.
+                    if is_mutable {
+                        self.store.record_checked(&url)?;
+                    }
                     self.store.clear_missing(&url)?;
                     return Ok(Fetched {
                         bytes,
@@ -257,6 +291,35 @@ impl Fetcher {
         }
     }
 
+    /// Waits for whoever holds a URL's download lock to finish.
+    ///
+    /// Polls rather than blocking on the lock, because blocking would park a
+    /// runtime worker. The interval is short enough that a fast download is not
+    /// noticeably delayed and the ceiling is high enough to cover a large jar on
+    /// a slow link; past it, the caller downloads the file itself rather than
+    /// waiting forever on a peer that may have died.
+    async fn await_download(
+        &self,
+        url: &str,
+        policy: &Policy,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+        const ATTEMPTS: usize = 40 * 60; // one minute
+
+        for _ in 0..ATTEMPTS {
+            tokio::time::sleep(INTERVAL).await;
+            if let Some(bytes) = self.cached(url, policy)? {
+                return Ok(Some(bytes));
+            }
+            // The holder finished without producing anything — a 404, or a
+            // failure. Stop waiting and let the caller try.
+            if self.store.try_lock(url)?.is_some() {
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+
     /// The cached bytes, if present and not stale.
     fn cached(&self, url: &str, policy: &Policy) -> Result<Option<Vec<u8>>, StoreError> {
         let Some(bytes) = self.store.read(url)? else {
@@ -273,7 +336,15 @@ impl Fetcher {
     }
 
     /// Whether a recorded absence is recent enough to trust.
-    fn recently_missing(&self, url: &str) -> Result<bool, StoreError> {
+    ///
+    /// `always` skips the record entirely. That is what Maven's `-U` actually
+    /// does for a release: it forces a check for a *missing* one, rather than
+    /// re-downloading one already present — a released artifact is immutable, so
+    /// there is nothing a second download could tell you.
+    fn recently_missing(&self, url: &str, policy: &Policy) -> Result<bool, StoreError> {
+        if policy.update == jv_repo::UpdatePolicy::Always {
+            return Ok(false);
+        }
         let Some(since) = self.store.missing_since(url)? else {
             return Ok(false);
         };
@@ -584,28 +655,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_entry_is_refetched() {
-        let url = url_for(CENTRAL, &artifact());
+    async fn a_stale_snapshot_is_refetched() {
+        let snapshot = Artifact::new("g", "a", "1.0-SNAPSHOT");
         let mut transport = MapTransport::new();
-        transport.insert(url.clone(), b"first".to_vec());
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
-        let fetcher = Fetcher::new(store.clone(), Box::new(transport));
+        transport.insert(url_for(CENTRAL, &snapshot), b"first".to_vec());
+        let (_dir, fetcher) = fetcher(transport);
 
         let always = Repository {
-            releases: Policy {
+            snapshots: Policy {
                 update: UpdatePolicy::Always,
                 ..Policy::default()
             },
             ..repository()
         };
         let first = fetcher
-            .artifact(std::slice::from_ref(&always), &artifact())
+            .artifact(std::slice::from_ref(&always), &snapshot)
             .await
             .unwrap();
         assert_eq!(first.origin, Origin::Repository);
-        // With `always`, the cache is never trusted.
-        let second = fetcher.artifact(&[always], &artifact()).await.unwrap();
+        // A snapshot can change under you, so `always` never trusts the cache.
+        let second = fetcher
+            .artifact(std::slice::from_ref(&always), &snapshot)
+            .await
+            .unwrap();
         assert_eq!(second.origin, Origin::Repository);
     }
 

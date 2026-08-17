@@ -55,8 +55,8 @@ mod settings;
 mod types;
 
 pub use coordinates::{
-    Artifact, DEFAULT_EXTENSION, DEFAULT_TYPE, Dependency, Exclusion, Ga, ManagementKey,
-    SNAPSHOT_SUFFIX, base_version_of, is_snapshot_version,
+    Artifact, DEFAULT_EXTENSION, DEFAULT_TYPE, Dependency, Exclusion, Ga, ManagementKey, SNAPSHOT,
+    base_version_of, is_snapshot_version,
 };
 pub use metadata::{
     Metadata, PluginMapping, Snapshot, SnapshotVersion, Versioning, parse_metadata,

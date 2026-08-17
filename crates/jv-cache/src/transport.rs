@@ -53,7 +53,7 @@ impl HttpTransport {
             .user_agent(concat!("jv/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(120))
-            .pool_max_idle_per_host(16)
+            .pool_max_idle_per_host(64)
             .build()
             .map_err(|error| TransportError::Request {
                 url: "<client>".to_owned(),
@@ -63,6 +63,21 @@ impl HttpTransport {
     }
 }
 
+/// How many times a transient failure is retried before it is reported.
+///
+/// Three attempts covers the failure that actually happens — a connection
+/// dropped under load, or a moment of 503 from a CDN edge — without turning a
+/// genuinely unreachable repository into a long wait.
+const ATTEMPTS: usize = 3;
+
+/// The wait before retry *n*, doubling.
+///
+/// Short: the failures being retried are transient by definition, and a resolve
+/// blocked behind a slow backoff is worse than one that retries eagerly.
+fn backoff(attempt: usize) -> std::time::Duration {
+    std::time::Duration::from_millis(100 << attempt)
+}
+
 impl Transport for HttpTransport {
     fn get<'a>(&'a self, url: &'a str, credentials: &'a Credentials) -> Fetching<'a> {
         Box::pin(async move {
@@ -70,45 +85,87 @@ impl Transport for HttpTransport {
                 return read_local(&path);
             }
 
-            let mut request = self.client.get(url);
-            if let Some(username) = &credentials.username {
-                request = request.basic_auth(username, credentials.password.as_ref());
+            // Retrying matters more for correctness than for speed. A dropped
+            // connection while fetching an imported BOM does not fail the
+            // resolve — it makes the BOM's managed versions silently absent, and
+            // the build then picks different versions than it should. A resolve
+            // must not depend on the network having a good minute.
+            let mut last = None;
+            for attempt in 0..ATTEMPTS {
+                if attempt > 0 {
+                    tokio::time::sleep(backoff(attempt - 1)).await;
+                }
+                match self.attempt(url, credentials).await {
+                    Ok(result) => return Ok(result),
+                    Err(error) if is_transient(&error) => last = Some(error),
+                    Err(error) => return Err(error),
+                }
             }
-            let response = request
-                .send()
-                .await
-                .map_err(|error| TransportError::Request {
-                    url: url.to_owned(),
-                    reason: error.to_string(),
-                })?;
-
-            let status = response.status();
-            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
-                return Ok(None);
-            }
-            if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
-                return Err(TransportError::Unauthorized {
-                    url: url.to_owned(),
-                });
-            }
-            if !status.is_success() {
-                return Err(TransportError::Status {
-                    url: url.to_owned(),
-                    status: status.as_u16(),
-                });
-            }
-
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|error| TransportError::Request {
-                    url: url.to_owned(),
-                    reason: error.to_string(),
-                })?;
-            Ok(Some(bytes.to_vec()))
+            Err(last.unwrap_or_else(|| TransportError::Request {
+                url: url.to_owned(),
+                reason: "no attempt was made".to_owned(),
+            }))
         })
+    }
+}
+
+impl HttpTransport {
+    /// One request, with no retrying of its own.
+    async fn attempt(
+        &self,
+        url: &str,
+        credentials: &Credentials,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
+        let mut request = self.client.get(url);
+        if let Some(username) = &credentials.username {
+            request = request.basic_auth(username, credentials.password.as_ref());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| TransportError::Request {
+                url: url.to_owned(),
+                reason: error.to_string(),
+            })?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+            return Ok(None);
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(TransportError::Unauthorized {
+                url: url.to_owned(),
+            });
+        }
+        if !status.is_success() {
+            return Err(TransportError::Status {
+                url: url.to_owned(),
+                status: status.as_u16(),
+            });
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| TransportError::Request {
+                url: url.to_owned(),
+                reason: error.to_string(),
+            })?;
+        Ok(Some(bytes.to_vec()))
+    }
+}
+
+/// Whether a failure is worth trying again.
+///
+/// Transport-level failures are: the connection did not survive. Status-level
+/// ones are retried only where the server is saying "not now" — 5xx, 408, 429 —
+/// and never where it is saying "not this", which would just repeat the same
+/// answer more slowly.
+fn is_transient(error: &TransportError) -> bool {
+    match error {
+        TransportError::Request { .. } => true,
+        TransportError::Status { status, .. } => *status >= 500 || *status == 408 || *status == 429,
+        TransportError::Unauthorized { .. } => false,
     }
 }
 
@@ -259,6 +316,41 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn only_failures_worth_repeating_are_retried() {
+        let request = TransportError::Request {
+            url: "u".to_owned(),
+            reason: "connection reset".to_owned(),
+        };
+        assert!(is_transient(&request));
+        // "Not now" is worth asking again.
+        for status in [500, 502, 503, 408, 429] {
+            assert!(is_transient(&TransportError::Status {
+                url: "u".to_owned(),
+                status
+            }));
+        }
+        // "Not this" is not: repeating it only makes the same answer slower.
+        for status in [400, 405, 410, 451] {
+            assert!(!is_transient(&TransportError::Status {
+                url: "u".to_owned(),
+                status
+            }));
+        }
+        assert!(!is_transient(&TransportError::Unauthorized {
+            url: "u".to_owned()
+        }));
+    }
+
+    #[test]
+    fn backoff_grows_and_stays_short() {
+        assert_eq!(backoff(0), std::time::Duration::from_millis(100));
+        assert_eq!(backoff(1), std::time::Duration::from_millis(200));
+        // The failures being retried are transient; a resolve stuck behind a
+        // long backoff is worse than one that retries eagerly and gives up.
+        assert!(backoff(ATTEMPTS - 1) <= std::time::Duration::from_millis(500));
     }
 
     #[test]

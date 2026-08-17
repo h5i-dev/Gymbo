@@ -140,6 +140,10 @@ impl Session {
         request: &CollectRequest,
         verbosity: Verbosity,
     ) -> Result<Resolution, DriverError> {
+        // Start the POM crawler before collection, not during: its whole value
+        // is being a level or more ahead, and the root's own model build is
+        // several round trips during which the network is otherwise idle.
+        self.source.prefetch_from(&request.dependencies);
         let mut collected = collect(&self.source, request, self.source.types())?;
         resolve_conflicts(&mut collected.graph, verbosity)?;
         Ok(Resolution {

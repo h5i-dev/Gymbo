@@ -111,18 +111,34 @@ impl Store {
     /// that later reads as a corrupt artifact.
     pub fn write(&self, url: &str, bytes: &[u8]) -> Result<PathBuf, StoreError> {
         let path = self.path_for(url)?;
-        self.write_at(&path, bytes)?;
-        self.record_checked(url)?;
+        self.write_at(&path, bytes, Durability::Synced)?;
         Ok(path)
     }
 
-    fn write_at(&self, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    fn write_at(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        durability: Durability,
+    ) -> Result<(), StoreError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| StoreError::Io {
                 path: parent.to_path_buf(),
                 source,
             })?;
         }
+
+        // A sidecar is one small write whose loss costs nothing — at worst an
+        // update policy re-checks something. Paying for a temp file, an fsync
+        // and a rename on each one doubles the syscalls of a cold resolve for no
+        // safety that anybody would notice.
+        if durability == Durability::Loose {
+            return fs::write(path, bytes).map_err(|source| StoreError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+
         let part = with_suffix(path, "part");
         {
             let mut file = fs::File::create(&part).map_err(|source| StoreError::Io {
@@ -151,7 +167,7 @@ impl Store {
     /// pays for it once per repository.
     pub fn record_missing(&self, url: &str) -> Result<(), StoreError> {
         let path = with_suffix(&self.path_for(url)?, "error");
-        self.write_at(&path, timestamp().as_bytes())
+        self.write_at(&path, timestamp().as_bytes(), Durability::Loose)
     }
 
     /// When a URL was last recorded as absent.
@@ -172,7 +188,7 @@ impl Store {
     /// Records that a URL was just confirmed fresh.
     pub fn record_checked(&self, url: &str) -> Result<(), StoreError> {
         let path = with_suffix(&self.path_for(url)?, "checked");
-        self.write_at(&path, timestamp().as_bytes())
+        self.write_at(&path, timestamp().as_bytes(), Durability::Loose)
     }
 
     /// When a URL was last confirmed fresh.
@@ -190,7 +206,39 @@ impl Store {
     /// The lock is released when the returned guard is dropped, and by the
     /// operating system if the process dies, so a crash cannot leave a cache
     /// that later runs block on forever.
+    ///
+    /// **This blocks the calling thread.** Async callers want [`Store::try_lock`]
+    /// instead: `flock` inside a future would park a runtime worker, and a
+    /// downloader running many fetches at once would deadlock itself.
     pub fn lock(&self, url: &str) -> Result<DownloadLock, StoreError> {
+        let file = self.lock_file(url)?;
+        FileExt::lock_exclusive(&file.handle).map_err(|source| StoreError::Io {
+            path: file.path,
+            source,
+        })?;
+        Ok(DownloadLock { file: file.handle })
+    }
+
+    /// Takes the lock if it is free, and reports rather than waits if it is not.
+    ///
+    /// The non-blocking half of [`Store::lock`], for callers inside an async
+    /// runtime. `Ok(None)` means somebody else is downloading this URL right
+    /// now; the caller decides whether to wait for the result to appear in the
+    /// cache or to fetch it again.
+    pub fn try_lock(&self, url: &str) -> Result<Option<DownloadLock>, StoreError> {
+        let file = self.lock_file(url)?;
+        match FileExt::try_lock_exclusive(&file.handle) {
+            Ok(true) => Ok(Some(DownloadLock { file: file.handle })),
+            // Contended, which is not an error. Nor is a failure: a filesystem
+            // with no locking or a permission problem is reported as "not
+            // locked" rather than fatal, because the atomic rename already makes
+            // the write safe without a lock.
+            Ok(false) | Err(_) => Ok(None),
+        }
+    }
+
+    /// Opens (creating if needed) the lock file for a URL.
+    fn lock_file(&self, url: &str) -> Result<LockFile, StoreError> {
         let path = with_suffix(&self.path_for(url)?, "lock");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| StoreError::Io {
@@ -198,7 +246,7 @@ impl Store {
                 source,
             })?;
         }
-        let file = fs::OpenOptions::new()
+        let handle = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
@@ -207,12 +255,24 @@ impl Store {
                 path: path.clone(),
                 source,
             })?;
-        FileExt::lock_exclusive(&file).map_err(|source| StoreError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        Ok(DownloadLock { file })
+        Ok(LockFile { path, handle })
     }
+}
+
+/// An opened lock file, before anything has been locked.
+struct LockFile {
+    path: PathBuf,
+    handle: fs::File,
+}
+
+/// How hard a write tries to survive a crash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Durability {
+    /// Temp file, fsync, rename. For content, where a torn file would later be
+    /// read as a corrupt artifact.
+    Synced,
+    /// A plain write. For sidecars, whose loss costs nothing.
+    Loose,
 }
 
 /// Holds one URL's download lock until dropped.
@@ -349,10 +409,15 @@ mod tests {
     }
 
     #[test]
-    fn writing_records_a_freshness_stamp() {
+    fn a_freshness_stamp_is_recorded_only_when_asked_for() {
         let (_dir, store) = store();
-        assert_eq!(store.checked_at(JAR).unwrap(), None);
         store.write(JAR, b"bytes").unwrap();
+        // Writing does not stamp: most of what jv caches is immutable, and a
+        // second file plus a second directory walk per artifact is a real cost
+        // on a cold resolve of a few hundred of them.
+        assert_eq!(store.checked_at(JAR).unwrap(), None);
+
+        store.record_checked(JAR).unwrap();
         assert!(store.checked_at(JAR).unwrap().is_some());
     }
 
@@ -370,6 +435,28 @@ mod tests {
     fn clearing_an_absent_marker_is_not_an_error() {
         let (_dir, store) = store();
         assert!(store.clear_missing(JAR).is_ok());
+    }
+
+    #[test]
+    fn a_second_lock_on_one_url_is_reported_rather_than_waited_for() {
+        let (_dir, store) = store();
+        let held = store.try_lock(JAR).unwrap();
+        assert!(held.is_some());
+        // Blocking here instead would park a tokio worker, and a fetcher running
+        // many downloads at once would deadlock against its own prefetches.
+        assert!(store.try_lock(JAR).unwrap().is_none());
+        drop(held);
+        assert!(store.try_lock(JAR).unwrap().is_some());
+    }
+
+    #[test]
+    fn locks_on_different_urls_do_not_contend() {
+        let (_dir, store) = store();
+        let first = store.try_lock(JAR).unwrap();
+        let second = store
+            .try_lock("https://repo1.maven.org/maven2/g/a/1.0/a-1.0.jar")
+            .unwrap();
+        assert!(first.is_some() && second.is_some());
     }
 
     #[test]

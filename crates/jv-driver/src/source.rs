@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 
 use jv_cache::{Fetcher, Origin};
 use jv_model::{
-    Artifact, Dependency, Metadata, Model, Scope, Settings, TypeRegistry, is_snapshot_version,
+    Artifact, Dependency, Metadata, Model, Settings, TypeRegistry, is_snapshot_version,
     parse_metadata, parse_pom,
 };
 use jv_model_builder::{BuildContext, ModelBuilder, ModelSource, SourcedModel};
@@ -102,8 +102,8 @@ pub struct RepositorySource {
     reactor: Arc<Mutex<HashMap<String, String>>>,
     /// Warnings gathered along the way, to show once at the end.
     warnings: Arc<Mutex<Vec<String>>>,
-    /// Whether to speculatively fetch the POMs of a descriptor's dependencies.
-    prefetch: bool,
+    /// Crawls POMs ahead of collection. See `prefetch.rs`.
+    prefetcher: crate::prefetch::Prefetcher,
     /// An update policy forced on every repository, as Maven's `-U` does. It
     /// applies to repositories discovered later too, which is why it lives here
     /// rather than being baked into the list once.
@@ -118,7 +118,7 @@ impl std::fmt::Debug for RepositorySource {
         formatter
             .debug_struct("RepositorySource")
             .field("repositories", &self.repositories)
-            .field("prefetch", &self.prefetch)
+            .field("prefetcher", &self.prefetcher)
             .finish_non_exhaustive()
     }
 }
@@ -137,6 +137,11 @@ impl RepositorySource {
         declared: &[Repository],
     ) -> Self {
         Self {
+            prefetcher: crate::prefetch::Prefetcher::new(
+                Arc::clone(&fetcher),
+                runtime.clone(),
+                true,
+            ),
             fetcher,
             runtime,
             repositories: Arc::new(Mutex::new(Repositories {
@@ -151,7 +156,6 @@ impl RepositorySource {
             snapshots: Arc::default(),
             reactor: Arc::default(),
             warnings: Arc::default(),
-            prefetch: true,
             forced_update: None,
             lifecycle_bindings: false,
         }
@@ -198,9 +202,13 @@ impl RepositorySource {
     ///
     /// Only useful for tests that count requests, where background work would
     /// make the count depend on timing.
-    pub fn without_prefetch(mut self) -> Self {
-        self.prefetch = false;
-        self
+    pub fn without_prefetch(self) -> Self {
+        let prefetcher = crate::prefetch::Prefetcher::new(
+            Arc::clone(&self.fetcher),
+            self.runtime.clone(),
+            false,
+        );
+        Self { prefetcher, ..self }
     }
 
     /// The repositories currently known, in the order they are consulted.
@@ -448,40 +456,32 @@ impl RepositorySource {
     /// Fire-and-forget: a failure here is not reported, because the blocking read
     /// that follows will hit the same URL and report it properly. The only thing
     /// this is allowed to change is how long that read takes.
+    /// Points the crawler at everything a descriptor leads to.
+    ///
+    /// The crawler follows parents and BOMs from here, so one call per
+    /// descriptor is enough to keep it a level or more ahead of collection.
     fn prefetch_children(&self, dependencies: &[Dependency]) {
-        if !self.prefetch {
-            return;
-        }
         let repositories = self.repositories();
-        for dependency in dependencies {
-            // A dependency with no version cannot be addressed yet; management
-            // will supply one and the collector will ask for it properly.
-            let Some(version) = dependency.version.as_deref() else {
-                continue;
-            };
-            // Test and provided scopes on a *dependency* never enter the graph,
-            // so fetching them would be pure waste on the critical path.
-            if matches!(dependency.scope, Some(Scope::Test) | Some(Scope::Provided)) {
-                continue;
-            }
-            if is_snapshot_version(version) {
-                // Needs a metadata round trip to know the file name; not worth
-                // speculating on.
-                continue;
-            }
-            let artifact = Artifact {
-                group_id: dependency.group_id.clone(),
-                artifact_id: dependency.artifact_id.clone(),
-                version: version.to_owned(),
-                classifier: String::new(),
-                extension: POM.to_owned(),
-            };
-            let fetcher = Arc::clone(&self.fetcher);
-            let repositories = repositories.clone();
-            self.runtime.spawn(async move {
-                let _ = fetcher.artifact(&repositories, &artifact).await;
-            });
-        }
+        self.prefetcher.seed(
+            &repositories,
+            dependencies.iter().filter_map(|dependency| {
+                Some(Artifact {
+                    group_id: dependency.group_id.clone(),
+                    artifact_id: dependency.artifact_id.clone(),
+                    version: dependency.version.clone()?,
+                    classifier: String::new(),
+                    extension: POM.to_owned(),
+                })
+            }),
+        );
+    }
+
+    /// Starts the crawler from a project's own dependencies.
+    ///
+    /// Called before collection begins, so the first level is already arriving
+    /// while the root's own model is still being built.
+    pub fn prefetch_from(&self, dependencies: &[Dependency]) {
+        self.prefetch_children(dependencies);
     }
 }
 
