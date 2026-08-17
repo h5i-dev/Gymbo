@@ -480,12 +480,28 @@ would silently change resolved versions. And Maven 4 removed `central` from the
 super POM, so the super POM has to come from a real 3.9 distribution rather than
 from the reference clone, or no project would have any repository at all.
 
-### M3 — `jv-resolver` (pure core)
+### M3 — `jv-resolver` (pure core) — conflict resolution ✅, collection next
 BF collection + skipper, exclusions, classic depth-1 depMgmt, ranges,
 optional handling, cycles; transformer chain (marker → sorter → nearest-wins +
 scope tables); verbose-mode data retention.
-**Gate:** 54/54 transformer cases; 624-file artifact-description corpus green
-against both BF and DF goldens; coursier contrast suite documented.
+
+**Done:** the transformer chain, ported against
+`docs/spec/conflict-resolution.md`. `ConflictMarker`, `ConflictIdSorter` and
+`ClassicConflictResolver` with its scope and optionality selectors all pass
+Maven's own corpus — 32 cases ported from `NearestVersionSelectorTest`,
+`JavaScopeSelectorTest`, `ConflictIdSorterTest`, `SimpleOptionalitySelectorTest`
+and `ConflictMarkerTest`, three of which are templates covering 48 scope
+combinations between them. `jv-testkit` reads both corpus formats: the graph DSL
+(45 files) and the `.ini` artifact descriptors (616 files).
+
+**Remaining:** collection itself — the BF walk, the resolution skipper,
+`ClassicDependencyManager`'s depth-2 rule, the exclusion/optional/scope
+selectors, `FatArtifactTraverser`, range expansion and relocation, against
+`docs/spec/collection.md`.
+
+**Gate:** transformer corpus green (met); the 624-file artifact-description
+corpus green against both BF and DF goldens (pending collection); coursier
+contrast suite documented.
 
 ### M4 — `jv-repo` + `jv-cache` (network & store)
 Layout, metadata/SNAPSHOT/RELEASE resolution, update policies, checksum
