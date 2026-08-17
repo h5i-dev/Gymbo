@@ -20,6 +20,20 @@ com.example:demo:jar:1.0
 > Maven's output byte for byte. There are no prebuilt binaries yet; build with
 > `cargo build --release` and the binary lands at `target/release/jv`.
 
+## Speed
+
+|  | jv | `mvn dependency:tree` | |
+|---|---|---|---|
+| Warm | **53 ms** | 1,532 ms | 29× |
+| Cold | **4.5 s** | 15.7 s | 3.5× |
+
+Median of five warm runs on one project (Jackson, HttpClient 5, Guava, JUnit 5;
+23 nodes), 10-core aarch64 Linux, Maven 3.9.9. Both tools start from an empty
+cache for the cold row. `scripts/benchmark.sh` produces this table, and refuses
+to report a time unless the two tools' output matches first — a benchmark
+against wrong output measures nothing. Cold timings are network-bound and will
+differ on your machine; the warm row is the one that reflects the tool.
+
 ## Why
 
 Maven-exact resolution, `~/.m2` interoperability, and a fast single binary.

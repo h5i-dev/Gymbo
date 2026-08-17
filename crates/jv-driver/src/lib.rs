@@ -28,9 +28,11 @@ pub mod java;
 pub mod project;
 pub mod session;
 pub mod source;
+pub mod sync;
 
 pub use config::Config;
 pub use error::DriverError;
 pub use project::{Project, find_pom, load_project};
 pub use session::{Resolution, Session};
+pub use sync::{SyncReport, SyncRequest, sync};
 pub use source::RepositorySource;
