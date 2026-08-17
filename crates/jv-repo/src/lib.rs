@@ -19,6 +19,7 @@ pub use layout::{
 };
 pub use policy::{ChecksumPolicy, Policy, UpdatePolicy};
 pub use repository::{
-    CENTRAL_ID, CENTRAL_URL, Credentials, Repository, from_model, resolve_repositories,
+    CENTRAL_ID, CENTRAL_URL, Credentials, Repository, Trust, from_model, resolve_repositories,
+    resolve_with_trust,
 };
 pub use settings::merge_settings;

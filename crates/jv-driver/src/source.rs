@@ -41,7 +41,9 @@ use jv_model::{
     parse_metadata, parse_pom,
 };
 use jv_model_builder::{BuildContext, ModelBuilder, ModelSource, SourcedModel};
-use jv_repo::{MetadataLocation, Repository, artifact_path, resolve_repositories};
+use jv_repo::{
+    MetadataLocation, Repository, Trust, artifact_path, resolve_repositories, resolve_with_trust,
+};
 use jv_resolver::{Descriptor, DescriptorSource};
 use jv_version::Version;
 
@@ -111,6 +113,8 @@ pub struct RepositorySource {
     /// Whether effective models should carry the lifecycle's plugins. Only
     /// `jv sync` wants them.
     lifecycle_bindings: bool,
+    /// Whether plaintext HTTP repositories may be contacted.
+    allow_insecure_http: bool,
 }
 
 impl std::fmt::Debug for RepositorySource {
@@ -158,7 +162,14 @@ impl RepositorySource {
             warnings: Arc::default(),
             forced_update: None,
             lifecycle_bindings: false,
+            allow_insecure_http: false,
         }
+    }
+
+    /// Allows plaintext HTTP repositories.
+    pub fn with_insecure_http(mut self, allowed: bool) -> Self {
+        self.allow_insecure_http = allowed;
+        self
     }
 
     /// Injects the plugins the packaging's lifecycle binds into every model this
@@ -220,12 +231,27 @@ impl RepositorySource {
             .clone()
     }
 
-    /// Adds repositories, after putting them through the settings' mirrors.
+    /// Adds repositories the user configured or declared themselves.
     pub fn add_repositories(&self, declared: &[Repository]) {
-        let resolved = resolve_repositories(declared, &self.settings)
-            .into_iter()
-            .map(|repository| self.apply_forced_update(repository))
-            .collect();
+        self.add_with_trust(declared, Trust::Configured);
+    }
+
+    /// Adds repositories, recording whether the declaration is the user's.
+    fn add_with_trust(&self, declared: &[Repository], trust: Trust) {
+        let mut resolved = Vec::new();
+        for repository in resolve_with_trust(declared, &self.settings, trust) {
+            if repository.is_insecure() && !self.allow_insecure_http {
+                // Blocked rather than dropped, so the repository still appears in
+                // `jv tree`'s reasoning and the message says what to do.
+                self.warn(format!(
+                    "{} ({}) is plaintext HTTP and was blocked; pass \
+                     --allow-insecure-http to contact it anyway",
+                    repository.id, repository.url
+                ));
+                continue;
+            }
+            resolved.push(self.apply_forced_update(repository));
+        }
         self.repositories
             .lock()
             .expect("repositories")
@@ -269,9 +295,14 @@ impl RepositorySource {
         self.warn(message);
     }
 
-    /// Records the repositories a project declares.
+    /// Records the repositories the project being built declares.
+    ///
+    /// Trusted, unlike a dependency's: this POM is the user's own.
     pub fn register_project_repositories(&self, model: &Model) {
-        self.register_repositories(model);
+        let declared = declared_repositories(model);
+        if !declared.is_empty() {
+            self.add_with_trust(&declared, Trust::Configured);
+        }
     }
 
     fn warn(&self, message: impl Into<String>) {
@@ -464,15 +495,15 @@ impl RepositorySource {
             .collect()
     }
 
-    /// Records the repositories a POM declares so later fetches can use them.
+    /// Records the repositories a *dependency's* POM declares.
+    ///
+    /// Contacted but never authenticated to — see [`Trust::Untrusted`]. A
+    /// dependency four levels down should not be able to name an id the user has
+    /// a password for and be handed it.
     fn register_repositories(&self, model: &Model) {
-        let declared: Vec<Repository> = model
-            .repositories
-            .iter()
-            .filter_map(jv_repo::from_model)
-            .collect();
+        let declared = declared_repositories(model);
         if !declared.is_empty() {
-            self.add_repositories(&declared);
+            self.add_with_trust(&declared, Trust::Untrusted);
         }
     }
 
@@ -741,6 +772,15 @@ fn relocation_message(model: &Model) -> Option<&str> {
         .as_ref()?
         .message
         .as_deref()
+}
+
+/// The repositories a model declares, as ones jv could contact.
+fn declared_repositories(model: &Model) -> Vec<Repository> {
+    model
+        .repositories
+        .iter()
+        .filter_map(jv_repo::from_model)
+        .collect()
 }
 
 /// Reads a `g:a:v` string back into an artifact.

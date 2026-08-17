@@ -507,7 +507,25 @@ fn materialize(
     report: &mut SyncReport,
 ) -> Result<Option<PathBuf>, DriverError> {
     let destination = local_repository.join(relative);
-    if destination.exists() {
+
+    // `artifact_path` already sanitizes the coordinates, so this cannot trigger
+    // on any path jv builds. It is here because the consequence of being wrong is
+    // writing attacker-controlled bytes to an attacker-chosen location, and a
+    // check that costs one string comparison is worth having between that and a
+    // future caller who passes `relative` in from somewhere new.
+    if !destination.starts_with(local_repository) {
+        report.warnings.push(format!(
+            "refusing to write {} outside {}",
+            destination.display(),
+            local_repository.display()
+        ));
+        return Ok(None);
+    }
+
+    // `symlink_metadata`, not `exists`: `exists` follows the link, so a dangling
+    // symlink planted at the destination reads as absent and the copy below then
+    // creates and fills whatever it points at.
+    if destination.symlink_metadata().is_ok() {
         return Ok(None);
     }
     if let Some(parent) = destination.parent() {
@@ -518,22 +536,61 @@ fn materialize(
     }
 
     // A hardlink costs no disk, which matters because a CI cache pays for the
-    // local repository and jv's cache both. It fails across filesystems, and on
-    // filesystems that have no hardlinks at all, so a copy is the fallback
-    // rather than an error.
-    match std::fs::hard_link(cached, &destination) {
-        Ok(()) => Ok(Some(destination)),
-        Err(_) => match std::fs::copy(cached, &destination) {
-            Ok(_) => Ok(Some(destination)),
-            Err(source) => {
-                // One unwritable file should not abort a sync of a thousand.
-                report
-                    .warnings
-                    .push(format!("cannot place {}: {source}", destination.display()));
-                Ok(None)
-            }
-        },
+    // local repository and jv's cache both. It fails across filesystems and on
+    // filesystems without hardlinks, so a copy is the fallback rather than an
+    // error.
+    //
+    // Not when the source is already in a local repository, though: `Fetcher`
+    // serves `~/.m2` hits straight from that directory, and linking one of those
+    // into jv's output would put Maven's file on the other end of the link.
+    // Anything that later rewrote jv's copy in place — jar signing, repackaging,
+    // an `mvn install` — would silently rewrite the developer's `~/.m2` too. jv
+    // promises to read that directory and never write to it.
+    let linkable = !cached.starts_with(local_repository) && is_inside_a_cache(cached);
+    if linkable && std::fs::hard_link(cached, &destination).is_ok() {
+        return Ok(Some(destination));
     }
+    match copy_new(cached, &destination) {
+        Ok(()) => Ok(Some(destination)),
+        Err(source) => {
+            // One unwritable file should not abort a sync of a thousand.
+            report
+                .warnings
+                .push(format!("cannot place {}: {source}", destination.display()));
+            Ok(None)
+        }
+    }
+}
+
+/// Whether a path looks like it is inside jv's own cache rather than a directory
+/// another tool owns.
+///
+/// jv's cache is URL-keyed, so every entry sits under a scheme directory —
+/// `https/`, `file/` — which a Maven layout never produces because a group id
+/// cannot be a bare scheme name followed by a host.
+fn is_inside_a_cache(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some("https" | "http" | "file")
+        )
+    })
+}
+
+/// Copies to a path that must not already exist, without following a symlink
+/// there.
+///
+/// `fs::copy` opens the destination with `O_CREAT|O_TRUNC` and follows symlinks,
+/// which is what let a planted link redirect the write. `create_new` refuses to
+/// open anything that exists, link or file.
+fn copy_new(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut reader = std::fs::File::open(source)?;
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    std::io::copy(&mut reader, &mut writer)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -635,9 +692,79 @@ mod tests {
     }
 
     #[test]
+    fn a_symlink_at_the_destination_is_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("https/host/cached.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"payload").unwrap();
+
+        let local = dir.path().join("m2");
+        let artifact = Artifact::new("org.slf4j", "slf4j-api", "2.0.9");
+        let destination = local.join(artifact_path(&artifact));
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+        // A *dangling* link: `exists()` follows it and reports false, so the copy
+        // used to create and fill whatever it pointed at.
+        let victim = dir.path().join("victim");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, &destination).unwrap();
+
+        let mut report = SyncReport::default();
+        let placed = materialize(&cached, &local, &artifact_path(&artifact), &mut report).unwrap();
+        assert_eq!(placed, None);
+        assert!(!victim.exists(), "the write followed the symlink");
+    }
+
+    #[test]
+    fn a_path_outside_the_local_repository_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("https/host/a.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"payload").unwrap();
+        let local = dir.path().join("m2");
+
+        let mut report = SyncReport::default();
+        // `artifact_path` sanitizes coordinates so jv cannot produce this, but the
+        // consequence of being wrong is an arbitrary write and the check is one
+        // comparison.
+        let escaped = dir.path().join("elsewhere").to_string_lossy().into_owned();
+        assert_eq!(
+            materialize(&cached, &local, &escaped, &mut report).unwrap(),
+            None
+        );
+        assert!(!dir.path().join("elsewhere").exists());
+        assert!(report.warnings.iter().any(|w| w.contains("refusing")));
+    }
+
+    #[test]
+    fn a_file_already_in_the_local_repository_is_never_linked_into_the_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = Artifact::new("org.slf4j", "slf4j-api", "2.0.9");
+        let relative = artifact_path(&artifact);
+
+        // The fetcher serves `~/.m2` hits straight from that directory, so this
+        // is the path it would hand back.
+        let home_m2 = dir.path().join("home-m2");
+        let source = home_m2.join(&relative);
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"maven's copy").unwrap();
+
+        let output = dir.path().join("ci-m2");
+        let mut report = SyncReport::default();
+        let placed = materialize(&source, &output, &relative, &mut report)
+            .unwrap()
+            .expect("a destination");
+
+        // Rewriting jv's output in place must not reach through to Maven's copy.
+        std::fs::write(&placed, b"rewritten by a later build step").unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"maven's copy");
+    }
+
+    #[test]
     fn materializing_never_replaces_what_maven_already_has() {
         let dir = tempfile::tempdir().unwrap();
-        let cached = dir.path().join("cached.jar");
+        let cached = dir.path().join("https/host/cached.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
         std::fs::write(&cached, b"from jv").unwrap();
 
         let local = dir.path().join("m2");
@@ -659,7 +786,8 @@ mod tests {
     #[test]
     fn materializing_places_a_file_at_mavens_layout() {
         let dir = tempfile::tempdir().unwrap();
-        let cached = dir.path().join("cached.jar");
+        let cached = dir.path().join("https/host/cached.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
         std::fs::write(&cached, b"jar bytes").unwrap();
         let local = dir.path().join("m2");
 

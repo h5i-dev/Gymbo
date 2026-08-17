@@ -110,6 +110,14 @@ pub struct CommonArgs {
     #[arg(long, value_name = "VERSION")]
     pub java_version: Option<String>,
 
+    /// Contact repositories over plaintext HTTP.
+    ///
+    /// Refused by default, as Maven 3.8 and later refuse it: an artifact fetched
+    /// over http:// can be replaced in transit, and its checksum travels the same
+    /// wire. localhost is always allowed.
+    #[arg(long)]
+    pub allow_insecure_http: bool,
+
     /// Define a property, as `-Dkey=value`.
     #[arg(short = 'D', value_name = "KEY=VALUE")]
     pub define: Vec<String>,

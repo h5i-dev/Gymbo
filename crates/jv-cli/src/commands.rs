@@ -24,6 +24,7 @@ pub(crate) fn config(common: &CommonArgs) -> Config {
         active_profiles: common.active_profiles(),
         inactive_profiles: common.inactive_profiles(),
         java_version: common.java_version.clone(),
+        allow_insecure_http: common.allow_insecure_http,
         ..Config::new()
     };
     if common.no_local_repository {

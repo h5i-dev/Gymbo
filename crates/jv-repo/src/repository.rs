@@ -79,10 +79,45 @@ impl Repository {
         !self.blocked && self.policy_for(version).enabled
     }
 
+    /// Whether this repository would be contacted over plaintext HTTP.
+    ///
+    /// Maven 3.8 started shipping a mirror that blocks these, because a
+    /// dependency fetched over `http://` can be replaced in transit by anyone on
+    /// the path and the checksum travels the same wire. jv refuses them by
+    /// default for the same reason. `localhost` is exempt: there is no wire.
+    pub fn is_insecure(&self) -> bool {
+        let url = self.url.to_ascii_lowercase();
+        let plaintext = ["http://", "dav://", "dav:http://", "dav+http://"]
+            .iter()
+            .any(|scheme| url.starts_with(scheme));
+        plaintext && !is_loopback(&url)
+    }
+
     /// Whether the URL points at the local filesystem rather than a server.
     pub fn is_local(&self) -> bool {
         self.url.starts_with("file:") || self.url.starts_with('/')
     }
+}
+
+/// Whether a URL's host is this machine.
+fn is_loopback(url: &str) -> bool {
+    let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) else {
+        return false;
+    };
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // An IPv6 literal is bracketed and full of colons, so the port cannot be
+    // split off before the brackets are accounted for.
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map_or(rest, |(host, _)| host),
+        None => authority
+            .split_once(':')
+            .map_or(authority, |(host, _)| host),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Turns a POM's declared repositories into the ones to contact.
@@ -113,17 +148,53 @@ impl Repository {
 /// assert_eq!(resolved[0].credentials.username.as_deref(), Some("ci"));
 /// ```
 pub fn resolve_repositories(declared: &[Repository], settings: &Settings) -> Vec<Repository> {
+    resolve_with_trust(declared, settings, Trust::Configured)
+}
+
+/// Where a repository declaration came from, which decides whether it may have
+/// the user's credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trust {
+    /// `settings.xml`, the command line, or the project the user is building —
+    /// including its own parents. All under the user's control.
+    Configured,
+    /// A `<repositories>` block in some dependency's POM, written by whoever
+    /// published it.
+    ///
+    /// These are still contacted, because a project whose dependency lives in a
+    /// private repository has to be resolvable. They are never given
+    /// credentials: a dependency four levels down declaring
+    /// `<id>nexus</id><url>https://evil.example/</url>` would otherwise be handed
+    /// the user's `nexus` password as HTTP Basic on the next request. Maven does
+    /// not draw this line; jv does, because nothing legitimate needs it and the
+    /// enterprise case — the *project's* POM naming its own repository — stays on
+    /// the trusted side.
+    Untrusted,
+}
+
+/// Turns declared repositories into the ones to contact, honouring where the
+/// declaration came from.
+pub fn resolve_with_trust(
+    declared: &[Repository],
+    settings: &Settings,
+    trust: Trust,
+) -> Vec<Repository> {
     let mut resolved: Vec<Repository> = Vec::new();
 
     for repository in declared {
-        let mut effective = match select_mirror(repository, &settings.mirrors) {
+        let mirrored = select_mirror(repository, &settings.mirrors);
+        let mut effective = match mirrored {
             Some(mirror) => apply_mirror(repository, mirror),
             None => repository.clone(),
         };
 
+        // A mirror is configured by the user, so its credentials are theirs to
+        // give however the repository it stands in for was declared.
+        let may_authenticate = trust == Trust::Configured || mirrored.is_some();
+
         // Credentials attach by the *effective* id, so a mirrored repository
         // authenticates as the mirror rather than as what the POM declared.
-        if let Some(server) = settings.server(&effective.id) {
+        if let Some(server) = settings.server(&effective.id).filter(|_| may_authenticate) {
             effective.credentials = Credentials {
                 username: server.username.clone(),
                 password: if server.has_encrypted_password() {
@@ -275,6 +346,51 @@ mod tests {
     }
 
     #[test]
+    fn a_dependencys_repository_is_contacted_but_never_authenticated_to() {
+        let settings = settings(
+            r#"<settings><servers><server>
+                 <id>nexus</id><username>ci</username><password>secret</password>
+               </server></servers></settings>"#,
+        );
+        // A dependency four levels down declares an id the user has a password
+        // for, pointed somewhere else entirely.
+        let declared = vec![Repository::new("nexus", "https://evil.example/")];
+
+        let trusted = resolve_with_trust(&declared, &settings, Trust::Configured);
+        assert_eq!(trusted[0].credentials.password.as_deref(), Some("secret"));
+
+        let untrusted = resolve_with_trust(&declared, &settings, Trust::Untrusted);
+        // Still contacted — a project whose dependency lives in a private
+        // repository has to be resolvable — but with nothing to steal.
+        assert_eq!(untrusted[0].url, "https://evil.example/");
+        assert!(untrusted[0].credentials.is_empty());
+    }
+
+    #[test]
+    fn a_mirror_still_authenticates_however_the_repository_was_declared() {
+        let settings = settings(
+            r#"<settings>
+                 <mirrors><mirror>
+                   <id>nexus</id><url>https://nexus.corp/public</url><mirrorOf>*</mirrorOf>
+                 </mirror></mirrors>
+                 <servers><server>
+                   <id>nexus</id><username>ci</username><password>secret</password>
+                 </server></servers>
+               </settings>"#,
+        );
+        // The mirror is the user's own configuration, so its credentials are
+        // theirs to give — and every request goes there rather than to whatever
+        // the dependency named.
+        let resolved = resolve_with_trust(
+            &[Repository::new("whatever", "https://evil.example/")],
+            &settings,
+            Trust::Untrusted,
+        );
+        assert_eq!(resolved[0].url, "https://nexus.corp/public");
+        assert_eq!(resolved[0].credentials.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
     fn an_encrypted_password_is_withheld_rather_than_sent() {
         let settings = settings(
             r#"<settings><servers><server>
@@ -336,6 +452,38 @@ mod tests {
         )
         .unwrap();
         assert!(from_model(&pom.model.repositories[0]).is_none());
+    }
+
+    #[test]
+    fn plaintext_http_is_recognised_but_loopback_is_not() {
+        // A dependency fetched over http:// can be replaced in transit and its
+        // checksum travels the same wire, so verifying it proves nothing. Maven
+        // 3.8 blocks these; so does jv.
+        for url in [
+            "http://repo.corp/maven2",
+            "HTTP://repo.corp/maven2",
+            "dav://repo.corp/maven2",
+            "dav:http://repo.corp/maven2",
+            "dav+http://repo.corp/maven2",
+        ] {
+            assert!(Repository::new("r", url).is_insecure(), "{url}");
+        }
+        // No wire, no interception.
+        for url in [
+            "http://localhost:8081/repo",
+            "http://127.0.0.1/repo",
+            "http://[::1]:8081/repo",
+        ] {
+            assert!(!Repository::new("r", url).is_insecure(), "{url}");
+        }
+        // And nothing encrypted or local is affected.
+        for url in [
+            "https://repo.maven.apache.org/maven2",
+            "file:///opt/repo",
+            "dav:https://repo.corp/maven2",
+        ] {
+            assert!(!Repository::new("r", url).is_insecure(), "{url}");
+        }
     }
 
     #[test]

@@ -50,6 +50,13 @@ pub struct Config {
     /// at. `jv sync` turns it on: those plugins are artifacts a later `mvn -o`
     /// will demand from the local repository, and they appear in no POM.
     pub lifecycle_bindings: bool,
+    /// Contact repositories over plaintext HTTP.
+    ///
+    /// Off by default, matching Maven 3.8 and later: an artifact fetched over
+    /// `http://` can be replaced in transit by anyone on the path, and its
+    /// checksum travels the same wire, so verifying it proves nothing.
+    /// `localhost` is always allowed — there is no wire.
+    pub allow_insecure_http: bool,
     /// The repositories to start from, replacing Maven Central.
     ///
     /// POMs may still add more as they are read; this only decides where the

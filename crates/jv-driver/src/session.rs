@@ -231,12 +231,17 @@ fn build_source(
         runtime,
         Arc::clone(&settings),
         context,
-        &declared,
+        &[],
     );
 
-    Ok(source
+    let source = source
+        .with_insecure_http(config.allow_insecure_http)
         .with_forced_update(config.update)
-        .with_lifecycle_bindings(config.lifecycle_bindings))
+        .with_lifecycle_bindings(config.lifecycle_bindings);
+    // Applied after the switch is set, so the starting repositories are filtered
+    // by it too rather than only the ones POMs add later.
+    source.add_repositories(&declared);
+    Ok(source)
 }
 
 #[cfg(test)]
