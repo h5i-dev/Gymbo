@@ -47,14 +47,19 @@
 //! ```
 
 mod coordinates;
+mod metadata;
 mod model;
 mod parse;
 mod scope;
+mod settings;
 mod types;
 
 pub use coordinates::{
     Artifact, DEFAULT_EXTENSION, DEFAULT_TYPE, Dependency, Exclusion, Ga, ManagementKey,
     SNAPSHOT_SUFFIX, base_version_of, is_snapshot_version,
+};
+pub use metadata::{
+    Metadata, PluginMapping, Snapshot, SnapshotVersion, Versioning, parse_metadata,
 };
 pub use model::{
     Activation, ActivationFile, ActivationOs, ActivationProperty, Build, DEFAULT_PACKAGING,
@@ -63,4 +68,5 @@ pub use model::{
 };
 pub use parse::{ParseError, ParsedPom, parse_pom};
 pub use scope::{Scope, UnknownScope, is_maven_4_scope};
+pub use settings::{Mirror, Proxy, Server, Settings, SettingsProfile, parse_settings};
 pub use types::{TypeDescriptor, TypeRegistry};

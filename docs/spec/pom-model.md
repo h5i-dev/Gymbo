@@ -137,9 +137,17 @@ Fields declared `<type>boolean</type>` (真 booleans, no unset state): `activati
 ### 0.5 Validation severities
 
 `DefaultModelValidator` classifies problems as `FATAL` / `ERROR` / `WARNING`, at validation levels
-`MINIMAL`, `MAVEN_2_0` (20), `MAVEN_3_0` (30), `MAVEN_3_1` (31), `MAVEN_4_0` (40). "Required" in the
-tables below means the validator emits ERROR/FATAL when missing, not merely that the mdo says
-`<required>true</required>`. The two do not always agree; the validator wins.
+`MINIMAL` (0), `MAVEN_2_0` (20), `MAVEN_3_0` (30), `MAVEN_3_1` (31), `MAVEN_4_0` (40),
+`MAVEN_4_1` (41), `MAVEN_4_2` (42); `STRICT` = the highest (42 in this clone, 31 in Maven 3.9).
+"Required" in the tables below means the validator emits ERROR/FATAL when missing, not merely that
+the mdo says `<required>true</required>`. The two do not always agree; the validator wins.
+
+Where a rule below is described as "`errOn30`" / "`errOn31`", the helper is
+`getSeverity(level, threshold)`: **WARNING** when `level < threshold`, **ERROR** otherwise. Since a
+normal build runs at `STRICT`, every `errOn30`/`errOn31` rule is an **ERROR** in practice; the WARNING
+form only appears when a POM is read as a dependency's artifact descriptor (which uses a lower level,
+so a malformed third-party POM warns instead of failing the build). `jv` should mirror this: strict
+for the project under build, lenient for POMs pulled from a repository.
 
 Banned-character sets (from `DefaultModelValidator`):
 - `ILLEGAL_FS_CHARS = \ / : " < > | ? *` — applied to versions (`ILLEGAL_VERSION_CHARS`) and
@@ -403,8 +411,12 @@ direct dependency applies to that dependency's entire transitive closure, at any
 Two matchers exist in Maven and they are **not** equivalent. Both must be understood.
 
 1. **Transitive-resolution matcher (resolver `ExclusionDependencySelector`) — this is the one that
-   shapes the dependency graph and therefore `dependency:tree`.** Each field is compared with
-   *whole-field equality, plus the single special token* `*`:
+   shapes the dependency graph and therefore `dependency:tree`.** This class lives in
+   **maven-resolver**, which is an external dependency of this clone (root `pom.xml`:
+   `<resolverVersion>2.0.21</resolverVersion>`) and is *not* vendored here; the clone only wires it up
+   in `impl/maven-impl/.../resolver/MavenSessionBuilderSupplier` (`new ExclusionDependencySelector()`).
+   The rule stated below is the resolver contract, not a quote from a file in this tree. Each field is
+   compared with *whole-field equality, plus the single special token* `*`:
    - `*` matches any value.
    - Anything else must be an exact, case-sensitive, full-string match.
    - `org.example.*` does **not** work here: it is compared literally.
@@ -743,9 +755,14 @@ Common shape:
 ### 9.3 Merging and precedence
 
 - Inheritance and profile injection merge repository lists **by `id`**
-  (`MavenModelMerger.mergeModelBase_Repositories` / `_PluginRepositories`). A child or profile
+  (`MavenModelMerger.mergeModelBase_Repositories` / `_PluginRepositories`; the key computer is
+  `RepositoryBase::getId`). The merge is **whole-element, not field-wise**: a child or profile
   repository with the same `id` as an inherited one **replaces** it entirely — this is how projects
-  override `central`.
+  override `central`. Do not merge policies field by field.
+- **Ordering** (matters, because it is the order repositories are contacted): the dominant list is
+  emitted first in its declared order, then the recessive list's non-colliding entries. In parent →
+  child inheritance the **child** is dominant, so the child's own repositories precede the inherited
+  ones. In profile injection the **profile** is dominant, so profile repositories precede the model's.
 - The implicit Super POM repository `central`
   (`https://repo.maven.apache.org/maven2`, `releases` enabled, `snapshots` disabled) is present
   unless overridden by `id` = `central`.
@@ -815,22 +832,42 @@ Precedence, in order:
    So `!1.4` is true for every JDK whose `java.version` does not begin with `1.4`. Note this is
    negated *prefix* matching, not negated range matching — `![1.5,)` is treated as
    `!"[1.5,)"` as a prefix, which never matches, so the profile is always active. Do not "fix" this.
-2. **Range.** Otherwise, if the pattern is a range — it starts with `[` or `(` **and** ends with `]`
-   or `)` — the current version is compared against the range bounds.
+2. **Range.** Otherwise, if `isRange(pattern)` — which is **exactly**
+   `pattern.startsWith("[") || pattern.startsWith("(")`; there is *no* check that the pattern ends
+   with `]` or `)` — the current version is compared against the range bounds.
 3. **Prefix.** Otherwise: `active = currentJavaVersion.startsWith(pattern)`. `1.4` matches
-   `1.4.2_08`; `11` matches `11.0.2`, and also `11` matches `1.1`? No — prefix is on the whole
-   string, so `11` does not match `1.1`, but `1` **does** match both `1.8.0` and `17` (a real gotcha).
+   `1.4.2_08`; prefix matching is on the whole string, so `11` does not match `1.1`, but `1` **does**
+   match both `1.8.0` and `17` (a real gotcha).
 
-Range comparison detail (this is a custom numeric comparison, **not** Maven's generic version
-comparator):
+Range parsing (`getRange`), exactly:
+- The pattern is split on `,`. For each token, in this order: `startsWith("[")` → inclusive bound with
+  `[` removed; else `startsWith("(")` → exclusive bound with `(` removed; else `endsWith("]")` →
+  inclusive bound with `]` removed; else `endsWith(")")` → exclusive bound with `)` removed; else if
+  the token is empty → an **exclusive** bound with the empty value. A token matching none of these
+  (e.g. a bare `1.5`) is **silently dropped**.
+- Bound values are `trim()`ed.
+- If fewer than two bounds were produced, an **exclusive upper bound of `99999999`** is appended.
+- Consequence: the single-value form `[1.5]` parses as one bound `"1.5]"` (the `]` is *not* stripped,
+  because the `startsWith("[")` branch wins and only replaces `[`) plus the synthetic `99999999`
+  upper bound. `Integer.parseInt("5]")` then throws, so `[1.5]` always yields a WARNING and an
+  inactive profile. Do not implement it as an exact-version range.
+
+Range comparison (`isInRange` / `getRelationOrder`) — a custom numeric comparison, **not** Maven's
+generic version comparator:
 - The current version is filtered by removing every character that is not a digit, `.`, `_`, or `-`
   (`[^\d._-]` → `""`), then split on `[._-]`.
-- The range bound is split on `.` only.
+- The bound value is split on `.` only.
 - Both token lists are zero-padded to **three** components, and only the first three are compared,
   numerically via `Integer.parseInt`. A non-numeric token throws `NumberFormatException`, which the
   activator catches and reports as a WARNING with the profile inactive.
-- Inclusive/exclusive bounds follow the bracket: `[` / `]` inclusive, `(` / `)` exclusive.
-- An empty bound means unbounded: `[1.5,)` = 1.5 or above, `(,1.8]` = up to and including 1.8.
+- An **empty** bound value short-circuits: it returns `1` for the lower bound and `-1` for the upper
+  bound, i.e. unbounded. `[1.5,)` = 1.5 or above, `(,1.8]` = up to and including 1.8.
+- When all three components are equal, an **exclusive** bound returns `-1` for the lower bound and
+  `1` for the upper bound (so equality fails an exclusive bound); an inclusive bound returns `0`.
+- **Quirk to reproduce:** `isInRange` returns `true` immediately when the lower-bound comparison is
+  `0` — i.e. a version exactly equal to an inclusive lower bound is in range **without the upper
+  bound being consulted at all**. A negative lower-bound comparison returns false; otherwise the
+  upper bound must compare `<= 0`.
 - Consequence of the three-component truncation: `1.8.0_292` compares as `1.8.0`, so
   `[1.8.0_100,)` and `[1.8.0_300,)` behave identically.
 
@@ -854,9 +891,10 @@ Evaluation (`OperatingSystemProfileActivator`):
 - The three actual values are read from the **system properties** `os.name`, `os.arch`, `os.version`
   and lower-cased with `Locale.ENGLISH`. If a system property is missing, the activator falls back to
   the JVM-captured `Os.OS_NAME` / `Os.OS_ARCH` / `Os.OS_VERSION` (already lower-cased).
-- The declared values are also lower-cased (`family` is the exception — it is passed through
-  un-lower-cased to `Os.isFamily`, which does its own comparison on the already-lower-cased actual
-  name).
+- The declared `name`, `arch` and `version` values are lower-cased with `Locale.ENGLISH` before
+  comparison. **`family` is the exception:** `determineFamilyMatch` passes it through *without*
+  lower-casing, and `Os.isFamily` switches on the raw string — so the dedicated family cases below
+  only fire for a lower-case declaration (see the default-branch fallback).
 - All present sub-elements are ANDed, evaluated in the order **family, name, arch, version**, with
   short-circuiting.
 - **Negation:** a leading `!` on `name`, `family`, `arch`, or `version` inverts that single
@@ -873,11 +911,11 @@ Evaluation (`OperatingSystemProfileActivator`):
 | Family | True when |
 |---|---|
 | `windows` | `os.name` contains `windows` |
-| `win9x` | Windows **and** the name contains one of `95`, `98`, `me`, or `windows ce` |
+| `win9x` | Windows **and** the name contains one of the substrings `95`, `98`, `me`, or `ce` (note: bare `ce`, not `windows ce`) |
 | `winnt` | Windows and **not** `win9x` |
-| `dos` | path separator is `;`, and not netware, and not windows |
+| `dos` | the `path.separator` system property is `;`, and not netware, and not windows |
 | `mac` | name contains `mac` or `darwin` |
-| `unix` | path separator is `:`, not openvms, and (not mac **or** name ends with `x` — i.e. `mac os x` counts as unix) |
+| `unix` | `path.separator` is `:`, not openvms, and (not mac **or** name ends with `x` — i.e. `mac os x` counts as unix) |
 | `os/2` | name contains `os/2` |
 | `netware` | name contains `netware` |
 | `tandem` | name contains `nonstop_kernel` |
@@ -885,9 +923,18 @@ Evaluation (`OperatingSystemProfileActivator`):
 | `z/os` | name contains `z/os` **or** `os/390` |
 | `os/390` | (folded into `z/os`) |
 | `os/400` | name contains `os/400` |
-| `unknown` | none of the above matched |
+| `unknown` | *not* a switch case — falls into the default branch below |
 
-An unrecognised family string yields `false` (in some Maven versions it throws; treat it as false).
+**Default branch (important):** any family string that is not one of the cases above is **not**
+false — `Os.isFamily` falls through to `actualOsName.contains(family.toLowerCase(Locale.US))`, a plain
+substring test. Two consequences:
+
+- `<family>Windows</family>` (capitalised) misses the `windows` case but still matches on Windows via
+  the substring fallback, so mixed-case family names usually appear to work.
+- Arbitrary strings behave as substring matches: `<family>linux</family>` matches `os.name` =
+  `linux`, and `<family>unknown</family>` matches only an `os.name` literally containing `unknown`.
+
+`jv` must reproduce the fallback, not return false.
 
 #### 10.2.3 `<property>` — exact matching rules
 
@@ -951,14 +998,19 @@ Rules (`FileProfileActivator.isActive`):
   assertion will be ignored."*). The mdo also states they must not be combined.
 - The result is `missing != fileExists`, i.e. `exists` activates when the path is present,
   `missing` activates when it is absent.
-- Existence is tested on the path as written; a relative path is resolved against the project
-  basedir.
-- **Interpolation inside these two fields is restricted** to `${project.basedir}`, system properties
-  and user properties (mdo, and `DefaultModelValidator.validate30RawProfileActivation`). Any other
-  `${project.*}` expression yields a WARNING (*"expressions are not supported during profile
-  activation"*) and is left un-substituted. `${basedir}` is *not* in the allowed list for Maven 4;
-  Maven 3.9 additionally accepts the bare `${basedir}` form here. Treat `${project.basedir}` as the
-  portable spelling.
+- **No glob support.** `FileProfileActivator` calls `context.exists(path, /* enableGlob */ false)`, so
+  `*` and `?` in `<exists>`/`<missing>` are literal path characters. Globs are available only through
+  the **[M4]** `exists()` / `missing()` *condition* functions ([§10.2.6](#1026-condition-m4)).
+- **Path interpolation and alignment** (`DefaultProfileActivationContext.interpolatePath`), in
+  lookup order: `${basedir}` **and** `${project.basedir}` (both spellings, both resolving to the
+  model base directory), `${project.rootDirectory}` (**[M4]**), then POM/model properties, then user
+  properties (`-D`), then system properties. The interpolated result is then aligned to the project
+  directory, so a **relative path is resolved against the project basedir**.
+- The mdo documents this more narrowly ("limited to `${project.basedir}`, system properties and user
+  properties"), and `DefaultModelValidator.validate30RawProfileActivation` warns
+  (*"expressions are not supported during profile activation"*) for any `${project.*}` expression
+  **other than** `${project.basedir}` under `activation.file.*`. The warning is the real constraint:
+  `${project.version}` and friends do not work, whereas `${basedir}` and plain POM properties do.
 - Existence-check failures (I/O errors) produce an ERROR and an inactive profile.
 
 #### 10.2.5 `<packaging>` **[M4]**
@@ -1309,7 +1361,7 @@ Every item below changes **parsing** or **defaults**. `jv` targets Maven 3.9, so
 | 13 | `<activation><packaging>` | does not exist | 4.1.0+; exact `Objects.equals` against the model packaging | [§10.2.5](#1025-packaging-m4) |
 | 14 | `<activation><condition>` | does not exist | 4.1.0+; full expression language | [§10.2.6](#1026-condition-m4) |
 | 15 | `<activation><property><name>packaging</name></name>` | resolves against user/system properties only | falls back to the model's packaging when the user property is unset | [§10.2.3](#1023-property--exact-matching-rules) |
-| 16 | `<activation><file>` interpolation | `${project.basedir}` **and** the legacy `${basedir}` | `${project.basedir}` only (plus system/user properties) | [§10.2.4](#1024-file--exact-matching-rules) |
+| 16 | `<activation><file>` interpolation | `${basedir}`, `${project.basedir}`, POM properties, user properties, system properties | same, plus `${project.rootDirectory}` | [§10.2.4](#1024-file--exact-matching-rules) |
 | 17 | `<file>` with both `exists` and `missing` | undefined/inconsistent | `exists` wins, `missing` ignored, WARNING | [§10.2.4](#1024-file--exact-matching-rules) |
 | 18 | `<build><sources>` | does not exist | 4.1.0+ `Source` list replacing `sourceDirectory`/`resources` (which are deprecated but still parsed) | [§8.1](#81-build-fields-relevant-to-resolution) |
 | 19 | `<extension><configuration>` | does not exist | 4.1.0+ opaque DOM | [§8.2](#82-extension) |

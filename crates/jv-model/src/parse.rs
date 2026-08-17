@@ -29,8 +29,11 @@ pub enum ParseError {
     Xml(#[from] quick_xml::Error),
     #[error("malformed XML text: {0}")]
     Escape(#[from] quick_xml::escape::EscapeError),
-    #[error("expected a <project> root element, found <{found}>")]
-    NotAPom { found: String },
+    #[error("expected a <{expected}> root element, found <{found}>")]
+    UnexpectedRoot {
+        expected: &'static str,
+        found: String,
+    },
     #[error("document is empty")]
     Empty,
     #[error("unexpected end of document inside <{element}>")]
@@ -73,8 +76,9 @@ pub struct ParsedPom {
 /// assert_eq!(pom.model.dependencies[0].artifact_id, "slf4j-api");
 /// ```
 pub fn parse_pom(xml: &str) -> Result<ParsedPom, ParseError> {
-    let mut parser = Parser::new(xml);
-    let model = parser.parse_document()?;
+    let mut parser = XmlParser::new(xml);
+    parser.enter_root("project")?;
+    let model = parser.parse_project()?;
     Ok(ParsedPom {
         model,
         warnings: parser.warnings,
@@ -89,13 +93,13 @@ fn parse_bool(text: &str) -> bool {
     text.trim().eq_ignore_ascii_case("true")
 }
 
-struct Parser<'i> {
+pub(crate) struct XmlParser<'i> {
     reader: Reader<&'i [u8]>,
     warnings: Vec<String>,
 }
 
-impl<'i> Parser<'i> {
-    fn new(xml: &'i str) -> Self {
+impl<'i> XmlParser<'i> {
+    pub(crate) fn new(xml: &'i str) -> Self {
         let mut reader = Reader::from_str(xml);
         let config = reader.config_mut();
         // Self-closing elements become Start+End, so every handler can assume a
@@ -117,18 +121,22 @@ impl<'i> Parser<'i> {
         Ok(self.reader.read_event()?)
     }
 
-    /// Finds the root element and parses it as a project.
-    fn parse_document(&mut self) -> Result<Model, ParseError> {
+    /// Advances to the document's root element, requiring it to be `expected`.
+    ///
+    /// On return the root's children are next, so the caller can hand straight to
+    /// [`XmlParser::children`].
+    pub(crate) fn enter_root(&mut self, expected: &'static str) -> Result<(), ParseError> {
         loop {
             match self.read_event()? {
                 Event::Start(element) => {
                     let name = element.local_name();
-                    if name.as_ref() != b"project" {
-                        return Err(ParseError::NotAPom {
+                    if name.as_ref() != expected.as_bytes() {
+                        return Err(ParseError::UnexpectedRoot {
+                            expected,
                             found: String::from_utf8_lossy(name.as_ref()).into_owned(),
                         });
                     }
-                    return self.parse_project();
+                    return Ok(());
                 }
                 Event::Eof => return Err(ParseError::Empty),
                 // Skip the declaration, comments, doctype and stray whitespace.
@@ -142,7 +150,7 @@ impl<'i> Parser<'i> {
     /// `visit` returns whether it consumed the child through its end tag; when it
     /// returns false the whole subtree is skipped, which is how unrecognized
     /// elements — most importantly plugin `<configuration>` — cost nothing.
-    fn children<F>(&mut self, context: &str, mut visit: F) -> Result<(), ParseError>
+    pub(crate) fn children<F>(&mut self, context: &str, mut visit: F) -> Result<(), ParseError>
     where
         F: FnMut(&mut Self, &[u8]) -> Result<bool, ParseError>,
     {
@@ -175,7 +183,7 @@ impl<'i> Parser<'i> {
     ///
     /// Nested markup is ignored rather than rejected: a POM that puts elements
     /// inside a text field is malformed, but Maven reads it without complaint.
-    fn text(&mut self) -> Result<String, ParseError> {
+    pub(crate) fn text(&mut self) -> Result<String, ParseError> {
         let mut out = String::new();
         let mut depth = 0usize;
         loop {
@@ -202,19 +210,19 @@ impl<'i> Parser<'i> {
     }
 
     /// Reads text into `slot`, as an owned `Some`.
-    fn text_into(&mut self, slot: &mut Option<String>) -> Result<bool, ParseError> {
+    pub(crate) fn text_into(&mut self, slot: &mut Option<String>) -> Result<bool, ParseError> {
         *slot = Some(self.text()?);
         Ok(true)
     }
 
-    fn bool_into(&mut self, slot: &mut Option<bool>) -> Result<bool, ParseError> {
+    pub(crate) fn bool_into(&mut self, slot: &mut Option<bool>) -> Result<bool, ParseError> {
         let text = self.text()?;
         *slot = Some(parse_bool(&text));
         Ok(true)
     }
 
     /// Reads a wrapper element whose children are all `item`, parsing each.
-    fn list<T, F>(
+    pub(crate) fn list<T, F>(
         &mut self,
         context: &str,
         item: &[u8],
@@ -236,11 +244,15 @@ impl<'i> Parser<'i> {
     }
 
     /// Reads a wrapper element whose children are all text values.
-    fn text_list(&mut self, context: &str, item: &[u8]) -> Result<Vec<String>, ParseError> {
+    pub(crate) fn text_list(
+        &mut self,
+        context: &str,
+        item: &[u8],
+    ) -> Result<Vec<String>, ParseError> {
         self.list(context, item, |parser| parser.text())
     }
 
-    fn parse_project(&mut self) -> Result<Model, ParseError> {
+    pub(crate) fn parse_project(&mut self) -> Result<Model, ParseError> {
         let mut model = Model::default();
         self.children("project", |parser, name| match name {
             b"modelVersion" => parser.text_into(&mut model.model_version),
@@ -281,19 +293,19 @@ impl<'i> Parser<'i> {
                 Ok(true)
             }
             b"profiles" => {
-                model.profiles = parser.list("profiles", b"profile", Parser::parse_profile)?;
+                model.profiles = parser.list("profiles", b"profile", XmlParser::parse_profile)?;
                 Ok(true)
             }
             b"repositories" => {
                 model.repositories =
-                    parser.list("repositories", b"repository", Parser::parse_repository)?;
+                    parser.list("repositories", b"repository", XmlParser::parse_repository)?;
                 Ok(true)
             }
             b"pluginRepositories" => {
                 model.plugin_repositories = parser.list(
                     "pluginRepositories",
                     b"pluginRepository",
-                    Parser::parse_repository,
+                    XmlParser::parse_repository,
                 )?;
                 Ok(true)
             }
@@ -318,7 +330,7 @@ impl<'i> Parser<'i> {
         Ok(parent)
     }
 
-    fn parse_properties(
+    pub(crate) fn parse_properties(
         &mut self,
         properties: &mut crate::model::Properties,
     ) -> Result<(), ParseError> {
@@ -331,7 +343,7 @@ impl<'i> Parser<'i> {
     }
 
     fn parse_dependencies(&mut self) -> Result<Vec<Dependency>, ParseError> {
-        self.list("dependencies", b"dependency", Parser::parse_dependency)
+        self.list("dependencies", b"dependency", XmlParser::parse_dependency)
     }
 
     fn parse_dependency_management(&mut self) -> Result<Vec<Dependency>, ParseError> {
@@ -381,7 +393,7 @@ impl<'i> Parser<'i> {
             b"systemPath" => parser.text_into(&mut dependency.system_path),
             b"exclusions" => {
                 dependency.exclusions =
-                    parser.list("exclusions", b"exclusion", Parser::parse_exclusion)?;
+                    parser.list("exclusions", b"exclusion", XmlParser::parse_exclusion)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -417,7 +429,7 @@ impl<'i> Parser<'i> {
             b"finalName" => parser.text_into(&mut build.final_name),
             b"defaultGoal" => parser.text_into(&mut build.default_goal),
             b"plugins" => {
-                build.plugins = parser.list("plugins", b"plugin", Parser::parse_plugin)?;
+                build.plugins = parser.list("plugins", b"plugin", XmlParser::parse_plugin)?;
                 Ok(true)
             }
             b"pluginManagement" => {
@@ -426,7 +438,7 @@ impl<'i> Parser<'i> {
             }
             b"extensions" => {
                 build.extensions =
-                    parser.list("extensions", b"extension", Parser::parse_extension)?;
+                    parser.list("extensions", b"extension", XmlParser::parse_extension)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -438,7 +450,7 @@ impl<'i> Parser<'i> {
         let mut managed = Vec::new();
         self.children("pluginManagement", |parser, name| {
             if name == b"plugins" {
-                managed = parser.list("plugins", b"plugin", Parser::parse_plugin)?;
+                managed = parser.list("plugins", b"plugin", XmlParser::parse_plugin)?;
                 Ok(true)
             } else {
                 Ok(false)
@@ -509,14 +521,14 @@ impl<'i> Parser<'i> {
             }
             b"repositories" => {
                 profile.repositories =
-                    parser.list("repositories", b"repository", Parser::parse_repository)?;
+                    parser.list("repositories", b"repository", XmlParser::parse_repository)?;
                 Ok(true)
             }
             b"pluginRepositories" => {
                 profile.plugin_repositories = parser.list(
                     "pluginRepositories",
                     b"pluginRepository",
-                    Parser::parse_repository,
+                    XmlParser::parse_repository,
                 )?;
                 Ok(true)
             }
@@ -529,7 +541,7 @@ impl<'i> Parser<'i> {
         Ok(profile)
     }
 
-    fn parse_activation(&mut self) -> Result<Activation, ParseError> {
+    pub(crate) fn parse_activation(&mut self) -> Result<Activation, ParseError> {
         let mut activation = Activation::default();
         self.children("activation", |parser, name| match name {
             b"activeByDefault" => parser.bool_into(&mut activation.active_by_default),
@@ -585,7 +597,7 @@ impl<'i> Parser<'i> {
         Ok(file)
     }
 
-    fn parse_repository(&mut self) -> Result<Repository, ParseError> {
+    pub(crate) fn parse_repository(&mut self) -> Result<Repository, ParseError> {
         let mut repository = Repository::default();
         self.children("repository", |parser, name| match name {
             b"id" => parser.text_into(&mut repository.id),
@@ -605,7 +617,10 @@ impl<'i> Parser<'i> {
         Ok(repository)
     }
 
-    fn parse_repository_policy(&mut self, context: &str) -> Result<RepositoryPolicy, ParseError> {
+    pub(crate) fn parse_repository_policy(
+        &mut self,
+        context: &str,
+    ) -> Result<RepositoryPolicy, ParseError> {
         let mut policy = RepositoryPolicy::default();
         self.children(context, |parser, name| match name {
             b"enabled" => parser.bool_into(&mut policy.enabled),
@@ -934,7 +949,7 @@ mod tests {
     #[test]
     fn non_project_root_is_rejected() {
         let error = parse_pom("<settings><offline>true</offline></settings>").unwrap_err();
-        assert!(matches!(error, ParseError::NotAPom { .. }));
+        assert!(matches!(error, ParseError::UnexpectedRoot { .. }));
     }
 
     #[test]
