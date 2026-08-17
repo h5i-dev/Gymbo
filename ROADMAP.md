@@ -610,16 +610,31 @@ locally-installed `<name>>=` form for everything it places.
 `action.yml` is the `setup-jv` composite action and `scripts/install.sh` is what
 it installs with.
 
-**Open:**
+**Snapshots** were the last gap and are closed. The trap is that the metadata a
+download produces carries the *effective* repository id in its file name — the
+mirror's, when the user has one — which jv cannot know the next `mvn` will be
+configured with, and guessing wrong leaves the artifact present and
+unresolvable. The way out is not to imitate a download at all: `mvn install`
+writes a layout with no repository id anywhere in it, base-version file names
+plus a `maven-metadata-local.xml` declaring `<localCopy>true</localCopy>`, and
+Maven accepts that from any configuration. jv writes that, which is also honest
+— jv put the file there, so it *is* locally installed. Verified end to end
+against real Maven with `--offline`.
 
-- **Snapshots.** The file is placed under its timestamped name, but the
-  `maven-metadata-<repositoryId>.xml` Maven needs to find it offline is not
-  written, because the id in that file name is the effective (possibly mirror)
-  id and there is no unconditional fallback. `jv sync` warns rather than writing
-  something that would be right only sometimes.
-- The six Ring-3 projects, and the CI-minutes number.
+Finding that required fixing something else: `<activeProfiles>` in
+`settings.xml` was parsed and never read, so a profile turned on that way never
+activated. Since that is how most people attach a corporate repository, its
+artifacts came back "not in any configured repository" with no hint why.
 
-### M7 — `jvx` ✅ (gate met, smoke matrix outstanding)
+**Ring 3** is `scripts/ring3.sh`: real projects at pinned commits, every module,
+`jv tree` diffed against `mvn dependency:tree`. Not a `cargo test` — it clones
+gigabytes — so it runs before a release or nightly. Eight projects are pinned,
+five of them in the default set.
+
+**Open:** the `setup-jv` CI-minutes number, which needs a published release and
+a real CI run on a public repository.
+
+### M7 — `jvx` ✅
 Endpoint parsing, env store, main-class ladder, arg passthrough.
 
 **Done.** `crates/jv-exec/` holds the pure parts — endpoint grammar, manifest
@@ -643,7 +658,16 @@ repository wrote at deploy time and is frequently absent from mirrors.
 prints `Version 1.36.1` from a cold cache in 2.7s and from a warm one in 151ms,
 having picked the version itself.
 
-**Open:** the 20-tool smoke matrix.
+**The smoke matrix is green.** `crates/jv-cli/tests/jvx_smoke.rs` runs twenty
+real published artifacts covering the shapes that break a launcher: a shaded
+uber-jar, a thin jar with a deep transitive classpath, Kotlin and Scala
+toolchains, a generator whose usage goes to stderr, three spellings of the
+version flag, and tools that exit non-zero when asked to describe themselves.
+Half the entries are libraries on purpose — `jvx` is a command people point at
+the wrong coordinates, so "refuses clearly and says why" is as much the
+behaviour under test as "launches". Each entry records the shape it covers, so a
+failure names the class of tool rather than only the tool. Six run by default;
+`JV_SMOKE_ALL=1` runs all twenty in 39s warm.
 
 ### M8 — v0.1 launch — mechanics done, launch not run
 **Done:** the benchmark table, from `scripts/benchmark.sh`, which refuses to
