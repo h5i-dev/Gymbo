@@ -24,8 +24,8 @@ com.example:demo:jar:1.0
 
 |  | jv | `mvn dependency:tree` | |
 |---|---|---|---|
-| Warm | **53 ms** | 1,532 ms | 29× |
-| Cold | **4.5 s** | 15.7 s | 3.5× |
+| Warm | **44 ms** | 1,623 ms | 37× |
+| Cold | **1.0 s** | 15.2 s | 15× |
 
 Median of five warm runs on one project (Jackson, HttpClient 5, Guava, JUnit 5;
 23 nodes), 10-core aarch64 Linux, Maven 3.9.9. Both tools start from an empty
@@ -33,6 +33,12 @@ cache for the cold row. `scripts/benchmark.sh` produces this table, and refuses
 to report a time unless the two tools' output matches first — a benchmark
 against wrong output measures nothing. Cold timings are network-bound and will
 differ on your machine; the warm row is the one that reflects the tool.
+
+The cold figure is what it is because jv crawls POMs ahead of the resolver
+rather than fetching them one round trip at a time; a 104-node Spring Boot
+project went from 22.4 s to 3.5 s the same way. The warm figure is what it is
+partly because jv stopped booting a JVM on every run just to read one line out
+of it.
 
 ## Commands
 
