@@ -15,6 +15,18 @@
 //! plugins from three places — `<reporting><plugins>`, `<build><plugins>` and
 //! `<build><pluginManagement><plugins>` — in that order.
 //!
+//! # Known gap: snapshots
+//!
+//! A snapshot downloaded from a repository lives in Maven's local repository
+//! under its *timestamped* file name, and Maven finds it through a
+//! `maven-metadata-<repositoryId>.xml` beside it. jv places the file correctly
+//! but does not yet write that metadata, and cannot write it safely in general:
+//! the id in the file name is the *effective* repository id, which is the
+//! mirror's when the user has one, and there is no unconditional fallback the
+//! way `_remote.repositories` has one. So `jv sync` warns on a snapshot rather
+//! than writing metadata that would be right only sometimes. Recorded in
+//! `docs/spec/local-repository.md` and `ROADMAP.md`.
+//!
 //! # Why the artifacts are hardlinked
 //!
 //! jv's cache is keyed by URL; Maven's local repository is keyed by coordinates.
@@ -27,8 +39,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use jv_model::{Artifact, Dependency, Plugin, Scope};
-use jv_repo::artifact_path;
+use jv_model::{Artifact, Dependency, Plugin, Scope, is_snapshot_version};
 use jv_resolver::{CollectRequest, Verbosity};
 
 use crate::error::DriverError;
@@ -171,8 +182,20 @@ pub fn sync(
             match session.source().materialize(&candidate)? {
                 Some(found) => {
                     if let Some(local) = &request.local_repository {
+                        // The *resolved* path: a snapshot lives in its
+                        // `-SNAPSHOT` directory under a timestamped file name,
+                        // and placing it under the base name would give Maven a
+                        // file it never looks for.
+                        let relative = session.source().repository_path(&candidate)?;
+                        if is_snapshot_version(&candidate.version) {
+                            report.warnings.push(format!(
+                                "{}:{}:{} is a snapshot; jv placed the file but not the \
+                                 maven-metadata-<repository>.xml Maven needs to find it offline",
+                                candidate.group_id, candidate.artifact_id, candidate.version
+                            ));
+                        }
                         if let Some(linked) =
-                            materialize(&found.path, local, &candidate, &mut report)?
+                            materialize(&found.path, local, &relative, &mut report)?
                         {
                             record_tracking(&mut tracking, &linked, found.repository.as_deref())?;
                             report.materialized.push(linked);
@@ -202,6 +225,13 @@ pub fn sync(
     }
 
     report.warnings.extend(session.warnings());
+    // A snapshot warns once per file it placed, and a repository problem warns
+    // once per artifact that hit it. Saying the same sentence forty times buries
+    // everything else in the report.
+    let mut seen = BTreeSet::new();
+    report
+        .warnings
+        .retain(|warning| seen.insert(warning.clone()));
     Ok(report)
 }
 
@@ -333,10 +363,10 @@ fn plugin_dependencies(
 fn materialize(
     cached: &Path,
     local_repository: &Path,
-    artifact: &Artifact,
+    relative: &str,
     report: &mut SyncReport,
 ) -> Result<Option<PathBuf>, DriverError> {
-    let destination = local_repository.join(artifact_path(artifact));
+    let destination = local_repository.join(relative);
     if destination.exists() {
         return Ok(None);
     }
@@ -370,6 +400,7 @@ fn materialize(
 mod tests {
     use super::*;
     use jv_model::{Build, Model};
+    use jv_repo::artifact_path;
 
     fn plugin(group: Option<&str>, artifact: &str, version: Option<&str>) -> Plugin {
         Plugin {
@@ -477,7 +508,7 @@ mod tests {
 
         let mut report = SyncReport::default();
         assert_eq!(
-            materialize(&cached, &local, &artifact, &mut report).unwrap(),
+            materialize(&cached, &local, &artifact_path(&artifact), &mut report).unwrap(),
             None
         );
         // That directory belongs to Maven; a file already in it is Maven's
@@ -494,7 +525,7 @@ mod tests {
 
         let artifact = Artifact::new("org.slf4j", "slf4j-api", "2.0.9");
         let mut report = SyncReport::default();
-        let placed = materialize(&cached, &local, &artifact, &mut report)
+        let placed = materialize(&cached, &local, &artifact_path(&artifact), &mut report)
             .unwrap()
             .expect("a destination");
         assert!(placed.ends_with("org/slf4j/slf4j-api/2.0.9/slf4j-api-2.0.9.jar"));
