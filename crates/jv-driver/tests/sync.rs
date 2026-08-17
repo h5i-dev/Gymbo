@@ -94,7 +94,10 @@ fn fixture(pom_body: &str, populate: impl FnOnce(&FakeRepository)) -> Fixture {
 
 impl Fixture {
     fn sync(&self) -> jv_driver::SyncReport {
-        let project = self.session.project_at(&self.project_pom).expect("a project");
+        let project = self
+            .session
+            .project_at(&self.project_pom)
+            .expect("a project");
         sync(
             &self.session,
             &project.reactor(),
@@ -313,7 +316,9 @@ fn the_reactors_own_modules_are_not_looked_for() {
         ..Config::new().without_local_repository()
     };
     let session = Session::new(&config).expect("a session");
-    let root = session.project_at(&project.join("pom.xml")).expect("a project");
+    let root = session
+        .project_at(&project.join("pom.xml"))
+        .expect("a project");
 
     let report = sync(
         &session,
