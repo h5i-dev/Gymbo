@@ -173,9 +173,12 @@ pub fn collect(
             path: vec![root],
         })
         .collect();
-    // Cycle nodes take their children from the ancestor they closed on, which is
-    // only final once the whole graph is built.
+    // A node that shares another's child list — because it closed a cycle, or
+    // because the pool already had that subtree — can only be linked once the
+    // whole graph is built, since the list it shares is still filling in.
     let mut cycle_links: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut pool_links: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut pool: HashMap<PoolKey, NodeId> = HashMap::new();
     let mut skipper = Skipper::default();
 
     while !queue.is_empty() {
@@ -189,20 +192,18 @@ pub fn collect(
                 &mut collected,
                 &mut next,
                 &mut cycle_links,
+                &mut pool,
+                &mut pool_links,
                 &mut skipper,
             )?;
         }
         queue = next;
     }
 
-    for (cycle_node, ancestor) in cycle_links {
-        let children = collected.graph.children(ancestor).to_vec();
-        let identity = collected.graph.children_identity(ancestor);
-        collected.graph.set_children(cycle_node, children);
-        // Sharing the ancestor's list is what makes conflict resolution treat
-        // the two as one graph node.
-        collected.graph.node_mut(cycle_node).children_key =
-            Some(u32::try_from(identity & 0xFFFF_FFFF).unwrap_or(0));
+    // Sharing the owner's list is what makes conflict resolution treat the two as
+    // one graph node — which is the point, for a cycle and for a pool hit alike.
+    for (sharer, owner) in cycle_links.into_iter().chain(pool_links) {
+        collected.graph.share_children(owner, sharer);
     }
 
     Ok(collected)
@@ -357,6 +358,8 @@ fn process(
     collected: &mut Collected,
     next: &mut Vec<Work>,
     cycle_links: &mut Vec<(NodeId, NodeId)>,
+    pool: &mut HashMap<PoolKey, NodeId>,
+    pool_links: &mut Vec<(NodeId, NodeId)>,
     skipper: &mut Skipper,
 ) -> Result<(), CollectError> {
     // Selection happens before management, so a managed `<optional>` cannot
@@ -409,28 +412,53 @@ fn process(
         collected.graph.add_child(work.parent, id);
 
         // A container format already holds its dependencies, so the graph stops
-        // here rather than repeating their contents.
+        // here rather than repeating their contents. Upstream's
+        // `recurse = traverse && !dependencies.isEmpty()` — and its `else` branch
+        // *guards on* the skipper's answer and then caches, which is what records
+        // a leaf as the winner for its coordinates. Discarding the answer here,
+        // as jv did, let a later version of the same artifact expand a subtree
+        // upstream skips.
         let descriptor_type = dependency.type_or_default();
         if types.get(descriptor_type).includes_dependencies || descriptor.dependencies.is_empty() {
-            skipper.skip(id, &descriptor.artifact, &work.path);
+            if !skipper.skip(id, &descriptor.artifact, &work.path) {
+                let mut path = work.path.clone();
+                path.push(id);
+                skipper.cache(id, &descriptor.artifact, &path);
+            }
             continue;
         }
 
-        // Consulted for every node, in walk order, because it records where each
-        // one sits whether or not it skips.
+        let child_selector = work.selector.derive(Some(&dependency));
+
+        // Upstream's `DataPool`, and it is consulted *before* the skipper — which
+        // is the whole reason the ordering is spelled out here. A pool hit shares
+        // the already-expanded node's child list and returns immediately, so it
+        // never reaches the skipper, never takes a sequence number, and therefore
+        // never shifts the numbering the skipper's `isLeftmost` rule depends on.
+        // Getting this order wrong does not merely lose the sharing: it changes
+        // which nodes the skipper decides to skip.
+        //
+        // Sharing is by *identity*, not by copy. The list keeps filling in as the
+        // walk proceeds, and both ends read the same one — see
+        // `Graph::share_children`.
+        let pooled = PoolKey {
+            artifact: descriptor.artifact.clone(),
+            selector: child_selector.clone(),
+            management_stage: management.stage_at(work.level),
+        };
+        if let Some(owner) = pool.get(&pooled).copied() {
+            pool_links.push((id, owner));
+            continue;
+        }
+
+        // Consulted in walk order, because it records where each node sits
+        // whether or not it skips.
         if skipper.skip(id, &descriptor.artifact, &work.path) {
             continue;
         }
 
-        // Deliberately no memo of already-expanded subtrees. Upstream's pool
-        // shares the *mutable* child list, so a shared subtree keeps filling in
-        // as the walk proceeds; copying a snapshot instead would freeze it empty,
-        // and skipping the expansion would skip the cycle check with it. Bounded
-        // instead by cycle detection, which is what actually terminates the walk.
-        let child_selector = work.selector.derive(Some(&dependency));
         let mut path = work.path.clone();
         path.push(id);
-        skipper.cache(id, &descriptor.artifact, &path);
         for child in &descriptor.dependencies {
             next.push(Work {
                 parent: id,
@@ -440,8 +468,24 @@ fn process(
                 path: path.clone(),
             });
         }
+        pool.insert(pooled, id);
+        skipper.cache(id, &descriptor.artifact, &path);
     }
     Ok(())
+}
+
+/// What makes two subtrees the same subtree.
+///
+/// Upstream keys on `(artifact, repositories, selector, manager, traverser,
+/// filter)`. jv does not model per-node repositories (recorded in
+/// `jv-driver/src/source.rs`) and has no traverser or version filter, so what is
+/// left is the artifact, the selector, and which management would apply — see
+/// [`Management::stage_at`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PoolKey {
+    artifact: Artifact,
+    selector: Selector,
+    management_stage: usize,
 }
 
 /// The nearest ancestor with the same coordinates, ignoring the version.
@@ -524,6 +568,29 @@ struct Management {
 }
 
 impl Management {
+    /// Whether there is anything to manage at all.
+    fn is_empty(&self) -> bool {
+        self.versions.is_empty()
+            && self.scopes.is_empty()
+            && self.optionals.is_empty()
+            && self.exclusions.is_empty()
+    }
+
+    /// How this management behaves at a level, for pooling purposes.
+    ///
+    /// Upstream derives a *new* manager per level up to `deriveUntil` (2) and
+    /// then returns itself, and the manager is part of the pool key — so a
+    /// subtree collected at level 1 is never shared with one at level 3, because
+    /// management applies from level 2 and their children would differ.
+    ///
+    /// With no rules to apply, every derived manager behaves identically and the
+    /// distinction disappears. That is not a shortcut: it is why upstream's own
+    /// collector tests, whose session leaves the manager null, pool freely across
+    /// depths — and it is what `cycle.txt` depends on.
+    fn stage_at(&self, level: usize) -> usize {
+        if self.is_empty() { 0 } else { level.min(2) }
+    }
+
     fn from(managed: &[Dependency]) -> Self {
         let mut management = Management::default();
         for entry in managed {

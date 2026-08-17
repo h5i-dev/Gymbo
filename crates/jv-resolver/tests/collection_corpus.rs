@@ -196,22 +196,17 @@ fn a_whole_subtree_matches_its_golden() {
     assert_same_subtree(&expected, &actual);
 }
 
-/// Known divergence, deliberately not papered over.
+/// The case that pinned down why upstream's `DataPool` is not an optimization.
 ///
-/// Upstream's `cycle.txt` expects `b -> c -> a` to expand one level further,
-/// into `a -> b`. jv skips that node as a duplicate, and the rule it uses is a
-/// direct transcription of `DependencyResolutionSkipper.isLeftmost`: the winner
-/// for `a` sits at (depth 2, sequence 1), the node's ancestor at that depth is
-/// `b` at (depth 2, sequence 2), and `2 < 1` is false. Both depth conventions
-/// give the same answer, and the golden is compared against the dirty graph, so
-/// the transformer chain cannot explain it either.
-///
-/// Turning the duplicate rule off makes this case pass and every other one too —
-/// but then `cycle-big` never terminates, which is exactly what the rule exists
-/// to prevent. Resolving it needs a run of upstream's own test with tracing on,
-/// rather than another reading of the source.
+/// This golden was unreconciled for a while, and the reasoning that failed is
+/// worth recording: jv's `isLeftmost` is a faithful transcription, and the
+/// arithmetic said the node *should* be skipped. What was wrong was the premise —
+/// that upstream's skipper sees the same nodes jv's does. It does not.
+/// `BfDependencyCollector.doRecurse` consults the pool *before*
+/// `skipResolution`, so a pool hit never reaches the skipper and never takes a
+/// sequence number. `b` under `a` is a pool hit, so it never becomes a duplicate
+/// candidate, and every number after it differs.
 #[test]
-#[ignore = "unreconciled: see the comment above"]
 fn a_cyclic_graph_matches_its_golden() {
     let Some(expected) = load_golden("", "cycle.txt") else {
         return;

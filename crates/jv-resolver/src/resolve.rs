@@ -360,7 +360,7 @@ impl Resolver<'_> {
                 round.removals.push((node, child));
             }
         }
-        self.pop(round);
+        self.pop(graph, round);
         Ok(true)
     }
 
@@ -455,12 +455,19 @@ impl Resolver<'_> {
         Ok(true)
     }
 
-    fn pop(&self, round: &mut Round) {
+    fn pop(&self, graph: &Graph, round: &mut Round) {
         if let Some(node) = round.parent_nodes.pop() {
             round.parent_scopes.pop();
             round.parent_optionals.pop();
             round.parent_infos.pop();
-            let _ = node;
+            // Upstream's `pop` ends with `stack.remove(node.getChildren())`, and
+            // leaving it out turns per-path cycle detection into a global visited
+            // set. A second, *different* path to the same child list then bails at
+            // the `stack` check instead of reaching the branch that lowers
+            // `min_depth` and retro-updates the scope and optionality of items
+            // already collected under it — so a nearer path is never recognised
+            // and a different version wins.
+            round.stack.remove(&graph.children_identity(node));
         }
     }
 

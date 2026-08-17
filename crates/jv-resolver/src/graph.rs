@@ -160,6 +160,8 @@ impl Node {
 pub struct Graph {
     nodes: Vec<Node>,
     root: NodeId,
+    /// The next child-list identity to hand out. See [`Graph::share_children`].
+    next_children_key: u32,
 }
 
 impl Graph {
@@ -168,6 +170,7 @@ impl Graph {
         Self {
             nodes: vec![root],
             root: NodeId(0),
+            next_children_key: 0,
         }
     }
 
@@ -220,6 +223,28 @@ impl Graph {
             // Disjoint from any allocated key, which is a plain u32.
             None => (1u64 << 32) | id.index() as u64,
         }
+    }
+
+    /// Makes two nodes share one child-list identity.
+    ///
+    /// Both ends get the *same* key. Setting it on only one of them — which is
+    /// what happened before — left the two with different identities however the
+    /// list was shared, so conflict resolution gave each its own depth and scope
+    /// accounting and produced a different answer than Maven for any graph with a
+    /// cycle or a shared subtree.
+    pub fn share_children(&mut self, owner: NodeId, sharer: NodeId) {
+        let key = match self.nodes[owner.index()].children_key {
+            Some(key) => key,
+            None => {
+                let key = self.next_children_key;
+                self.next_children_key += 1;
+                self.nodes[owner.index()].children_key = Some(key);
+                key
+            }
+        };
+        self.nodes[sharer.index()].children_key = Some(key);
+        let children = self.nodes[owner.index()].children.clone();
+        self.nodes[sharer.index()].children = children;
     }
 
     /// The number of nodes in the arena, including any left unreachable by
