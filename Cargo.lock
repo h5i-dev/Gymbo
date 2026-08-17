@@ -33,6 +33,7 @@ name = "jv-resolver"
 version = "0.1.0-dev"
 dependencies = [
  "jv-model",
+ "jv-testkit",
  "jv-version",
  "thiserror",
 ]

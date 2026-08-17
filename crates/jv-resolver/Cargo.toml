@@ -13,5 +13,8 @@ jv-model = { workspace = true }
 jv-version = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+jv-testkit = { workspace = true }
+
 [lints]
 workspace = true

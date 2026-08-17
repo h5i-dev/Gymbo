@@ -104,6 +104,15 @@ pub struct Node {
     /// A scope conflict resolution declined to apply, reported as "scope not
     /// updated to".
     pub ignored_scope: Option<Scope>,
+    /// Which shared child list this node uses, when the collector reused one.
+    ///
+    /// Maven's collector gives two nodes for the same resolved artifact the
+    /// *same* children list object while leaving them separate nodes, because
+    /// their derived scopes can differ. Conflict resolution then keys its cycle
+    /// detection and memoisation on that list rather than on the node — so two
+    /// such nodes count as one graph node. Recording the sharing explicitly is
+    /// what lets [`Graph::children_identity`] reproduce that.
+    pub children_key: Option<u32>,
 }
 
 impl Node {
@@ -197,6 +206,20 @@ impl Graph {
     /// prunes losers.
     pub fn set_children(&mut self, id: NodeId, children: Vec<NodeId>) {
         self.nodes[id.index()].children = children;
+    }
+
+    /// The identity conflict resolution treats as "the same graph node".
+    ///
+    /// That identity is the *child list*, not the node: the collector shares one
+    /// list between nodes for the same resolved artifact, and upstream's cycle
+    /// detection and scope memoisation both key on it. A node with no shared key
+    /// is its own identity.
+    pub fn children_identity(&self, id: NodeId) -> u64 {
+        match self.nodes[id.index()].children_key {
+            Some(key) => u64::from(key),
+            // Disjoint from any allocated key, which is a plain u32.
+            None => (1u64 << 32) | id.index() as u64,
+        }
     }
 
     /// The number of nodes in the arena, including any left unreachable by
@@ -418,6 +441,31 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn nodes_sharing_a_child_list_share_an_identity() {
+        let mut graph = Graph::new(Node::root());
+        let first = graph.add(node("a", "1"));
+        let second = graph.add(node("a", "1"));
+        // Distinct nodes are distinct identities by default.
+        assert_ne!(
+            graph.children_identity(first),
+            graph.children_identity(second)
+        );
+        // Until the collector says they share a child list.
+        graph.node_mut(first).children_key = Some(7);
+        graph.node_mut(second).children_key = Some(7);
+        assert_eq!(
+            graph.children_identity(first),
+            graph.children_identity(second)
+        );
+        // A shared key never collides with an unshared node's identity.
+        let third = graph.add(node("b", "1"));
+        assert_ne!(
+            graph.children_identity(third),
+            graph.children_identity(first)
+        );
     }
 
     #[test]
