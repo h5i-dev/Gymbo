@@ -477,6 +477,11 @@ pub fn sync(
         report.artifacts.push(pom);
     }
 
+    // Every range in every POM jv read, not only the ones jv resolved: Maven
+    // re-resolves the plugin classpath on its own terms and reaches ranges down
+    // paths jv never took.
+    session.source().fetch_ranged_metadata();
+
     // The version-list metadata behind every range and `LATEST`.
     //
     // Maven re-resolves a range at build time, so a repository holding the jar

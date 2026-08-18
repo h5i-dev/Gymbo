@@ -32,7 +32,7 @@
 //! can serve a sibling subtree that Maven would not have offered it to. Recorded
 //! in `ROADMAP.md` rather than hidden here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use jv_cache::{Fetcher, Origin};
@@ -108,6 +108,14 @@ pub struct RepositorySource {
     descriptors: Arc<Mutex<HashMap<String, Descriptor>>>,
     /// Version lists by `g:a`, for ranges.
     versions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Repositories that could not be reached, so they are asked once.
+    ///
+    /// A dead repository named in a transitive POM — `maven.java.net` is the
+    /// classic — costs a full connection timeout on *every* lookup that
+    /// consults it, and version-range resolution consults every repository in
+    /// scope for every ranged artifact. Ignoring the failure without recording
+    /// it turned one dead host into minutes of waiting.
+    unreachable: Arc<Mutex<HashSet<String>>>,
     /// Artifact-level `maven-metadata.xml` as fetched, by (path, repository id).
     ///
     /// Kept so `jv sync` can place it. Maven re-resolves a version range at
@@ -186,6 +194,7 @@ impl RepositorySource {
             descriptors: Arc::default(),
             versions: Arc::default(),
             range_metadata: Arc::default(),
+            unreachable: Arc::default(),
             snapshots: Arc::default(),
             reactor: Arc::default(),
             forced_update: None,
@@ -477,7 +486,15 @@ impl RepositorySource {
         version_hint: &str,
         record: bool,
     ) -> Result<Vec<Metadata>, DriverError> {
-        let repositories = self.repositories();
+        let all = self.repositories();
+        // A repository already known to be unreachable is not asked again.
+        let repositories: Vec<_> = {
+            let unreachable = self.unreachable.lock().expect("unreachable");
+            all.iter()
+                .filter(|repository| !unreachable.contains(&repository.url))
+                .cloned()
+                .collect()
+        };
         // All at once, not one after another. This sits on the synchronous
         // critical path — every version range and every snapshot resolution goes
         // through it — so asking three repositories in turn spent three round
@@ -508,10 +525,20 @@ impl RepositorySource {
             let fetched = match fetched {
                 Ok(fetched) => fetched,
                 Err(error) => {
-                    self.warn(format!(
-                        "{}/{path} could not be read and was ignored: {error}",
-                        repository.url
-                    ));
+                    // Warned once, then never asked again for the rest of the
+                    // session: the next range would otherwise pay the same
+                    // timeout, and there are many ranges.
+                    if self
+                        .unreachable
+                        .lock()
+                        .expect("unreachable")
+                        .insert(repository.url.clone())
+                    {
+                        self.warn(format!(
+                            "{} could not be reached and will be skipped: {error}",
+                            repository.url
+                        ));
+                    }
                     continue;
                 }
             };
@@ -574,6 +601,47 @@ impl RepositorySource {
     /// reaches parents and BOMs through the same `ModelSource::get` that fills
     /// this memo — so the memo is exactly the set Maven will look for, and is a
     /// superset of any per-artifact parent walk.
+    /// Fetches and records the version list for every coordinate any POM jv
+    /// read names with a *range*.
+    ///
+    /// Resolving a range records its metadata, but that only covers the ranges
+    /// jv itself had to resolve. Maven re-resolves the whole plugin classpath
+    /// on its own terms and can reach a range down a path jv never took —
+    /// bouncycastle's POMs cross-reference each other with `[1.81,1.82)`, and
+    /// which of them jv expands depends on which versions won. A repository
+    /// missing one of those files fails offline with "No versions available …
+    /// within specified range", which names neither the file nor the reason.
+    ///
+    /// So this sweeps the parsed POMs rather than relying on jv's own path.
+    /// Fetching a version list already read is a memo hit, so the sweep costs
+    /// requests only for coordinates jv genuinely never looked up.
+    pub fn fetch_ranged_metadata(&self) {
+        let ranged: BTreeSet<(String, String)> = {
+            let poms = self.poms.lock().expect("poms");
+            poms.values()
+                .flatten()
+                .flat_map(|model| {
+                    model
+                        .dependencies
+                        .iter()
+                        .chain(model.dependency_management.iter())
+                })
+                .filter(|dependency| {
+                    dependency
+                        .version
+                        .as_deref()
+                        .is_some_and(|version| version.starts_with('[') || version.starts_with('('))
+                })
+                .map(|dependency| (dependency.group_id.clone(), dependency.artifact_id.clone()))
+                .collect()
+        };
+        for (group_id, artifact_id) in ranged {
+            // Failure is already reported by the fetch itself, and a version
+            // list jv cannot get is not a reason to fail the sync.
+            let _ = self.versions(&group_id, &artifact_id);
+        }
+    }
+
     /// Artifact-level metadata read during resolution, for `jv sync` to place.
     ///
     /// Returned as `(repository path, repository id, bytes)`, where the path
