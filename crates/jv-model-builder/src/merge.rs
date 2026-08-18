@@ -87,6 +87,14 @@ pub fn assemble_inheritance(child: &mut Model, parent: &Model, child_directory_n
         merge_build(child_build, parent_build, false);
     }
 
+    // Report plugins inherit on the same terms as build plugins, which is why
+    // they go through the same merge rather than a rule of their own.
+    merge_plugins(
+        &mut child.reporting_plugins,
+        &parent.reporting_plugins,
+        false,
+    );
+
     if let Some(parent_management) = &parent.distribution_management {
         let child_management = child
             .distribution_management
@@ -120,6 +128,12 @@ pub fn inject_profile(model: &mut Model, profile: &Profile) {
         let build = model.build.get_or_insert_with(Build::default);
         merge_build(build, profile_build, true);
     }
+
+    merge_plugins(
+        &mut model.reporting_plugins,
+        &profile.reporting_plugins,
+        true,
+    );
 
     if let Some(profile_management) = &profile.distribution_management {
         let management = model

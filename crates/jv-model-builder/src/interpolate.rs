@@ -409,6 +409,26 @@ pub fn interpolate_model(
         interpolate_dependency(dependency, &interpolator, problems);
     }
 
+    // Report plugins carry versions and configuration coordinates like any
+    // others, and a `${...}` left in one becomes a request for a path that
+    // cannot exist.
+    for plugin in &mut model.reporting_plugins {
+        for slot in [
+            &mut plugin.group_id,
+            &mut plugin.artifact_id,
+            &mut plugin.version,
+        ] {
+            interpolator.interpolate_in_place(slot, problems);
+        }
+        for dependency in plugin
+            .dependencies
+            .iter_mut()
+            .chain(&mut plugin.configuration_artifacts)
+        {
+            interpolate_dependency(dependency, &interpolator, problems);
+        }
+    }
+
     if let Some(build) = &mut model.build {
         for slot in [
             &mut build.source_directory,

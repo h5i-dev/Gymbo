@@ -59,8 +59,8 @@
 //! `<plugins>`, not in `<pluginManagement>`, not in any parent. It is the same
 //! shape as Surefire choosing a test provider, which is handled above, and it
 //! wants the same treatment: a small list of what the plugin picks for itself.
-//! jv also does not model `<reporting><plugins>` yet, which is where a project
-//! names the reports it actually wants.
+//! `<reporting><plugins>` is modelled, which is where a project names the
+//! reports it actually wants; those come first and count as declared.
 //!
 //! Verified rather than assumed: `mvn -o install` reaches BUILD SUCCESS on
 //! spring-petclinic and `mvn -o site` does not, failing on exactly that plugin.
@@ -1010,11 +1010,16 @@ fn project_plugins(project: &Project) -> Vec<(Plugin, PluginOrigin)> {
         }
     };
 
-    // Declared first, so a plugin that is both declared and managed is treated
+    // `<reporting>` first, matching `ResolverUtil.getProjectPlugins`, and
+    // counted as declared: `mvn site` runs these, so a repository without them
+    // and their closures cannot build a site offline. Fourteen of the
+    // twenty-six corpus projects declare some.
+    for plugin in &project.model.reporting_plugins {
+        push_unique(plugin, PluginOrigin::Declared);
+    }
+
+    // Then declared, so a plugin that is both declared and managed is treated
     // as declared.
-    //
-    // `<reporting>` is not modelled yet; when it is, its plugins come first and
-    // count as declared — `mvn site` runs them.
     if let Some(build) = &project.model.build {
         for plugin in &build.plugins {
             push_unique(plugin, PluginOrigin::Declared);
@@ -1663,6 +1668,36 @@ mod tests {
             closure_key(&artifact, &plain),
             closure_key(&artifact, &pinned)
         );
+    }
+
+    #[test]
+    fn reporting_plugins_come_first_and_count_as_declared() {
+        // `mvn site` runs these, so a repository without them and their
+        // closures cannot build a site offline.
+        let mut project = project_with(Build {
+            plugins: vec![plugin(None, "maven-compiler-plugin", Some("3.13.0"))],
+            ..Build::default()
+        });
+        project.model.reporting_plugins = vec![plugin(None, "maven-javadoc-plugin", Some("3.6.3"))];
+
+        let plugins = project_plugins(&project);
+        assert_eq!(
+            plugins[0].0.artifact_id.as_deref(),
+            Some("maven-javadoc-plugin")
+        );
+        assert_eq!(plugins[0].1, PluginOrigin::Declared);
+    }
+
+    #[test]
+    fn a_plugin_declared_for_both_build_and_reporting_is_listed_once() {
+        let mut project = project_with(Build {
+            plugins: vec![plugin(None, "maven-javadoc-plugin", Some("3.6.3"))],
+            ..Build::default()
+        });
+        project.model.reporting_plugins = vec![plugin(None, "maven-javadoc-plugin", Some("3.6.3"))];
+
+        let plugins = project_plugins(&project);
+        assert_eq!(plugins.len(), 1);
     }
 
     #[test]

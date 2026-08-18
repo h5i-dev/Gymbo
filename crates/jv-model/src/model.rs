@@ -2,9 +2,14 @@
 //!
 //! Mirrors Maven's `maven.mdo` schema, narrowed to what affects dependency
 //! resolution, effective-POM construction, and `dependency:tree` rendering.
-//! Reporting, site, licence and developer metadata are deliberately absent: they
-//! never change which artifacts get resolved. `<configuration>` is skipped for
-//! the same reason — jv reads POMs, it never writes them back.
+//! Site, licence and developer metadata are deliberately absent: they never
+//! change which artifacts get resolved.
+//!
+//! Two things that look like exceptions are not. `<reporting><plugins>` is kept
+//! because `mvn site` runs those plugins and a repository without them cannot
+//! run it offline. `<configuration>` is not kept, but it is scanned for
+//! coordinates on the way past, because plugins resolve artifacts named in
+//! there when they run.
 //!
 //! Almost every field is optional, because a raw POM is a *fragment*: values
 //! arrive later from the parent, from properties, or from a default. The
@@ -53,6 +58,15 @@ pub struct Model {
     /// `<modules>`, or Maven 4's `<subprojects>` spelling.
     pub modules: Vec<String>,
     pub build: Option<Build>,
+    /// `<reporting><plugins>`, which is where a project declares the reports
+    /// `mvn site` runs.
+    ///
+    /// Kept flat rather than behind a `Reporting` struct because only the
+    /// plugins matter here: jv resolves them, it does not run them, and
+    /// `<reportSets>` decide which goals execute rather than which artifacts
+    /// are needed. They inherit and merge exactly as `<build><plugins>` do,
+    /// which is why they are the same type.
+    pub reporting_plugins: Vec<Plugin>,
     pub profiles: Vec<Profile>,
     pub repositories: Vec<Repository>,
     pub plugin_repositories: Vec<Repository>,
@@ -256,6 +270,9 @@ pub struct Profile {
     pub dependency_management: Vec<Dependency>,
     pub modules: Vec<String>,
     pub build: Option<Build>,
+    /// A profile may declare reports too, and activating it must contribute
+    /// them exactly as it contributes build plugins.
+    pub reporting_plugins: Vec<Plugin>,
     pub repositories: Vec<Repository>,
     pub plugin_repositories: Vec<Repository>,
     pub distribution_management: Option<DistributionManagement>,

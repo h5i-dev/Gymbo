@@ -328,6 +328,25 @@ impl<'i> XmlParser<'i> {
                 model.build = Some(parser.parse_build("build")?);
                 Ok(true)
             }
+            // Only `<plugins>` is read. `<excludeDefaults>` and
+            // `<outputDirectory>` change what a site looks like, not which
+            // artifacts it needs.
+            b"reporting" => {
+                parser.children("reporting", |parser, name| match name {
+                    b"plugins" => {
+                        let parsed =
+                            parser.list("plugins", b"plugin", XmlParser::parse_plugin)?;
+                        parser.replace_repeated(
+                            "reporting plugins",
+                            &mut model.reporting_plugins,
+                            parsed,
+                        );
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                })?;
+                Ok(true)
+            }
             b"profiles" => {
                 let parsed = parser.list("profiles", b"profile", XmlParser::parse_profile)?;
                 parser.replace_repeated("profiles", &mut model.profiles, parsed);
@@ -697,6 +716,17 @@ impl<'i> XmlParser<'i> {
             }
             b"build" => {
                 profile.build = Some(parser.parse_build("build")?);
+                Ok(true)
+            }
+            b"reporting" => {
+                parser.children("reporting", |parser, name| match name {
+                    b"plugins" => {
+                        profile.reporting_plugins =
+                            parser.list("plugins", b"plugin", XmlParser::parse_plugin)?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                })?;
                 Ok(true)
             }
             b"repositories" => {
