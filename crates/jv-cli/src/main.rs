@@ -13,7 +13,14 @@ use jv_cli::{commands, exec, report_error};
 fn main() -> ExitCode {
     // The driver blocks on async work, so the session must not run on a tokio
     // worker thread. Keeping `main` synchronous is what guarantees that.
-    let cli = Cli::parse();
+    // `.mvn/maven.config` is spliced in before the real arguments, so a flag
+    // given on the command line is parsed later and wins — Maven's precedence.
+    // Without this a project that sets `-D` there resolves differently under jv
+    // than under `mvn`, and nothing in either output says why.
+    let argv = std::env::current_dir()
+        .map(|directory| jv_driver::mvn_config::apply_to_command_line(std::env::args(), &directory))
+        .unwrap_or_else(|_| std::env::args().collect());
+    let cli = Cli::parse_from(argv);
     let result = match &cli.command {
         Command::Tree(args) => commands::tree(args).map(|()| ExitCode::SUCCESS),
         Command::Resolve(args) => commands::resolve(args).map(|()| ExitCode::SUCCESS),

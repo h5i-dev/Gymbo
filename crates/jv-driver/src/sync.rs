@@ -139,6 +139,38 @@ pub fn sync(
     // Whether any plugin in the build resolves a test provider at run time.
     let mut selects_providers = false;
 
+    // Core extensions from `.mvn/extensions.xml`. jv cannot run one — that
+    // needs Maven's own container — but `mvn -o` refuses to start at all when
+    // an extension is missing from the local repository, and that failure
+    // arrives before anything a dependency graph could explain. Their own
+    // transitive dependencies come along, because the container resolves those
+    // too.
+    for project in projects {
+        let Some(directory) = crate::mvn_config::project_directory(&project.path) else {
+            continue;
+        };
+        for extension in crate::mvn_config::extensions(&directory) {
+            let artifact = Artifact::new(
+                &extension.group_id,
+                &extension.artifact_id,
+                &extension.version,
+            );
+            wanted.push(&reactor, artifact.clone());
+            match plugin_dependencies(session, &artifact, &Plugin::default()) {
+                Ok(dependencies) => {
+                    for dependency in dependencies {
+                        wanted.push(&reactor, dependency);
+                    }
+                }
+                Err(error) => report.warnings.push(format!(
+                    "core extension {}: its dependencies could not be resolved ({error}); \
+                     `mvn -o` may fail to start",
+                    extension.coordinates()
+                )),
+            }
+        }
+    }
+
     for project in projects {
         // Test scope, because a build runs tests: it is the widest composition
         // and anything narrower leaves `mvn -o test` unable to start.
