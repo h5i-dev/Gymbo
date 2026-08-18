@@ -32,8 +32,35 @@ not a download race.
 | `jvx` / `jv x` | Run any JVM tool from Maven coordinates without installing it (uvx analogue; the agent-hot-path feature). |
 | `jv resolve` | Print a resolved classpath (script/agent building block, powers `jvx`). |
 
+**Every v0.1 command is read-only.** `tree`, `resolve` and `sync` inspect the
+POM or populate a cache; not one of them edits it. That is the line between an
+*inspector* and a *package manager*, and it is why v0.2 leads with `jv add`
+(§3.11) rather than with more parity work. `uv add`, `cargo add` and
+`npm install <pkg>` are their ecosystems' daily drivers; jv has no equivalent.
+
+**Prioritisation rule: speed only pays on operations users repeat.** Ranked by
+how often a JVM developer actually performs them:
+
+| Operation | Frequency | jv |
+|---|---|---|
+| Build / test | many times a day | untouched, by design — build-tool territory |
+| Add or change a dependency | several times a week | **nothing → v0.2 `jv add`** |
+| Install or switch a JDK | weekly | **nothing → v0.2 `jv jdk`** |
+| Run a one-off tool | weekly | `jvx` ✅ |
+| CI dependency fetch | every push | `jv sync` ✅ |
+| Inspect the dependency tree | rarely | `jv tree` ✅ |
+
+v0.1 covers the two least frequent rows well and the two most frequent not at
+all. `jv tree`'s 69× is the demo, not the product: nobody runs
+`dependency:tree` in a loop, so saving 1.7 s a handful of times a week persuades
+nobody on its own. Closing the top two rows is what v0.2 is for.
+
 **Deliberate non-goals for v0.1** (each is a focus hazard):
-- JDK management (mise/sdkman territory, weak differentiation) → v0.3.
+- JDK management (mise/sdkman territory) → **v0.2**. Deferred out of v0.1 for
+  focus, not for weak differentiation — that call was wrong. It is the second
+  most frequent operation in the table above, it touches none of the resolver,
+  and `uv python install` showed toolchain management is what gets a binary
+  installed in the first place.
 - Gradle projects / Gradle Module Metadata → v0.3+. Initial target is Maven
   users: Spring / enterprise Java. Demo repos must be Maven-built
   (spring-petclinic, netty, dropwizard, camel — **not** Spring Boot itself,
@@ -53,6 +80,14 @@ not a download race.
 Rust". Coursier appears only in the benchmark table and as a test oracle. FAQ
 preempts the inevitable HN comment: "cs is excellent but carries JVM startup;
 jv is a single binary built for Java developers."
+
+**What jv claims to be**, which is narrower than "package manager for the JVM"
+and truer for it: **the dependency and toolchain layer, without the JVM.**
+Maven-the-build-tool owns the inner loop and jv has deliberately declined to
+fight it. Framed that way, not compiling anything reads as a decision rather
+than a gap, and `add` / `lock` / `jdk` become the obvious core rather than scope
+creep. jv also stays POM-native permanently: `pom.xml` and `~/.m2` interop *are*
+the moat, and a jv-specific manifest would trade it away for nothing.
 
 ---
 
@@ -287,7 +322,8 @@ jvx g:a:1.2.3@com.example.Main -- args...
 - v0.1 launches with `-cp` only. JPMS module-path splitting (jgo's
   `exec/_runner.py` auto/classpath/module-path modes) → v0.3.
 - If no JDK is found on PATH/JAVA_HOME: clear error in v0.1; auto-provisioning
-  via foojay Disco API (wukong `src/foojay.rs` is a working Rust client) → v0.3.
+  via foojay Disco API (wukong `src/foojay.rs` is a working Rust client) → v0.2,
+  alongside `jv jdk`.
 
 ### 3.8 `jv sync` semantics
 
@@ -319,7 +355,7 @@ Non-text formats (`json`, `dot`, `tgf`, `graphml`) are local to the plugin clone
 `DependencyGraphDumper.java` format is *not* the same and must not be shipped as
 the default.
 
-### 3.10 Lockfile (`jv-lock`, v0.2 flagship)
+### 3.10 Lockfile (`jv-lock`, v0.2)
 
 Maven has no native lockfile — this is the durable differentiator and the
 supply-chain-security story (its own blog post). Design:
@@ -334,6 +370,44 @@ supply-chain-security story (its own blog post). Design:
   (os/jdk properties) so CI and laptop agree or fail loudly.
 - Prior art to read: yummy `ym-lock.json` + `src/workspace/lockfile_diff.rs`;
   coursier `ArtifactsLock.scala`; uv's lockfile docs for UX conventions.
+
+### 3.11 POM mutation (`jv-edit`, v0.2)
+
+`jv add`, `jv remove`, `jv upgrade` — the commands that make jv a package
+manager rather than a fast inspector, and the highest-frequency operation jv can
+own. `jv add com.google.guava:guava` resolves the latest release, pins it,
+writes the POM and syncs in well under a second, against a workflow that is
+currently "open the file, type XML, guess the version, run `mvn`, wait".
+
+- **Format-preserving, not re-serialising.** The POM is edited as *text*,
+  through byte spans the parser records, never by writing a `Model` back out.
+  A round-trip that reorders elements, drops comments or re-indents is unusable
+  in any project with code review, which is all of them. This is a requirement
+  on `jv-model`'s parser: it must retain source positions, which it does not
+  today.
+- Insert into `<dependencies>` using the indentation of the surrounding
+  entries; create the element when absent, positioned where the super POM's
+  schema order puts it.
+- **Version selection:** `jv add g:a` takes the latest release — never a
+  snapshot, never something a range excludes — and pins it literally.
+  `jv add g:a:v` takes the version as given.
+- **`<dependencyManagement>`-aware.** If the coordinates are already managed by
+  a parent or an imported BOM, the inserted dependency omits `<version>` and
+  says why. That is what a Maven user would have written by hand, and writing a
+  redundant version is a defect a reviewer will bounce.
+- **Property indirection:** when neighbouring entries use `${foo.version}`,
+  follow the convention rather than hard-coding a literal beside them.
+- Multi-module: `-f` / `--recursive` select the module; adding to an aggregator
+  root is refused with a message naming the modules it could have meant.
+- `jv upgrade` rewrites versions in place and re-locks. `jv outdated` reports
+  the same analysis without writing.
+- The write is atomic and the pre-image is held until resolution succeeds, so a
+  dependency that does not resolve never leaves a half-edited POM behind.
+
+Prior art: `cargo add`, whose span-preserving `toml_edit` approach is the model
+to copy, and `uv add` for UX. Maven's own `versions-maven-plugin` is the
+**anti-**model — it re-serialises and mangles formatting, which is exactly why
+people edit POMs by hand instead.
 
 ---
 
@@ -690,18 +764,45 @@ constants).
 **Gate:** a stranger on a clean machine goes install → `jv tree` wow-moment in
 under 60 seconds.
 
-### v0.2 — Trust & depth
-`jv lock` / `sync --frozen` / `sync --check` (§3.10) + supply-chain blog post;
-`jv tree --verbose` (conflict/premanaged annotations); `jv why <ga>`
-(path-recording visitor); proxies + `settings-security.xml`; sha256 enforcement
-mode; `jv purge`/cache GC.
+### v0.2 — From inspector to package manager
+The theme: jv starts *changing* your project, and what it resolves becomes
+reproducible. Ordered by expected adoption impact, not by difficulty.
+
+1. **`jv add` / `jv remove` / `jv upgrade`** (§3.11). The one command class a
+   package manager cannot lack, and the highest-frequency row in §1's table.
+   Its cost is mostly in span-preserving XML editing, not in anything
+   conceptually hard — the resolver it needs already exists and is verified.
+2. **`jv lock` / `sync --frozen` / `sync --check`** (§3.10) + the supply-chain
+   blog post. Maven has no lockfile: the only place jv is the *only* option
+   rather than a faster one, and what the corpus-verified resolver is
+   ultimately for — a lockfile is trustworthy exactly to the degree that
+   resolution is provably Maven's.
+3. **`jv jdk`** — foojay Disco provisioning (wukong `src/foojay.rs` as
+   reference), **pulled forward from v0.3**. It touches none of the resolver, so
+   it ships on its own schedule, and `uv python install` demonstrated that
+   toolchain management is what gets a binary onto machines in the first place.
+   Leaving it in v0.3 forfeits that.
+4. **`jv why <ga>`** (path-recording visitor) — cheap, and the second question
+   anyone asks after "what does the tree look like".
+5. Carried over from the old v0.2: proxies + `settings-security.xml`
+   (`<proxies>` is parsed but not applied today, and the README says so); sha256
+   enforcement mode; `jv purge` / cache GC.
+
+`jv tree --verbose` moves here as a **correctness** item rather than a feature.
+The oracle harness now compares `-Dverbose` against real Maven, which
+immediately found two divergences: a `scope updated from` annotation jv emitted
+on every node and Maven emits never (fixed — see §3.9 and
+`docs/spec/conflict-resolution.md`), and premanaged-version annotations Maven
+emits and jv does not (open). Few users pass `-Dverbose`, so this is not worth
+feature time — but a parity claim that is wrong is worse than a missing one.
 
 ### v0.3 — Breadth
-JDK provisioning (foojay Disco; wukong `src/foojay.rs` as reference) +
-`jv jdk` subcommands; JPMS module-path launching for `jvx`; Gradle Module
-Metadata + variant selection (coursier `GradleModule.scala`/`VariantSelector.scala`
-as reference) — the gateway to Kotlin/Android users; `jv install` (persistent
-tool installs à la `uv tool install` / coursier `InstallDir`).
+`jv audit` against OSV — only meaningful once the lockfile exists, and the
+natural second half of the supply-chain story; `jv install` (persistent tool
+installs à la `uv tool install` / coursier `InstallDir`); JPMS module-path
+launching for `jvx`; Gradle Module Metadata + variant selection (coursier
+`GradleModule.scala` / `VariantSelector.scala` as reference) — the gateway to
+Kotlin/Android users.
 
 ---
 
