@@ -3,9 +3,8 @@
 //! Byte-for-byte parity with Maven is a launch requirement, so this is a port
 //! rather than an approximation. The indent art comes from
 //! `SerializingDependencyNodeVisitor` and its `GraphTokens`
-//! (`maven-dependency-tree`); the node text itself lives in
-//! [`crate::coordinates`], because every other output type embeds the same
-//! string.
+//! (`maven-dependency-tree`); the node text itself lives in the crate's private
+//! `coordinates` module, because every other output type embeds the same string.
 
 use std::fmt::Write as _;
 

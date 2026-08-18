@@ -10,8 +10,8 @@
 //! - [`tgf`] — `TGFDependencyNodeVisitor`;
 //! - [`json`] — `JsonDependencyNodeVisitor`.
 //!
-//! All but json label their nodes with the same string, which [`coordinates`]
-//! owns.
+//! All but json label their nodes with the same string, which the private
+//! `coordinates` module owns.
 
 mod coordinates;
 pub mod dot;
