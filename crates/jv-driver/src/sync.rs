@@ -135,6 +135,21 @@ pub struct SyncRequest {
     /// success and leaves a project `mvn -o verify` cannot build is a false
     /// success, and jv is holding the POM at the moment it could say so.
     pub toolchains: Toolchains,
+
+    /// Extra artifacts to sync, beyond anything a POM declares.
+    ///
+    /// The escape hatch for what cannot be read. A plugin may resolve a default
+    /// of its own when it runs, from a version compiled into the plugin rather
+    /// than written down: `spotless` picks its formatter that way, and which
+    /// version depends on the spotless release. jv reads coordinates out of
+    /// plugin `<configuration>`, but a constant inside a jar is not in the
+    /// project to be read.
+    ///
+    /// Carrying a table of every plugin's defaults would mean carrying
+    /// something wrong the next time any of them ships a release. This is the
+    /// alternative: name them, and they are fetched with their closures like
+    /// anything else.
+    pub also: Vec<Artifact>,
 }
 
 impl Default for SyncRequest {
@@ -146,6 +161,7 @@ impl Default for SyncRequest {
             exclude_reactor: true,
             managed_plugin_dependencies: false,
             toolchains: Toolchains::default(),
+            also: Vec::new(),
         }
     }
 }
@@ -426,6 +442,23 @@ pub fn sync(
         }
         resolutions
     };
+
+    // Named on the command line rather than found in a POM. Pushed before the
+    // projects so that a build which needs one has it regardless of which module
+    // turns out to want it.
+    for artifact in &request.also {
+        wanted.push(&reactor, artifact.clone());
+        let mut clean = true;
+        for dependency in plugin_dependencies(
+            session,
+            artifact,
+            &Plugin::default(),
+            &mut report.warnings,
+            &mut clean,
+        )? {
+            wanted.push(&reactor, dependency);
+        }
+    }
 
     for (project, resolution) in projects.iter().zip(&resolutions) {
         // Test scope, because a build runs tests: it is the widest composition

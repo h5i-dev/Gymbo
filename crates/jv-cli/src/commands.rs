@@ -218,6 +218,7 @@ pub fn sync(args: &SyncArgs) -> Result<()> {
             local_repository: local_repository.clone(),
             managed_plugin_dependencies: args.all_plugins,
             toolchains: config.load_toolchains(),
+            also: also(&args.also)?,
             ..SyncRequest::default()
         },
     )?;
@@ -354,6 +355,45 @@ pub(crate) fn report(warnings: &[String]) {
     for warning in warnings {
         eprintln!("{} {warning}", "warning:".yellow().bold());
     }
+}
+
+/// Parses `--also` coordinates.
+///
+/// `group:artifact:version`, optionally `group:artifact:extension:version` or
+/// `group:artifact:extension:classifier:version`, which is Maven's own spelling
+/// for the same thing on a command line.
+fn also(arguments: &[String]) -> anyhow::Result<Vec<Artifact>> {
+    let mut found = Vec::new();
+    for argument in arguments {
+        let parts: Vec<&str> = argument.split(':').collect();
+        let artifact = match parts.as_slice() {
+            [group, artifact, version] => Artifact::new(*group, *artifact, *version),
+            [group, artifact, extension, version] => Artifact {
+                extension: (*extension).to_owned(),
+                ..Artifact::new(*group, *artifact, *version)
+            },
+            [group, artifact, extension, classifier, version] => Artifact {
+                extension: (*extension).to_owned(),
+                classifier: (*classifier).to_owned(),
+                ..Artifact::new(*group, *artifact, *version)
+            },
+            _ => {
+                anyhow::bail!(
+                    "--also {argument}: expected group:artifact:version, \
+                     group:artifact:extension:version or \
+                     group:artifact:extension:classifier:version"
+                )
+            }
+        };
+        if artifact.group_id.is_empty()
+            || artifact.artifact_id.is_empty()
+            || artifact.version.is_empty()
+        {
+            anyhow::bail!("--also {argument}: no part may be empty");
+        }
+        found.push(artifact);
+    }
+    Ok(found)
 }
 
 #[cfg(test)]

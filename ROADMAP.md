@@ -416,6 +416,49 @@ future direction rather than scheduled, on the judgement that near-term effort
 belongs in real-project compatibility and the package-manager surface. Revisit
 when h5i's Java workload makes the copy cost measurable.
 
+### 3.8.1 How complete `jv sync` actually is
+
+Measured, not asserted. The last full corpus run was **10 BUILD SUCCESS and 16
+BUILD FAILURE** — the "0 failures attributable to jv" that circulated for a
+while was wrong, and came from reading a summary instead of the logs. The
+failures fall into three classes, and only the third is open.
+
+**Coordinates inside plugin `<configuration>` — 10 projects. Fixed.** Plugins
+resolve artifacts named in their own configuration when they run, and those
+appear in no `<dependencies>` block: `maven-compiler-plugin`'s
+`<annotationProcessorPaths>`, `animal-sniffer`'s `<signature>`,
+`maven-remote-resources`' `<resourceBundles>`, japicmp's previous release. The
+parser now scans configuration for coordinates rather than discarding it.
+
+Checked against the 11,778 POMs in the corpus cache rather than fixtures, which
+is what caught the first attempt inventing artifacts out of OSGi bundle
+instructions and `maven-enforcer-plugin` ban patterns — both deliberately
+coordinate-shaped, neither naming anything to download.
+
+**A `<plugin>` with no `<version>` — 3 projects. Fixed.** Maven resolves one from
+`maven-metadata.xml` at build time: `<release>`, then `<latest>`, then greatest.
+jv now does the same, and records the file so Maven reaches its own answer
+offline instead of trusting jv's.
+
+**A default compiled into the plugin — 5 projects. Open, and not fixable by
+reading.** `spotless` picks a formatter whose version is a constant inside the
+spotless jar:
+
+    spotless 2.40.0  ->  palantir-java-format 2.38.0
+    spotless 2.43.0  ->  palantir-java-format 2.39.0
+    jetty            ->  sortpom-sorter 3.2.1  (a different step entirely)
+
+No amount of reading a project finds a version that exists only inside a jar,
+and a table of every plugin's defaults would be wrong the next time any of them
+ships a release. `mvn dependency:go-offline` fails on exactly this too — it is
+why go-offline is documented as incomplete.
+
+So `jv sync --also group:artifact:version` is the escape hatch: name what the
+build turns out to need, and it is fetched with its closure like anything else.
+The general fix, when there is one, is to learn the set from a build that
+succeeded rather than to predict it — which is another argument for §3.10's
+lockfile.
+
 ### 3.9 `jv tree` output parity
 
 `TreeMojo.java` dispatches text rendering to the **external**

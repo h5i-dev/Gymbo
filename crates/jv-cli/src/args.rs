@@ -54,6 +54,22 @@ pub struct SyncArgs {
     #[arg(long, value_name = "DIR")]
     pub local_repository: Option<PathBuf>,
 
+    /// Also sync these artifacts, as `group:artifact:version`.
+    ///
+    /// For what no POM reveals. Some plugins resolve a default of their own at
+    /// execution time, from a version compiled into the plugin rather than
+    /// written down anywhere: `spotless` picks a formatter that way, and which
+    /// one depends on the spotless release — 2.40.0 wants
+    /// palantir-java-format 2.38.0, 2.43.0 wants 2.39.0. jv reads what a POM
+    /// declares, including the coordinates inside plugin `<configuration>`, but
+    /// a version that exists only inside a jar cannot be read out of a project.
+    ///
+    /// So this is the escape hatch, rather than jv carrying a table of every
+    /// plugin's defaults that would be wrong the next time one of them is
+    /// released. Take the coordinates from what `mvn` says is missing.
+    #[arg(long = "also", value_name = "COORDINATES")]
+    pub also: Vec<String>,
+
     /// Fill jv's own cache but do not touch Maven's local repository.
     #[arg(long, conflicts_with = "local_repository")]
     pub cache_only: bool,
