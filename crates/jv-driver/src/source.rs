@@ -306,6 +306,20 @@ impl RepositorySource {
     fn add_with_trust(&self, declared: &[Repository], trust: Trust) {
         let mut resolved = Vec::new();
         for repository in resolve_with_trust(declared, &self.settings, trust) {
+            // A scheme jv has no client for. Maven reaches these through wagons
+            // supplied by build extensions, which jv does not load — jetty's
+            // parent declares `mavengem:https://rubygems.org`. Skipped with a
+            // warning rather than attempted: attempting it failed the whole
+            // sync, so a repository jv merely cannot use took down artifacts
+            // every other repository could serve.
+            if !repository.is_supported() {
+                self.warn(format!(
+                    "{} ({}) uses a scheme jv has no client for and was skipped; \
+                     Maven reaches it through a build extension, which jv does not load",
+                    repository.id, repository.url
+                ));
+                continue;
+            }
             if repository.is_insecure() && !self.allow_insecure_http {
                 // Blocked rather than dropped, so the repository still appears in
                 // `jv tree`'s reasoning and the message says what to do.

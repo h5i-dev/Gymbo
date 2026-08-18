@@ -270,9 +270,17 @@ impl Fetcher {
 
         // 3. Ask each repository, in order.
         let mut transport_error = None;
+        // Whether any repository gave a definitive answer, 404 included.
+        let mut answered = false;
         for repository in repositories {
             let url = join_url(&repository.url, path);
             if self.recently_missing(&url, repository.policy_for(version))? {
+                // A recorded 404 is still that repository's answer. Not
+                // counting it meant a warm cache turned a definitive "absent"
+                // into whatever the *next* repository said — and when the next
+                // one was unreachable, an artifact nobody has became a hard
+                // failure that stopped the whole sync.
+                answered = true;
                 continue;
             }
 
@@ -339,6 +347,7 @@ impl Fetcher {
                     });
                 }
                 Ok(None) => {
+                    answered = true;
                     self.store.record_missing(&url)?;
                 }
                 // One broken repository must not hide an artifact another one
@@ -349,8 +358,18 @@ impl Fetcher {
         }
 
         match transport_error {
-            Some(error) => Err(FetchError::Transport(error)),
-            None => Err(FetchError::NotFound {
+            // A repository that answered "no" is an answer. Reporting the
+            // unreachable one instead turns an artifact that is genuinely
+            // absent everywhere into a hard failure, and takes the whole sync
+            // with it: flyway names a driver that is not on Central and also
+            // lists `maven.java.net`, dead for years, so Central's 404 was
+            // overridden by a connection error and `jv sync` stopped.
+            //
+            // The transport error still surfaces — the repository is recorded
+            // as unreachable and warned about once — but it no longer decides
+            // the outcome for an artifact somebody else already ruled on.
+            Some(error) if !answered => Err(FetchError::Transport(error)),
+            _ => Err(FetchError::NotFound {
                 path: path.to_owned(),
             }),
         }
