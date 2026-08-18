@@ -55,7 +55,26 @@ project_directory="$(cd "$project_directory" && pwd)"
 workspace="$(mktemp -d)"
 trap 'rm -rf "$workspace"' EXIT
 settings="$workspace/settings.xml"
-echo '<settings/>' > "$settings"
+# $JV_MIRROR points both arms at a mirror of Central, through settings.xml, so
+# Maven and jv both honour it and both talk to the same host. Central rate
+# limits, and a cold benchmark downloads a project's whole dependency set twice
+# per round — which is how this machine got throttled for most of a day.
+if [[ -n "${JV_MIRROR:-}" ]]; then
+    cat > "$settings" <<XML
+<settings>
+  <mirrors>
+    <mirror>
+      <id>benchmark-mirror</id>
+      <mirrorOf>central</mirrorOf>
+      <url>${JV_MIRROR}</url>
+    </mirror>
+  </mirrors>
+</settings>
+XML
+    echo "mirror:  ${JV_MIRROR}"
+else
+    echo '<settings/>' > "$settings"
+fi
 
 elapsed() {
     python3 - "$@" <<'PY'
@@ -76,6 +95,7 @@ echo "goal:    $goal (tests skipped)"
 echo "jv:      $("$jv" --version)"
 echo "mvn:     $("$mvn" -v 2>/dev/null | head -1)"
 echo "rounds:  $rounds, arms alternated"
+echo "in flight: ${JV_IN_FLIGHT:-default (32)}"
 echo
 
 maven_cold=(); jv_cold=(); maven_warm=(); jv_warm=()
