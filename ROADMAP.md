@@ -629,7 +629,10 @@ artifacts came back "not in any configured repository" with no hint why.
 **Ring 3** is `scripts/ring3.sh`: real projects at pinned commits, every module,
 `jv tree` diffed against `mvn dependency:tree`. Not a `cargo test` — it clones
 gigabytes — so it runs before a release or nightly. Eight projects are pinned,
-five of them in the default set.
+five of them in the default set, and that set currently reports **46 modules
+compared, 0 differing** (spring-petclinic, dropwizard's 42-module reactor,
+jackson-databind, commons-lang, maven-dependency-plugin). camel, quarkus and
+netty are behind `-a` and have not been run.
 
 **Open:** the `setup-jv` CI-minutes number, which needs a published release and
 a real CI run on a public repository.

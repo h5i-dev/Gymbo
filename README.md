@@ -17,8 +17,8 @@ com.example:demo:jar:1.0
 ```
 
 > **Status: early development.** `jv tree`, `jv resolve`, `jv sync` and `jvx`
-> work. There are no prebuilt binaries yet; build with `cargo build --release`
-> and the binaries land in `target/release/`.
+> all work and are verified against real Maven. There are no prebuilt binaries
+> yet; build with `cargo build --release` and they land in `target/release/`.
 
 ## Speed
 
@@ -80,7 +80,14 @@ against its own expectations:
 - `jv tree` matches `mvn dependency:tree` byte for byte on every fixture in the
   differential harness, each chosen for a resolution behaviour — nearest-wins,
   managed transitives, BOM imports, exclusions, the scope matrix, optional
-  dependencies, conflict ordering.
+  dependencies, conflict ordering — in all five output formats.
+- And on real projects nobody wrote for jv's benefit: `scripts/ring3.sh` diffs
+  every module of spring-petclinic, dropwizard, jackson-databind, commons-lang
+  and maven-dependency-plugin at pinned commits. 46 modules, 0 differing.
+- `jv sync && mvn -o verify` builds offline, tests and all, against a repository
+  jv populated and nothing else.
+- `jvx` launches twenty real published tools, and refuses the libraries among
+  them with a message naming why.
 - Version ordering agrees with maven-resolver's own `GenericVersion` — compiled
   from source and driven as an oracle — across 50,862 generated inputs.
 - Effective POMs match `mvn help:effective-pom` from Maven 3.9.9 exactly.
