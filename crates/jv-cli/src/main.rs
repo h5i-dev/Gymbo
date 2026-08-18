@@ -31,6 +31,7 @@ fn main() -> ExitCode {
         Command::Profile(args) => commands::profile(args),
         Command::Add(args) => commands::add(args).map(|()| ExitCode::SUCCESS),
         Command::Remove(args) => commands::remove(args).map(|()| ExitCode::SUCCESS),
+        Command::Outdated(args) => commands::outdated(args),
     };
 
     match result {

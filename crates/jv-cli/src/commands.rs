@@ -9,10 +9,11 @@ use jv_driver::{Config, Project, Session, SyncRequest};
 use jv_model::{Artifact, Scope};
 use jv_resolver::{Graph, Verbosity};
 use jv_tree::{Format, Options, render};
+use jv_version::Version;
 use owo_colors::OwoColorize;
 
 use crate::args::{
-    AddArgs, CommonArgs, ProfileArgs, RemoveArgs, ResolveArgs, SyncArgs, TreeArgs,
+    AddArgs, CommonArgs, OutdatedArgs, ProfileArgs, RemoveArgs, ResolveArgs, SyncArgs, TreeArgs,
 };
 
 /// Builds the driver config the flags describe.
@@ -645,8 +646,311 @@ fn pick_module<'a>(root: &'a Project, module: Option<&str>) -> Result<&'a Projec
         })
 }
 
+
+
+/// Something declared that could have a newer version.
+#[derive(Clone)]
+struct Candidate {
+    group_id: String,
+    artifact_id: String,
+    version: String,
+    is_plugin: bool,
+}
+
+/// What asking about one candidate produced.
+enum Check {
+    Outdated {
+        candidate: Candidate,
+        newest: String,
+        bump: Bump,
+    },
+    Current,
+    /// The question could not be answered — offline with nothing cached, a
+    /// repository that would not serve it, an artifact with no metadata. Kept
+    /// distinct from `Current` because the two are indistinguishable to a
+    /// reader and only one of them means what it says.
+    Unknown(Candidate, String),
+}
+
+/// How far apart two versions are, which is what decides whether an upgrade is
+/// a five-minute job or a project.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bump {
+    Major,
+    Minor,
+    Patch,
+}
+
+impl Bump {
+    fn label(self) -> &'static str {
+        match self {
+            Bump::Major => "major",
+            Bump::Minor => "minor",
+            Bump::Patch => "patch",
+        }
+    }
+}
+
+/// Reports dependencies with newer versions available.
+///
+/// The equivalent is `versions:display-dependency-updates`, which takes tens of
+/// seconds on a real project because every lookup is serial inside a Maven that
+/// costs a second to start. Nothing here is cleverer than that plugin — the
+/// lookups just run in parallel, in a process that starts in milliseconds.
+pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
+    use rayon::prelude::*;
+
+    let config = config(&args.common);
+    let session = Session::new(&config)?;
+    let root = project(&session, args.file.as_deref())?;
+    let targets: Vec<&Project> = if args.no_recursive {
+        vec![&root]
+    } else {
+        root.reactor()
+    };
+
+    // Declared dependencies only, deduplicated across modules. A transitive
+    // dependency's version is not something this POM can change, so listing it
+    // would be noise nobody can act on.
+    let mut wanted: Vec<Candidate> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for target in &targets {
+        for dependency in &target.model.dependencies {
+            let Some(version) = dependency.version.as_deref().filter(|v| !v.is_empty()) else {
+                continue;
+            };
+            let key = (dependency.group_id.clone(), dependency.artifact_id.clone());
+            if seen.insert(key) {
+                wanted.push(Candidate {
+                    group_id: dependency.group_id.clone(),
+                    artifact_id: dependency.artifact_id.clone(),
+                    version: version.to_owned(),
+                    is_plugin: false,
+                });
+            }
+        }
+        if args.plugins
+            && let Some(build) = &target.model.build
+        {
+            for plugin in build.plugins.iter().chain(&build.plugin_management) {
+                let (Some(artifact_id), Some(version)) = (
+                    plugin.artifact_id.as_deref(),
+                    plugin.version.as_deref().filter(|v| !v.is_empty()),
+                ) else {
+                    continue;
+                };
+                let group_id = plugin.group_id_or_default().to_owned();
+                let key = (group_id.clone(), artifact_id.to_owned());
+                if seen.insert(key) {
+                    wanted.push(Candidate {
+                        group_id,
+                        artifact_id: artifact_id.to_owned(),
+                        version: version.to_owned(),
+                        is_plugin: true,
+                    });
+                }
+            }
+        }
+    }
+
+    let source = session.source();
+    let checked: Vec<Check> = wanted
+        .par_iter()
+        .map(|candidate| {
+            // A lookup that failed is *not* "up to date". Reporting it as such
+            // is the failure mode this command has to avoid above all others:
+            // an answer nobody can distinguish from a real all-clear, on the
+            // one question people run it to be sure about.
+            let published = match source.published_versions(&candidate.group_id, &candidate.artifact_id) {
+                Ok(published) => published,
+                Err(error) => return Check::Unknown(candidate.clone(), error),
+            };
+            let newest = published
+                .iter()
+                .filter(|version| args.pre_release || !is_pre_release(version))
+                .max_by(|left, right| Version::parse(left).cmp(&Version::parse(right)));
+            match newest {
+                // Two different situations, and telling them apart is what
+                // makes the line worth printing. An empty list means no
+                // repository jv could consult knows the artifact — which
+                // offline includes "not cached", not just "not published". A
+                // list that emptied under the filter means the only versions
+                // out there are previews, and `--pre-release` will show them.
+                None if published.is_empty() => Check::Unknown(
+                    candidate.clone(),
+                    "no versions are listed for it in the repositories jv could consult"
+                        .to_owned(),
+                ),
+                None => Check::Unknown(
+                    candidate.clone(),
+                    format!(
+                        "only pre-release versions exist ({}); pass --pre-release to see them",
+                        published.last().map_or("", String::as_str)
+                    ),
+                ),
+                Some(newest) if Version::parse(newest) > Version::parse(&candidate.version) => {
+                    Check::Outdated {
+                        candidate: candidate.clone(),
+                        newest: newest.clone(),
+                        bump: bump(&candidate.version, newest),
+                    }
+                }
+                Some(_) => Check::Current,
+            }
+        })
+        .collect();
+
+    let mut outdated: Vec<_> = checked
+        .iter()
+        .filter_map(|check| match check {
+            Check::Outdated {
+                candidate,
+                newest,
+                bump,
+            } => Some((candidate, newest, *bump)),
+            _ => None,
+        })
+        .collect();
+    outdated.sort_by_key(|(candidate, _, _)| {
+        (candidate.group_id.clone(), candidate.artifact_id.clone())
+    });
+
+    let unknown: Vec<_> = checked
+        .iter()
+        .filter_map(|check| match check {
+            Check::Unknown(candidate, why) => Some((candidate, why)),
+            _ => None,
+        })
+        .collect();
+
+    let answered = wanted.len() - unknown.len();
+    if outdated.is_empty() {
+        // "Up to date" is a claim about checks that happened. With none, the
+        // only honest thing to say is that nothing was established — the
+        // warning below then says why.
+        if answered == 0 && !wanted.is_empty() {
+            println!("nothing could be checked, so nothing is known about {} declared", wanted.len());
+        } else {
+            println!("everything is up to date ({answered} of {} checked)", wanted.len());
+        }
+    } else {
+        let width = outdated
+            .iter()
+            .map(|(candidate, _, _)| candidate.group_id.len() + candidate.artifact_id.len() + 1)
+            .max()
+            .unwrap_or(40);
+        for (candidate, newest, bump) in &outdated {
+            let coordinates = format!("{}:{}", candidate.group_id, candidate.artifact_id);
+            let how = match bump {
+                Bump::Major => bump.label().red().to_string(),
+                Bump::Minor => bump.label().yellow().to_string(),
+                Bump::Patch => bump.label().green().to_string(),
+            };
+            let marker = if candidate.is_plugin { " (plugin)" } else { "" };
+            println!(
+                "{coordinates:width$}  {:>14} -> {newest:<14} {how}{marker}",
+                candidate.version
+            );
+        }
+        println!();
+        println!("{} of {answered} outdated", outdated.len());
+    }
+
+    if !unknown.is_empty() {
+        eprintln!();
+        eprintln!(
+            "{} {} could not be checked:",
+            "warning:".yellow(),
+            unknown.len()
+        );
+        for (candidate, why) in unknown.iter().take(5) {
+            eprintln!(
+                "  {}:{}: {why}",
+                candidate.group_id, candidate.artifact_id
+            );
+        }
+        if unknown.len() > 5 {
+            eprintln!("  ... and {} more", unknown.len() - 5);
+        }
+    }
+
+    Ok(if args.exit_code && !outdated.is_empty() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// Whether a version looks like a preview rather than a release.
+///
+/// A heuristic on the string, not a judgement `jv-version` makes: Maven's
+/// ordering already ranks `1.0-alpha` below `1.0`, but it has no notion of
+/// "this is not something to recommend". Publishers are inconsistent enough
+/// that anything more clever than a label match would be wrong more often.
+fn is_pre_release(version: &str) -> bool {
+    let lowered = version.to_ascii_lowercase();
+    [
+        "alpha", "beta", "milestone", "-rc", ".rc", "-cr", ".cr", "snapshot", "-m1", "-m2", "-m3",
+        "-preview", "-dev", "-incubating",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
+/// Which component moved, comparing leading numeric parts.
+fn bump(current: &str, newest: &str) -> Bump {
+    let parts = |version: &str| -> Vec<u64> {
+        version
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|piece| !piece.is_empty())
+            .filter_map(|piece| piece.parse().ok())
+            .collect()
+    };
+    let (left, right) = (parts(current), parts(newest));
+    for index in 0..2 {
+        if left.get(index).copied().unwrap_or(0) != right.get(index).copied().unwrap_or(0) {
+            return if index == 0 { Bump::Major } else { Bump::Minor };
+        }
+    }
+    Bump::Patch
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_bump_is_classified_by_which_component_moved() {
+        assert!(matches!(super::bump("1.2.3", "2.0.0"), super::Bump::Major));
+        assert!(matches!(super::bump("1.2.3", "1.3.0"), super::Bump::Minor));
+        assert!(matches!(super::bump("1.2.3", "1.2.4"), super::Bump::Patch));
+        // Maven versions are not semver, and plenty carry qualifiers.
+        assert!(matches!(
+            super::bump("33.4.8-jre", "33.7.1-jre"),
+            super::Bump::Minor
+        ));
+        assert!(matches!(super::bump("2.0.9", "3.0.0"), super::Bump::Major));
+    }
+
+    #[test]
+    fn previews_are_recognised_so_they_are_not_recommended() {
+        // A project on a stable release is not outdated because a release
+        // candidate exists, and a tool that says otherwise gets ignored.
+        for preview in [
+            "1.0-alpha1",
+            "2.0.0-beta",
+            "3.0.0-M1",
+            "1.2-rc1",
+            "5.0.0.CR2",
+            "1.0-SNAPSHOT",
+            "7.0-milestone3",
+            "1.0-preview",
+        ] {
+            assert!(super::is_pre_release(preview), "{preview} is a preview");
+        }
+        for release in ["1.0", "33.4.8-jre", "2.0.9", "5.10.2", "1.14.12", "3.0.0.Final"] {
+            assert!(!super::is_pre_release(release), "{release} is a release");
+        }
+    }
     use super::*;
 
     #[test]

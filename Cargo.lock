@@ -877,7 +877,9 @@ dependencies = [
  "jv-repo",
  "jv-resolver",
  "jv-tree",
+ "jv-version",
  "owo-colors",
+ "rayon",
  "tempfile",
 ]
 

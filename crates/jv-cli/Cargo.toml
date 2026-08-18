@@ -32,9 +32,11 @@ jv-model = { workspace = true }
 jv-repo = { workspace = true }
 jv-resolver = { workspace = true }
 jv-tree = { workspace = true }
+jv-version = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 owo-colors = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

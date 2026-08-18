@@ -35,6 +35,43 @@ pub enum Command {
     Add(AddArgs),
     /// Remove a dependency from a POM.
     Remove(RemoveArgs),
+    /// Report dependencies with newer versions available.
+    Outdated(OutdatedArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct OutdatedArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// The pom.xml to read. Defaults to the nearest one at or above the working
+    /// directory.
+    #[arg(short = 'f', long = "file", value_name = "POM")]
+    pub file: Option<PathBuf>,
+
+    /// Check every module of a multi-module build.
+    #[arg(long, default_value_t = true)]
+    pub recursive: bool,
+
+    /// Only this module, even in a multi-module build.
+    #[arg(long, conflicts_with = "recursive")]
+    pub no_recursive: bool,
+
+    /// Check plugins as well as dependencies.
+    #[arg(long)]
+    pub plugins: bool,
+
+    /// Consider alpha, beta, milestone and release-candidate versions.
+    ///
+    /// Off by default: a project pinned to a stable release is not "outdated"
+    /// because a release candidate exists, and a tool that says otherwise gets
+    /// ignored.
+    #[arg(long)]
+    pub pre_release: bool,
+
+    /// Exit non-zero when anything is outdated, for use as a CI gate.
+    #[arg(long)]
+    pub exit_code: bool,
 }
 
 #[derive(Args, Debug)]
