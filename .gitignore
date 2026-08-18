@@ -1,4 +1,6 @@
 /target
+# The EventSpy jar is built by java/jv-profiler/build.sh, not committed.
+java/jv-profiler/target/
 **/*.rs.bk
 *.pdb
 
