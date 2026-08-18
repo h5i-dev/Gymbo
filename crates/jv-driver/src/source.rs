@@ -51,10 +51,35 @@ use crate::error::DriverError;
 
 /// How many artifact downloads `materialize_all` keeps in flight.
 ///
-/// The same bound the POM crawler uses. Beyond this a single host stops going
-/// faster and starts refusing connections, and the wall clock of a cold sync is
-/// already dominated by the slowest few artifacts rather than by the count.
+/// A cold sync is latency-bound rather than bandwidth-bound: measured on
+/// spring-petclinic, 3,175 requests of which 95% are under 64 KB and together
+/// only 11.5% of the bytes, against a 137 ms time to first byte. That argues
+/// for more concurrency.
+///
+/// It is capped at 32 anyway, because the other end gets a say. Pushing harder
+/// earned HTTP 429s from Maven Central, and a throttled sync is slower than a
+/// polite one *and* fails: before this was understood, a 429 while reading a
+/// parent POM failed the whole resolve. Maven's own resolver defaults to five
+/// connections; 32 is already well past that.
+///
+/// `JV_IN_FLIGHT` overrides it, because the right value depends on the
+/// network — a nearby mirror with no rate limit will take far more than a
+/// shared runner talking to Central.
 const MATERIALIZE_IN_FLIGHT: usize = 32;
+
+/// The bound, overridable with `JV_IN_FLIGHT`.
+///
+/// A knob rather than a constant because the right value depends on the
+/// network: a cold sync is latency-bound on many small POMs, so a high-latency
+/// link wants more in flight, while a nearby mirror wants fewer. It also makes
+/// the value measurable, which is how the default was chosen.
+fn in_flight() -> usize {
+    std::env::var("JV_IN_FLIGHT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(MATERIALIZE_IN_FLIGHT)
+}
 
 /// The extension a POM is stored under, which is what every descriptor read
 /// actually asks the repository for.
@@ -510,6 +535,14 @@ impl RepositorySource {
                 )));
 
         let mut found = Vec::new();
+        // Whether any repository actually answered — a 404 counts, a refused
+        // connection does not. Ignoring an unreachable repository is right when
+        // another can answer; when *none* can, an empty result is not "this
+        // artifact is unpublished", it is "nobody was asked". Reporting the
+        // first as the second is how a rate-limited machine came back with
+        // "no published version of com.google.googlejavaformat:google-java-format
+        // was found" for an artifact that has been on Central for years.
+        let mut consulted = 0usize;
         for (repository, fetched) in repositories.iter().zip(fetched) {
             // An unreachable repository must not stop a resolve the others can
             // complete — the same rule the corrupt-metadata arm below already
@@ -542,6 +575,7 @@ impl RepositorySource {
                     continue;
                 }
             };
+            consulted += 1;
             let Some(fetched) = fetched else { continue };
             match parse_metadata(&String::from_utf8_lossy(&fetched.bytes)) {
                 Ok(metadata) => {
@@ -560,6 +594,14 @@ impl RepositorySource {
                     repository.url
                 )),
             }
+        }
+        // Every repository refused. See `consulted` above.
+        if consulted == 0 && !repositories.is_empty() {
+            return Err(DriverError::Other(format!(
+                "{path} could not be read from any of the {} configured repositories, so it is \
+                 unknown whether the artifact exists; the failures are reported above",
+                repositories.len()
+            )));
         }
         Ok(found)
     }
@@ -928,7 +970,7 @@ impl RepositorySource {
             .collect::<Result<_, DriverError>>()?;
 
         let repositories = self.repositories();
-        let permits = Arc::new(tokio::sync::Semaphore::new(MATERIALIZE_IN_FLIGHT));
+        let permits = Arc::new(tokio::sync::Semaphore::new(in_flight()));
         let fetched = self
             .runtime
             .block_on(futures_util::future::join_all(resolved.iter().map(

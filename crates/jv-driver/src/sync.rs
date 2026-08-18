@@ -155,7 +155,11 @@ pub fn sync(
             .iter()
             .map(|project| {
                 let artifact = project.artifact();
-                format!("{}:{}", artifact.group_id, artifact.artifact_id)
+                // Version included, deliberately. See `Wanted::push`.
+                format!(
+                    "{}:{}:{}",
+                    artifact.group_id, artifact.artifact_id, artifact.version
+                )
             })
             .collect()
     } else {
@@ -618,8 +622,23 @@ struct Wanted {
 
 impl Wanted {
     /// Adds an artifact once, skipping anything the reactor produces.
+    ///
+    /// Matched on the *version* too. A different version of a module the
+    /// reactor builds is an ordinary published artifact that has to be
+    /// downloaded like any other, and skipping it leaves a repository that
+    /// cannot build: `jackson-base` declares `nexus-staging-maven-plugin` as a
+    /// build extension, whose closure needs `jackson-core:2.13.2` — while the
+    /// reactor is building `jackson-core:2.17.1`. Maven loads extensions before
+    /// the build, so the whole thing failed to start, naming an artifact that
+    /// looked like the project's own.
+    ///
+    /// The same shape appears whenever a build compares itself against its
+    /// previous release, which japicmp and animal-sniffer both do.
     fn push(&mut self, reactor: &BTreeSet<String>, artifact: Artifact) {
-        if reactor.contains(&format!("{}:{}", artifact.group_id, artifact.artifact_id)) {
+        if reactor.contains(&format!(
+            "{}:{}:{}",
+            artifact.group_id, artifact.artifact_id, artifact.version
+        )) {
             return;
         }
         if self.seen.insert(artifact.clone()) {
@@ -1056,7 +1075,7 @@ mod tests {
 
     #[test]
     fn the_reactors_own_artifacts_are_not_queued() {
-        let reactor: BTreeSet<String> = ["com.example:lib".to_owned()].into_iter().collect();
+        let reactor: BTreeSet<String> = ["com.example:lib:1.0".to_owned()].into_iter().collect();
         let mut wanted = Wanted::default();
         wanted.push(&reactor, Artifact::new("com.example", "lib", "1.0"));
         wanted.push(&reactor, Artifact::new("org.slf4j", "slf4j-api", "2.0.9"));
@@ -1064,6 +1083,33 @@ mod tests {
         // a 404 that means nothing.
         assert_eq!(wanted.ordered.len(), 1);
         assert_eq!(wanted.ordered[0].artifact_id, "slf4j-api");
+    }
+
+    #[test]
+    fn an_older_release_of_a_reactor_module_is_still_downloaded() {
+        // The reactor builds 2.17.1; 2.13.2 is a published artifact like any
+        // other, and something in the build genuinely needs it. Excluding it by
+        // `groupId:artifactId` alone left `jackson-core` unable to start,
+        // because its parent declares a build extension whose closure reaches
+        // the older release.
+        let reactor: BTreeSet<String> =
+            ["com.fasterxml.jackson.core:jackson-core:2.17.1".to_owned()]
+                .into_iter()
+                .collect();
+        let mut wanted = Wanted::default();
+        wanted.push(
+            &reactor,
+            Artifact::new("com.fasterxml.jackson.core", "jackson-core", "2.17.1"),
+        );
+        wanted.push(
+            &reactor,
+            Artifact::new("com.fasterxml.jackson.core", "jackson-core", "2.13.2"),
+        );
+        assert_eq!(wanted.ordered.len(), 1);
+        assert_eq!(
+            wanted.ordered[0].version, "2.13.2",
+            "the reactor's own version is skipped; an older one is not"
+        );
     }
 
     #[test]
