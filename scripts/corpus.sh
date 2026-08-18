@@ -17,6 +17,7 @@
 #   scripts/corpus.sh -t full          # everything in projects.tsv
 #   scripts/corpus.sh -p commons-io -p gson
 #   scripts/corpus.sh -l               # list the corpus
+#   scripts/corpus.sh -b OLD_JV        # also ask an older jv, to catch regressions
 #   scripts/corpus.sh -k               # keep clones and repositories for triage
 #   scripts/corpus.sh -T               # run tests too (slow, and flakier)
 #
@@ -37,14 +38,16 @@ jv="${JV:-$repository_root/target/release/jv}"
 mvn="${JV_MVN:-mvn}"
 
 tier="default"
+baseline=""
 selected=()
 keep=0
 run_tests=0
 list_only=0
 
-while getopts "t:p:klTh" option; do
+while getopts "t:p:klTb:h" option; do
     case "$option" in
         t) tier="$OPTARG" ;;
+        b) baseline="$OPTARG" ;;
         p) selected+=("$OPTARG") ;;
         k) keep=1 ;;
         l) list_only=1 ;;
@@ -258,9 +261,21 @@ run_project() {
         failures+=("$name: offline build missing artifacts mvn does provide")
         (( ++failed ))
     elif [[ "$cause" == "maven" ]]; then
-        note "SHARED: mvn dependency:go-offline cannot build this offline either"
-        note "$(missing_artifacts "$build_log" | head -3 | sed 's/^/      /')"
-        (( ++shared ))
+        # "Maven cannot do this either" is true and not the whole question. A
+        # regression in jv lands here too, because a project jv used to build
+        # is still one `go-offline` never could — which is exactly how a
+        # `<reporting>` ordering change that cost commons-io its offline build
+        # got filed as an ecosystem limitation. So when a baseline is given,
+        # ask the older binary before accepting the label.
+        if regressed_against_baseline "$name" "$clone" "$goal"; then
+            note "REGRESSION: the baseline builds this offline and this jv does not"
+            failures+=("$name: the baseline builds it offline, this jv does not")
+            (( ++failed ))
+        else
+            note "SHARED: mvn dependency:go-offline cannot build this offline either"
+            note "$(missing_artifacts "$build_log" | head -3 | sed 's/^/      /')"
+            (( ++shared ))
+        fi
     else
         # A project that does not build on this machine for its own reasons —
         # a JDK it needs, a plugin that wants the network by design, a test
@@ -269,6 +284,27 @@ run_project() {
         note "$(grep -m 2 -E "^\[ERROR\]" "$build_log" | sed 's/^/      /')"
         (( ++skipped ))
     fi
+}
+
+# Whether a previous build of jv can do what this one cannot.
+#
+# Consulted only once jv's arm has already failed, so it costs nothing on the
+# happy path. Without `-b` it is always false, and a run reports exactly what it
+# reported before.
+regressed_against_baseline() {
+    local name="$1" clone="$2" goal="$3"
+    [[ -n "$baseline" && -x "$baseline" ]] || return 1
+    note "asking the baseline whether this used to build..."
+
+    local repository="$workspace/$name-baseline"
+    rm -rf "$repository"
+    mkdir -p "$repository"
+    "$baseline" sync --recursive -f "$clone/pom.xml" -s "$settings" \
+        --cache-dir "$workspace/cache" --local-repository "$repository" \
+        > "$workspace/$name.baseline.sync.log" 2>&1 || return 1
+    (cd "$clone" && "$mvn" -o -B -s "$settings" \
+        "-Dmaven.repo.local=$repository" "${skip[@]}" "$goal" \
+        > "$workspace/$name.baseline.build.log" 2>&1)
 }
 
 for row in "${rows[@]}"; do
