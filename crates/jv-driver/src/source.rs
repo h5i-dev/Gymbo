@@ -657,6 +657,19 @@ impl RepositorySource {
     /// reaches parents and BOMs through the same `ModelSource::get` that fills
     /// this memo — so the memo is exactly the set Maven will look for, and is a
     /// superset of any per-artifact parent walk.
+    /// The published versions of an artifact, recording the metadata behind
+    /// them so `jv sync` can place it.
+    ///
+    /// The same lookup the range resolver uses; exposed because `jv sync` needs
+    /// it for a plugin whose version Maven resolves at execution time.
+    pub fn published_versions(
+        &self,
+        group_id: &str,
+        artifact_id: &str,
+    ) -> Result<Vec<String>, String> {
+        <Self as DescriptorSource>::versions(self, group_id, artifact_id)
+    }
+
     /// Fetches and records the version list for every coordinate any POM jv
     /// read names with a *range*.
     ///

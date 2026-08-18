@@ -199,6 +199,9 @@ pub fn sync(
     let mut wanted = Wanted::default();
     // Whether any plugin in the build resolves a test provider at run time.
     let mut selects_providers = false;
+    // Whether the build runs `maven-site-plugin`, which picks its reports at
+    // execution time.
+    let mut selects_reports = false;
 
     // Point the POM crawler at every plugin before anything is resolved.
     //
@@ -387,6 +390,7 @@ pub fn sync(
                         }
                     }
                     selects_providers |= selects_providers_for(&artifact);
+                    selects_reports |= selects_reports_for(&artifact);
                 }
             }
         }
@@ -395,6 +399,68 @@ pub fn sync(
     // Surefire aligns its JUnit Platform launcher to the platform version it
     // finds on the *test classpath*, not to anything the provider declares — so
     // the version can only be read off the graph, after it is collected.
+    // `maven-site-plugin` resolves its default report at execution time, and
+    // `maven-project-info-reports-plugin` appears in no POM anywhere — not in
+    // `<plugins>`, not in `<pluginManagement>`, not in any parent. Same shape
+    // as Surefire choosing a test provider, and it fails the same way: `mvn -o
+    // site` stops with "Error resolving version for plugin".
+    //
+    // The version is not in lockstep with site-plugin's, so it has to be looked
+    // up. Maven takes the newest release, and the lookup also records the
+    // version metadata that Maven needs to make the same choice offline.
+    if selects_reports {
+        // The skin, every released version of it.
+        //
+        // `maven-site-plugin` resolves a skin at execution time and the version
+        // is a constant inside its own Java — `maven-default-skin:1.3` for
+        // 3.12.1 — named in no POM anywhere, so jv cannot derive it without
+        // embedding a table of site-plugin internals that changes each release.
+        //
+        // There are four released versions and each is about 14 KB, so all of
+        // them cost less than one ordinary jar. That is the same trade the
+        // Surefire providers above make, and for the same reason: jv cannot
+        // know which one the plugin will pick, and being wrong fails the build.
+        match session
+            .source()
+            .published_versions("org.apache.maven.skins", "maven-default-skin")
+        {
+            Ok(versions) => {
+                for version in versions
+                    .iter()
+                    .filter(|version| !is_snapshot_version(version))
+                {
+                    wanted.push(
+                        &reactor,
+                        Artifact::new("org.apache.maven.skins", "maven-default-skin", version),
+                    );
+                }
+            }
+            Err(error) => report.warnings.push(format!(
+                "maven-site-plugin is in the build but its skin could not be resolved \
+                 ({error}); `mvn -o site` will fail"
+            )),
+        }
+
+        match default_site_report(session) {
+            Ok(Some(reports_plugin)) => {
+                wanted.push(&reactor, reports_plugin.clone());
+                for dependency in plugin_dependencies(
+                    session,
+                    &reports_plugin,
+                    &Plugin::default(),
+                    &mut report.warnings,
+                )? {
+                    wanted.push(&reactor, dependency);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => report.warnings.push(format!(
+                "maven-site-plugin is in the build but its default report could not be \
+                 resolved ({error}); `mvn -o site` will fail"
+            )),
+        }
+    }
+
     if selects_providers {
         for launcher in aligned_launchers(&wanted.ordered) {
             wanted.push(&reactor, launcher.clone());
@@ -804,6 +870,34 @@ fn selects_providers_for(plugin: &Artifact) -> bool {
             plugin.artifact_id.as_str(),
             "maven-surefire-plugin" | "maven-failsafe-plugin"
         )
+}
+
+/// Whether a plugin picks its reports at execution time.
+fn selects_reports_for(plugin: &Artifact) -> bool {
+    plugin.group_id == "org.apache.maven.plugins" && plugin.artifact_id == "maven-site-plugin"
+}
+
+/// The report `maven-site-plugin` runs when a project configures none.
+///
+/// Its version comes from metadata rather than from site-plugin, so this asks
+/// for the newest release the same way Maven does. The lookup also records that
+/// metadata for `jv sync` to place, which is what lets Maven repeat the choice
+/// with the network off.
+fn default_site_report(session: &Session) -> Result<Option<Artifact>, DriverError> {
+    const GROUP: &str = "org.apache.maven.plugins";
+    const ARTIFACT: &str = "maven-project-info-reports-plugin";
+
+    let versions = session
+        .source()
+        .published_versions(GROUP, ARTIFACT)
+        .map_err(DriverError::Other)?;
+    let newest = versions
+        .iter()
+        .filter(|version| !jv_model::is_snapshot_version(version))
+        .max_by(|left, right| {
+            jv_version::Version::parse(left).cmp(&jv_version::Version::parse(right))
+        });
+    Ok(newest.map(|version| Artifact::new(GROUP, ARTIFACT, version)))
 }
 
 /// Artifacts a plugin will resolve for itself at execution time.
