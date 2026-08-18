@@ -201,6 +201,40 @@ run_project() {
         return 0
     fi
 
+    # --- jv sync again, warm ---
+    #
+    # The CI case `jv sync` exists for is the *second* run, and only the second
+    # run exercises the cached-answer paths. A cached 404 skipped through
+    # `recently_missing` once stopped counting as that repository's answer, so
+    # an unreachable repository decided the outcome and the sync failed —
+    # exclusively on warm caches. Cold-only testing passed it twice.
+    local warm_repository="$workspace/m2-warm/$name"
+    rm -rf "$warm_repository"; mkdir -p "$warm_repository"
+    local warm_log="$workspace/$name.warm.log"
+    if ! "$jv" sync --recursive \
+            -f "$clone/pom.xml" \
+            -s "$settings" \
+            --cache-dir "$workspace/cache" \
+            --local-repository "$warm_repository" \
+            > "$warm_log" 2>&1; then
+        note "FAIL: jv sync failed on a warm cache after succeeding cold"
+        note "$(tail -3 "$warm_log" | sed 's/^/      /')"
+        failures+=("$name: warm-cache sync failed")
+        (( ++failed ))
+        return 0
+    fi
+    # The two runs must place the same set; a warm run that quietly places less
+    # is the same bug wearing a different hat.
+    local cold_count warm_count
+    cold_count=$(find "$local_repository" -type f \( -name '*.jar' -o -name '*.pom' \) | wc -l)
+    warm_count=$(find "$warm_repository" -type f \( -name '*.jar' -o -name '*.pom' \) | wc -l)
+    if [[ "$cold_count" != "$warm_count" ]]; then
+        note "FAIL: cold placed $cold_count artifacts, warm placed $warm_count"
+        failures+=("$name: warm and cold syncs disagree")
+        (( ++failed ))
+        return 0
+    fi
+
     # --- mvn -o ---
     local goal="verify"
     local skip=(-DskipTests)
