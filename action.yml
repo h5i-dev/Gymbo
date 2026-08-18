@@ -1,6 +1,6 @@
 # setup-jv — install jv in a GitHub Actions job, and optionally warm ~/.m2.
 #
-#   - uses: Koukyosyumei/jv@v1
+#   - uses: h5i-dev/jv@v1
 #     with:
 #       sync: true
 #   - run: mvn -o verify
@@ -65,7 +65,7 @@ runs:
         JV_INSTALL_DIR: ${{ runner.temp }}/jv-bin
       run: |
         set -euo pipefail
-        curl -LsSf "https://raw.githubusercontent.com/Koukyosyumei/jv/main/scripts/install.sh" | sh
+        curl -LsSf "https://raw.githubusercontent.com/h5i-dev/jv/main/scripts/install.sh" | sh
         echo "$JV_INSTALL_DIR" >> "$GITHUB_PATH"
         echo "version=$("$JV_INSTALL_DIR/jv" --version)" >> "$GITHUB_OUTPUT"
 

@@ -7,8 +7,8 @@ version = "0.1.0-dev"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
-repository = "https://github.com/Koukyosyumei/jv"
-homepage = "https://github.com/Koukyosyumei/jv"
+repository = "https://github.com/h5i-dev/jv"
+homepage = "https://github.com/h5i-dev/jv"
 authors = ["jv contributors"]
 
 [workspace.dependencies]
