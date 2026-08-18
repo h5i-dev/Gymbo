@@ -48,6 +48,23 @@
 //! itself, and it is honest: jv put the file there, so it is locally installed
 //! whatever it was downloaded from. See [`crate::snapshot`].
 //!
+//! # Known gap: `mvn -o site`
+//!
+//! `verify`, `install` and `deploy` work against a synced repository — they are
+//! bound by the packaging's lifecycle, so their plugins are *declared* and
+//! their closures travel. `site` does not.
+//!
+//! `maven-site-plugin` resolves its reports at run time, and the default,
+//! `maven-project-info-reports-plugin`, appears in no POM anywhere — not in
+//! `<plugins>`, not in `<pluginManagement>`, not in any parent. It is the same
+//! shape as Surefire choosing a test provider, which is handled above, and it
+//! wants the same treatment: a small list of what the plugin picks for itself.
+//! jv also does not model `<reporting><plugins>` yet, which is where a project
+//! names the reports it actually wants.
+//!
+//! Verified rather than assumed: `mvn -o install` reaches BUILD SUCCESS on
+//! spring-petclinic and `mvn -o site` does not, failing on exactly that plugin.
+//!
 //! # Profiles must match the build's
 //!
 //! `jv sync` and `mvn` are separate invocations, and what a profile

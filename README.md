@@ -191,6 +191,10 @@ then the action can only be used from a branch ref.
 
 ## What jv does not do
 
+- **`mvn -o site` is not supported yet.** `verify`, `install` and `deploy` work
+  against a synced repository; `site` needs report plugins that appear in no
+  POM, which jv does not yet fetch. `docs/spec/` and `jv-driver`'s sync module
+  record what that would take.
 - **It does not build anything.** No compile, test, package, or deploy. jv is
   not a build tool: it resolves and downloads, then gets out of Maven's way.
   The pairing is `jv sync && mvn -o verify`, not a replacement for `mvn`.
