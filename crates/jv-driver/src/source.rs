@@ -582,6 +582,12 @@ impl RepositorySource {
         // "no published version of com.google.googlejavaformat:google-java-format
         // was found" for an artifact that has been on Central for years.
         let mut consulted = 0usize;
+        // Why each repository refused, kept here rather than only in the
+        // warnings bag. Warnings are printed after a resolve finishes, so a
+        // resolve that *fails* never shows them — the error below used to say
+        // "the failures are reported above" when nothing had been reported at
+        // all, leaving a rate-limited run looking like a missing artifact.
+        let mut refusals: Vec<String> = Vec::new();
         for (repository, fetched) in repositories.iter().zip(fetched) {
             // An unreachable repository must not stop a resolve the others can
             // complete — the same rule the corrupt-metadata arm below already
@@ -611,6 +617,7 @@ impl RepositorySource {
                             repository.url
                         ));
                     }
+                    refusals.push(format!("{}: {error}", repository.url));
                     continue;
                 }
             };
@@ -638,8 +645,13 @@ impl RepositorySource {
         if consulted == 0 && !repositories.is_empty() {
             return Err(DriverError::Other(format!(
                 "{path} could not be read from any of the {} configured repositories, so it is \
-                 unknown whether the artifact exists; the failures are reported above",
-                repositories.len()
+                 unknown whether the artifact exists:\n{}",
+                repositories.len(),
+                refusals
+                    .iter()
+                    .map(|refusal| format!("  {refusal}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )));
         }
         Ok(found)
