@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use jv_model::toolchains::{self, Toolchains};
 use jv_model::{Settings, security};
 use jv_repo::{UpdatePolicy, merge_settings};
 
@@ -24,6 +25,9 @@ pub struct Config {
     /// password that `<server>` passwords are encrypted with. Maven takes this
     /// from `-Dsettings.security`; jv takes it from here or `JV_SETTINGS_SECURITY`.
     pub settings_security: Option<PathBuf>,
+    /// `~/.m2/toolchains.xml` unless overridden. Toolchains do not affect
+    /// resolution; this is read so `jv sync` can warn that `mvn -o` will fail.
+    pub user_toolchains: Option<PathBuf>,
     /// jv's own cache. Defaults to the platform cache directory.
     pub cache: Option<PathBuf>,
     /// Maven's `~/.m2/repository`, read but never written. `None` means "find
@@ -155,6 +159,24 @@ impl Config {
         }
     }
 
+    /// The toolchains Maven would see: the user file, then the installation one.
+    ///
+    /// Concatenated rather than merged, user first, because Maven's selection
+    /// takes the first match and that is what makes a user entry win.
+    pub fn load_toolchains(&self) -> Toolchains {
+        let read = |path: Option<PathBuf>| {
+            path.and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|xml| toolchains::parse_toolchains(&xml))
+                .unwrap_or_default()
+        };
+        let user = read(
+            self.user_toolchains
+                .clone()
+                .or_else(default_user_toolchains),
+        );
+        user.merge_under(read(default_global_toolchains()))
+    }
+
     /// The decrypted master password, following one `<relocation>` hop.
     fn master_password(&self) -> Option<String> {
         let mut path = self
@@ -197,6 +219,18 @@ fn read_settings(path: &Path, required: bool) -> Result<Option<Settings>, Driver
             path: path.to_path_buf(),
             source,
         })
+}
+
+/// `~/.m2/toolchains.xml`.
+fn default_user_toolchains() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".m2").join("toolchains.xml"))
+}
+
+/// `$MAVEN_HOME/conf/toolchains.xml`.
+fn default_global_toolchains() -> Option<PathBuf> {
+    std::env::var_os("MAVEN_HOME")
+        .or_else(|| std::env::var_os("M2_HOME"))
+        .map(|home| PathBuf::from(home).join("conf").join("toolchains.xml"))
 }
 
 /// `~/.m2/settings-security.xml`.

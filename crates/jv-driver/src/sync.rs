@@ -55,6 +55,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+use jv_model::toolchains::{self, Toolchains};
 use jv_model::{Artifact, Dependency, Plugin, Scope, is_snapshot_version};
 use jv_resolver::{CollectRequest, Verbosity};
 
@@ -79,6 +80,13 @@ pub struct SyncRequest {
     pub local_repository: Option<PathBuf>,
     /// Skip artifacts the reactor itself produces; nothing has published them.
     pub exclude_reactor: bool,
+    /// The toolchains this machine provides, for the check below.
+    ///
+    /// Toolchains have no effect on resolution — nothing in Maven's model
+    /// building looks at them. They are here because a sync that reports
+    /// success and leaves a project `mvn -o verify` cannot build is a false
+    /// success, and jv is holding the POM at the moment it could say so.
+    pub toolchains: Toolchains,
 }
 
 impl Default for SyncRequest {
@@ -88,6 +96,7 @@ impl Default for SyncRequest {
             plugin_dependencies: true,
             local_repository: None,
             exclude_reactor: true,
+            toolchains: Toolchains::default(),
         }
     }
 }
@@ -138,6 +147,30 @@ pub fn sync(
     let mut wanted = Wanted::default();
     // Whether any plugin in the build resolves a test provider at run time.
     let mut selects_providers = false;
+
+    // Toolchains: not downloadable, but checkable. A missing one fails the
+    // build long after the sync reported success, with an error that does not
+    // mention this file.
+    for project in projects {
+        let Ok(pom) = std::fs::read_to_string(&project.path) else {
+            continue;
+        };
+        for requirement in toolchains::required_toolchains(&pom) {
+            if request
+                .toolchains
+                .select(&requirement.kind, &requirement.requirements)
+                .is_none()
+            {
+                report.warnings.push(format!(
+                    "{}: requires a {} toolchain, and toolchains.xml provides none that matches; \
+                     `mvn -o` will fail before it builds. jv cannot supply this — install the JDK \
+                     and declare it in ~/.m2/toolchains.xml",
+                    project.path.display(),
+                    requirement.describe()
+                ));
+            }
+        }
+    }
 
     // Core extensions from `.mvn/extensions.xml`. jv cannot run one — that
     // needs Maven's own container — but `mvn -o` refuses to start at all when

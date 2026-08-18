@@ -896,6 +896,7 @@ dependencies = [
  "jv-version",
  "quick-xml",
  "sha2",
+ "tempfile",
  "thiserror",
  "walkdir",
 ]

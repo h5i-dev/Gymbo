@@ -53,6 +53,7 @@ mod parse;
 mod scope;
 pub mod security;
 mod settings;
+pub mod toolchains;
 mod types;
 
 pub use coordinates::{
