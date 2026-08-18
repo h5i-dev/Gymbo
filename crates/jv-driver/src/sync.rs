@@ -85,6 +85,18 @@ pub struct SyncRequest {
     pub local_repository: Option<PathBuf>,
     /// Skip artifacts the reactor itself produces; nothing has published them.
     pub exclude_reactor: bool,
+    /// Also resolve the dependency closure of `<pluginManagement>` entries no
+    /// `<plugins>` block declares.
+    ///
+    /// Off by default. Management supplies a version and configuration to
+    /// plugins that are declared; an entry nothing declares never enters a
+    /// build plan, so Maven never loads its dependencies. Including them cost
+    /// 245 MB of 345 MB on spring-petclinic — a Kotlin compiler, jOOQ,
+    /// Liquibase and Saxon, in a single-module Java project.
+    ///
+    /// Turn it on for the one case the default gives up: invoking a
+    /// management-only plugin directly, as `mvn -o some:goal`.
+    pub managed_plugin_dependencies: bool,
     /// The toolchains this machine provides, for the check below.
     ///
     /// Toolchains have no effect on resolution — nothing in Maven's model
@@ -101,6 +113,7 @@ impl Default for SyncRequest {
             plugin_dependencies: true,
             local_repository: None,
             exclude_reactor: true,
+            managed_plugin_dependencies: false,
             toolchains: Toolchains::default(),
         }
     }
@@ -163,7 +176,7 @@ pub fn sync(
         let plugins: Vec<Artifact> = projects
             .iter()
             .flat_map(|project| project_plugins(project))
-            .filter_map(|plugin| plugin_artifact(&plugin))
+            .filter_map(|(plugin, _origin)| plugin_artifact(&plugin))
             .collect();
         session.source().prefetch_artifacts(plugins);
     }
@@ -285,7 +298,7 @@ pub fn sync(
         }
 
         if request.plugins {
-            for plugin in project_plugins(project) {
+            for (plugin, origin) in project_plugins(project) {
                 let Some(artifact) = plugin_artifact(&plugin) else {
                     // A plugin with no version is one whose version Maven would
                     // resolve from metadata at build time; jv cannot pick it
@@ -300,7 +313,16 @@ pub fn sync(
                 };
                 wanted.push(&reactor, artifact.clone());
 
-                if request.plugin_dependencies {
+                // A management-only entry gets its own jar and POM — cheap, and
+                // enough for `mvn -o help:describe` or an explicit
+                // `plugin:goal` invocation to start — but not its transitive
+                // closure, which nothing in this build will load.
+                let closure = match origin {
+                    PluginOrigin::Declared => true,
+                    PluginOrigin::Managed => request.managed_plugin_dependencies,
+                };
+
+                if request.plugin_dependencies && closure {
                     for dependency in
                         plugin_dependencies(session, &artifact, &plugin, &mut report.warnings)?
                     {
@@ -626,31 +648,58 @@ fn has_unresolved_expression(artifact: &Artifact) -> bool {
 ///
 /// Order decides which declaration of a duplicated plugin supplies the version,
 /// so it is not cosmetic.
-fn project_plugins(project: &Project) -> Vec<Plugin> {
-    let mut plugins: Vec<Plugin> = Vec::new();
-    let mut push_unique = |plugin: &Plugin| {
+/// Where a plugin came from, which decides how much of it `jv sync` fetches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PluginOrigin {
+    /// `<build><plugins>`, or bound by the packaging's lifecycle — which the
+    /// model builder has already merged into the same list. Something in the
+    /// build will run this, so its whole dependency closure is needed.
+    Declared,
+    /// `<pluginManagement>` only. Management supplies a version and
+    /// configuration to plugins that are *declared*; an entry nothing declares
+    /// never enters a build plan, so its transitive dependencies are never
+    /// loaded.
+    Managed,
+}
+
+/// The plugins a project uses, each with where it came from.
+///
+/// Upstream's `ResolverUtil.getProjectPlugins` takes reporting, build and
+/// pluginManagement and makes no distinction between them. jv keeps the same
+/// set but records the origin, because the closure of a management-only entry
+/// is dead weight: on spring-petclinic those entries brought a 58 MB Kotlin
+/// compiler, three versions of zstd-jni, jOOQ, Liquibase and Saxon into a
+/// single-module Java project — 245 MB of the 345 MB synced, none of which
+/// `mvn -o verify` ever opened.
+fn project_plugins(project: &Project) -> Vec<(Plugin, PluginOrigin)> {
+    let mut plugins: Vec<(Plugin, PluginOrigin)> = Vec::new();
+    let mut push_unique = |plugin: &Plugin, origin: PluginOrigin| {
         let key = (
             plugin.group_id_or_default().to_owned(),
             plugin.artifact_id.clone(),
         );
-        let already = plugins.iter().any(|held: &Plugin| {
+        let already = plugins.iter().any(|(held, _): &(Plugin, PluginOrigin)| {
             (
                 held.group_id_or_default().to_owned(),
                 held.artifact_id.clone(),
             ) == key
         });
         if !already {
-            plugins.push(plugin.clone());
+            plugins.push((plugin.clone(), origin));
         }
     };
 
-    // `<reporting>` is not modelled yet; when it is, its plugins come first.
+    // Declared first, so a plugin that is both declared and managed is treated
+    // as declared.
+    //
+    // `<reporting>` is not modelled yet; when it is, its plugins come first and
+    // count as declared — `mvn site` runs them.
     if let Some(build) = &project.model.build {
         for plugin in &build.plugins {
-            push_unique(plugin);
+            push_unique(plugin, PluginOrigin::Declared);
         }
         for plugin in &build.plugin_management {
-            push_unique(plugin);
+            push_unique(plugin, PluginOrigin::Managed);
         }
     }
     plugins
@@ -949,11 +998,45 @@ mod tests {
         });
         let plugins = project_plugins(&project);
         assert_eq!(plugins.len(), 2);
-        assert_eq!(plugins[0].version.as_deref(), Some("3.13.0"));
+        assert_eq!(plugins[0].0.version.as_deref(), Some("3.13.0"));
         assert_eq!(
-            plugins[1].artifact_id.as_deref(),
+            plugins[1].0.artifact_id.as_deref(),
             Some("maven-surefire-plugin")
         );
+    }
+
+    #[test]
+    fn a_declared_plugin_stays_declared_even_when_also_managed() {
+        // The origin decides whether the dependency closure is fetched, so a
+        // plugin that appears in both lists must not be demoted by the managed
+        // entry that follows it.
+        let project = project_with(Build {
+            plugins: vec![plugin(None, "maven-compiler-plugin", Some("3.13.0"))],
+            plugin_management: vec![
+                plugin(None, "maven-compiler-plugin", Some("3.0.0")),
+                plugin(None, "kotlin-maven-plugin", Some("2.0.0")),
+            ],
+            ..Build::default()
+        });
+        let plugins = project_plugins(&project);
+        assert_eq!(plugins[0].1, PluginOrigin::Declared);
+        assert_eq!(
+            plugins[1].1,
+            PluginOrigin::Managed,
+            "a plugin nothing declares is management only, and its closure is dead weight"
+        );
+    }
+
+    #[test]
+    fn lifecycle_plugins_count_as_declared() {
+        // `inject_lifecycle_bindings` merges them into `build.plugins`, which is
+        // what keeps `mvn -o deploy` working when the default skips managed
+        // closures: deploy is bound by the packaging, not by management.
+        let project = project_with(Build {
+            plugins: vec![plugin(None, "maven-deploy-plugin", Some("3.1.2"))],
+            ..Build::default()
+        });
+        assert_eq!(project_plugins(&project)[0].1, PluginOrigin::Declared);
     }
 
     #[test]

@@ -64,6 +64,17 @@ pub struct SyncArgs {
     /// way cannot run `mvn -o`, which is the usual reason to sync at all.
     #[arg(long)]
     pub no_plugins: bool,
+
+    /// Also resolve the dependencies of `<pluginManagement>` plugins that no
+    /// `<plugins>` block declares.
+    ///
+    /// Off by default. Management gives a version and configuration to plugins
+    /// that are declared; an entry nothing declares never enters a build plan,
+    /// so Maven never loads its dependencies. Skipping them cut spring-petclinic
+    /// from 345 MB to a third of that. Turn this on to invoke a
+    /// management-only plugin directly, as `mvn -o some:goal`.
+    #[arg(long)]
+    pub all_plugins: bool,
 }
 
 /// The `jvx` binary: `jv exec` with the subcommand implied.

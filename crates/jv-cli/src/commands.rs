@@ -216,6 +216,7 @@ pub fn sync(args: &SyncArgs) -> Result<()> {
             plugins: !args.no_plugins,
             plugin_dependencies: !args.no_plugins,
             local_repository: local_repository.clone(),
+            managed_plugin_dependencies: args.all_plugins,
             toolchains: config.load_toolchains(),
             ..SyncRequest::default()
         },
