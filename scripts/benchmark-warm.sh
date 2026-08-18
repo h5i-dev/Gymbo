@@ -86,15 +86,53 @@ echo
 # --- Populate both caches, untimed -----------------------------------------
 echo "populating both caches online (untimed)..." >&2
 
+# Maven's cache is populated by a *successful online build*, not by
+# `go-offline`.
+#
+# This started out using go-offline for symmetry with the cold benchmark, and
+# that rigged the result: go-offline is documented as incomplete, so Maven's
+# arm then failed during resolution and its "build" was a 1.1s abort being
+# compared against jv's real 5.8s compile. Summing that as a total compares a
+# failure against a build.
+#
+# A real runner does not populate `~/.m2` with go-offline either. It runs the
+# build, and caches whatever the build left behind. So that is what happens
+# here, online and untimed, and both arms then measure an offline build that
+# actually builds.
 maven_cache="$workspace/m2-maven"
 mkdir -p "$maven_cache"
 (cd "$project_directory" && "$mvn" -B -s "$settings" \
-    "-Dmaven.repo.local=$maven_cache" \
-    org.apache.maven.plugins:maven-dependency-plugin:3.7.0:go-offline >/dev/null 2>&1) || true
+    "-Dmaven.repo.local=$maven_cache" -DskipTests verify >/dev/null 2>&1) || true
 
 jv_cache="$workspace/jv-cache"
 "$jv" sync --recursive -f "$project_directory/pom.xml" -s "$settings" \
     --cache-dir "$jv_cache" --cache-only >/dev/null 2>&1 || true
+
+# Check the setup actually happened, before timing anything.
+#
+# Both population steps end in `|| true` so a partial cache does not abort the
+# run. That turns "the setup did not happen" into "the setup happened and the
+# tool is slow" — which is precisely how this script once reported a 15s warm
+# materialisation and two failed builds while Maven Central was rate-limiting
+# the machine and both caches were empty. A benchmark whose setup can silently
+# no-op will eventually publish a number that measures nothing.
+setup_failed=""
+[[ "$(kb "$maven_cache")" -gt 10240 ]] || setup_failed+=" maven-cache-empty"
+[[ "$(kb "$jv_cache")" -gt 10240 ]] || setup_failed+=" jv-cache-empty"
+if (cd "$project_directory" && ! "$mvn" -o -B -s "$settings" \
+        "-Dmaven.repo.local=$maven_cache" -DskipTests verify >/dev/null 2>&1); then
+    setup_failed+=" maven-offline-build-fails"
+fi
+if [[ -n "$setup_failed" ]]; then
+    cat >&2 <<MESSAGE
+setup did not complete:$setup_failed
+
+Nothing was measured. The usual cause is the network — Maven Central rate
+limits, and this script downloads a project's whole dependency set twice to
+populate both caches. Wait, then re-run.
+MESSAGE
+    exit 1
+fi
 
 # --- Measure ----------------------------------------------------------------
 mvn_builds=(); jv_prepares=(); jv_builds=()
@@ -138,10 +176,18 @@ echo
 printf 'offline build, mvn cache: %s\n' "$(ok "$mvn_rc")"
 printf 'offline build, jv  cache: %s\n' "$(ok "$jv_rc")"
 echo
+if [[ "$mvn_rc" != 0 || "$jv_rc" != 0 ]]; then
+    echo "NOTE: an arm failed to build, so the totals are not comparable —"
+    echo "      a fast failure is not a fast build."
+fi
+
 cat <<'NOTE'
+
 Reading this honestly: on a cache hit Maven has no prepare step, because what
 it cached is already the repository Maven reads. jv pays one — materialising
 its store into `~/.m2` — so on a single project jv cannot win the clock here.
+Both arms build from a cache a real runner would have: Maven's from a previous
+successful build, jv's from its own store.
 
 What jv trades that for is not visible in one project: its store is keyed by
 URL, so one cache serves every project, branch and worktree on the runner,
