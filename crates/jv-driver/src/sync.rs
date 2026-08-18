@@ -523,14 +523,22 @@ pub fn sync(
 
     let found_all = session.source().materialize_all(&candidates)?;
 
-    // The placement half stays sequential and in order: it is filesystem work
-    // rather than network work, and the tracking file and snapshot metadata
-    // both depend on the order artifacts are seen in.
-    for (candidate, found) in candidates.into_iter().zip(found_all) {
+    // Placement runs in three passes so the file work can go wide without
+    // disturbing anything that depends on order.
+    //
+    // The bookkeeping — the tracking file, the snapshot metadata, the report —
+    // is built in artifact order and stays sequential. Only the filesystem
+    // work in the middle is parallel, and it is the part worth parallelising:
+    // on a warm cache a sync is roughly half resolution and half placing a few
+    // thousand hardlinks, and the hardlinks are independent of each other.
+    //
+    // Pass one: decide every destination, and do the snapshot bookkeeping.
+    let mut placements: Vec<(usize, PathBuf, String, Option<String>)> = Vec::new();
+    for (index, (candidate, found)) in candidates.into_iter().zip(found_all).enumerate() {
         {
             match found {
                 Some(found) => {
-                    if let Some(local) = &request.local_repository {
+                    if let Some(_local) = &request.local_repository {
                         // The *resolved* path: a snapshot lives in its
                         // `-SNAPSHOT` directory under a timestamped file name,
                         // and placing it under the base name would give Maven a
@@ -560,12 +568,12 @@ pub fn sync(
                         } else {
                             relative
                         };
-                        if let Some(linked) =
-                            materialize(&found.path, local, &relative, &mut report)?
-                        {
-                            record_tracking(&mut tracking, &linked, found.repository.as_deref())?;
-                            report.materialized.push(linked);
-                        }
+                        placements.push((
+                            index,
+                            found.path.clone(),
+                            relative,
+                            found.repository.clone(),
+                        ));
                     }
                     placed.insert(candidate.clone());
                     report.artifacts.push(candidate);
@@ -585,6 +593,28 @@ pub fn sync(
     // artifacts themselves: Maven walks each one's parents and imported BOMs
     // when it re-reads them, and a missing grandparent POM fails a build whose
     // jars are all present. jv already fetched them; they just have to travel.
+    // Pass two: place the files, in parallel. Each hardlink is independent of
+    // every other, and `materialize` refuses to overwrite anything, so the only
+    // interaction between two placements is the directory they share — which
+    // `create_dir_all` already handles concurrently.
+    if let Some(local) = &request.local_repository {
+        let linked = place_all(local, &placements);
+
+        // Pass three: bookkeeping, back in artifact order. `_remote.repositories`
+        // and the snapshot metadata both depend on the order artifacts are seen
+        // in, so this half is deliberately not parallel.
+        for (placement, outcome) in placements.iter().zip(linked) {
+            match outcome {
+                Ok(Some(destination)) => {
+                    record_tracking(&mut tracking, &destination, placement.3.as_deref())?;
+                    report.materialized.push(destination);
+                }
+                Ok(None) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     // Concurrently, for the same reason as the artifacts above: this set is
     // every POM jv read, which on a deep parent chain is larger than the
     // artifact set and was being walked one blocking request at a time.
@@ -752,6 +782,27 @@ impl Wanted {
             self.ordered.push(artifact);
         }
     }
+}
+
+/// Places every file, in parallel.
+///
+/// Returns one outcome per placement, in the order given, so the caller's
+/// ordered bookkeeping is unaffected. Warnings are dropped here rather than
+/// threaded through: the only one `materialize` raises is the path-escape
+/// refusal, which cannot fire on a path `artifact_path` built, and which the
+/// caller re-checks anyway.
+fn place_all(
+    local_repository: &Path,
+    placements: &[(usize, PathBuf, String, Option<String>)],
+) -> Vec<Result<Option<PathBuf>, DriverError>> {
+    use rayon::prelude::*;
+    placements
+        .par_iter()
+        .map(|(_, cached, relative, _)| {
+            let mut discard = SyncReport::default();
+            materialize(cached, local_repository, relative, &mut discard)
+        })
+        .collect()
 }
 
 /// `group:artifact:version`, for a diagnostic.

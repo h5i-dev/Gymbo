@@ -13,6 +13,7 @@ jv-cache = { workspace = true }
 jv-model = { workspace = true }
 jv-model-builder = { workspace = true }
 jv-repo = { workspace = true }
+rayon = { workspace = true }
 quick-xml = { workspace = true }
 jv-resolver = { workspace = true }
 jv-version = { workspace = true }
