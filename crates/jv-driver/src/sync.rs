@@ -48,6 +48,19 @@
 //! itself, and it is honest: jv put the file there, so it is locally installed
 //! whatever it was downloaded from. See [`crate::snapshot`].
 //!
+//! # Profiles must match the build's
+//!
+//! `jv sync` and `mvn` are separate invocations, and what a profile
+//! contributes — dependencies, plugins, repositories — is decided at the moment
+//! each one runs. A profile active during the build but not during the sync
+//! leaves its artifacts unfetched, and `mvn -o` then fails on them.
+//!
+//! So a CI job passing `-P release` to the build has to pass it to the sync as
+//! well. This has always been true of the dependency half; skipping the
+//! dependency closure of undeclared `<pluginManagement>` entries extends it to
+//! plugins, since a profile is one of the places a plugin gets *declared*.
+//! `plugin_origin.rs` pins both directions.
+//!
 //! # Why the artifacts are hardlinked
 //!
 //! jv's cache is keyed by URL; Maven's local repository is keyed by coordinates.
@@ -238,12 +251,23 @@ pub fn sync(
                 version,
             );
             wanted.push(&reactor, artifact.clone());
-            if let Ok(dependencies) =
-                plugin_dependencies(session, &artifact, &Plugin::default(), &mut report.warnings)
+            // Reported, not swallowed. Maven loads build extensions before the
+            // build, so a missing dependency here fails `mvn -o` before it
+            // reaches anything a dependency graph could explain — and the
+            // `.mvn/extensions.xml` path below has always said so.
+            match plugin_dependencies(session, &artifact, &Plugin::default(), &mut report.warnings)
             {
-                for dependency in dependencies {
-                    wanted.push(&reactor, dependency);
+                Ok(dependencies) => {
+                    for dependency in dependencies {
+                        wanted.push(&reactor, dependency);
+                    }
                 }
+                Err(error) => report.warnings.push(format!(
+                    "{}: build extension {}: its dependencies could not be resolved ({error}); \
+                     `mvn -o` may fail to start",
+                    project.path.display(),
+                    artifact_coordinates(&artifact)
+                )),
             }
         }
     }
@@ -645,6 +669,14 @@ impl Wanted {
             self.ordered.push(artifact);
         }
     }
+}
+
+/// `group:artifact:version`, for a diagnostic.
+fn artifact_coordinates(artifact: &Artifact) -> String {
+    format!(
+        "{}:{}:{}",
+        artifact.group_id, artifact.artifact_id, artifact.version
+    )
 }
 
 /// Whether any coordinate field still holds a `${...}`.
