@@ -1027,6 +1027,15 @@ JavaScopeDeriver)`. Without `-Dverbose` the plugin uses the project's own sessio
 Separators: for an included (winning) node the annotations are wrapped as `" (" … "; " … ")"`; for an
 omitted node as `" - " … "; "` inside the outer parentheses.
 
+> jv follows this table exactly, including the dead row: `jv-resolver` records
+> `Node::original_scope` because maven-resolver records it, and `jv-tree`
+> declines to render it because maven-dependency-tree never populates its own
+> copy. Rendering it is not a harmless extra — it annotates *every* node of an
+> ordinary tree, since a scope derived during resolution differs from the
+> declared one on almost every transitive dependency. The oracle harness now
+> compares `-Dverbose` against real Maven, which is what would catch it coming
+> back.
+
 `VerboseJavaScopeSelector` wraps `JavaScopeSelector` unchanged and then computes the widest scope over
 `⋃ item.getScopes()` under the ordering `compile > runtime > provided > test` (any scope not in that
 list sorts as most-preferred, because `indexOf` returns −1); if that widest scope differs from the

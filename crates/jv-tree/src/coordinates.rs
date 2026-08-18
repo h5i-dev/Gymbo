@@ -98,10 +98,17 @@ fn verbose_string(node: &Node, coordinates: &str) -> String {
     if let Some(scope) = node.premanaged.scope {
         notes.push(format!("scope managed from {scope}"));
     }
-    // Conflict resolution's own scope changes, distinct from management's.
-    if let Some(scope) = node.original_scope {
-        notes.push(format!("scope updated from {scope}"));
-    }
+    // `scope updated from <s>` is deliberately *not* rendered, though
+    // `Node::original_scope` carries what it would say.
+    //
+    // maven-resolver sets `NODE_DATA_ORIGINAL_SCOPE` on every conflict winner,
+    // and jv mirrors that faithfully — but what renders `-Dverbose` is
+    // maven-dependency-tree, whose `ConflictData` is built from the winner
+    // version and the reduced scope alone. Nothing ever calls
+    // `setOriginalScope`, so `getOriginalScope()` is always null and the line
+    // is unreachable in real output. `docs/spec/conflict-resolution.md` records
+    // it as dead upstream code; rendering it here put an annotation on every
+    // node of a tree where Maven prints none.
     if let Some(scope) = node.ignored_scope {
         notes.push(format!("scope not updated to {scope}"));
     }
