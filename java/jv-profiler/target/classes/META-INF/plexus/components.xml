@@ -1,0 +1,9 @@
+<component-set>
+  <components>
+    <component>
+      <role>org.apache.maven.eventspy.EventSpy</role>
+      <role-hint>jv-profiler</role-hint>
+      <implementation>dev.jv.profiler.JvProfiler</implementation>
+    </component>
+  </components>
+</component-set>
