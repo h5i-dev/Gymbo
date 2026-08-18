@@ -221,7 +221,9 @@ pub fn sync(
                 version,
             );
             wanted.push(&reactor, artifact.clone());
-            if let Ok(dependencies) = plugin_dependencies(session, &artifact, &Plugin::default()) {
+            if let Ok(dependencies) =
+                plugin_dependencies(session, &artifact, &Plugin::default(), &mut report.warnings)
+            {
                 for dependency in dependencies {
                     wanted.push(&reactor, dependency);
                 }
@@ -246,7 +248,8 @@ pub fn sync(
                 &extension.version,
             );
             wanted.push(&reactor, artifact.clone());
-            match plugin_dependencies(session, &artifact, &Plugin::default()) {
+            match plugin_dependencies(session, &artifact, &Plugin::default(), &mut report.warnings)
+            {
                 Ok(dependencies) => {
                     for dependency in dependencies {
                         wanted.push(&reactor, dependency);
@@ -298,15 +301,21 @@ pub fn sync(
                 wanted.push(&reactor, artifact.clone());
 
                 if request.plugin_dependencies {
-                    for dependency in plugin_dependencies(session, &artifact, &plugin)? {
+                    for dependency in
+                        plugin_dependencies(session, &artifact, &plugin, &mut report.warnings)?
+                    {
                         wanted.push(&reactor, dependency);
                     }
                     // And whatever the plugin will pick for itself at run time,
                     // which is in no POM and which `go-offline` also misses.
                     for extra in runtime_selected(&artifact) {
                         wanted.push(&reactor, extra.clone());
-                        for dependency in plugin_dependencies(session, &extra, &Plugin::default())?
-                        {
+                        for dependency in plugin_dependencies(
+                            session,
+                            &extra,
+                            &Plugin::default(),
+                            &mut report.warnings,
+                        )? {
                             wanted.push(&reactor, dependency);
                         }
                     }
@@ -322,7 +331,9 @@ pub fn sync(
     if selects_providers {
         for launcher in aligned_launchers(&wanted.ordered) {
             wanted.push(&reactor, launcher.clone());
-            for dependency in plugin_dependencies(session, &launcher, &Plugin::default())? {
+            for dependency in
+                plugin_dependencies(session, &launcher, &Plugin::default(), &mut report.warnings)?
+            {
                 wanted.push(&reactor, dependency);
             }
         }
@@ -464,6 +475,52 @@ pub fn sync(
             }
         }
         report.artifacts.push(pom);
+    }
+
+    // The version-list metadata behind every range and `LATEST`.
+    //
+    // Maven re-resolves a range at build time, so a repository holding the jar
+    // a range picked but not the metadata behind it fails offline with "No
+    // versions available … within specified range", naming neither the file nor
+    // the reason. `git-commit-id-maven-plugin` reaching bouncycastle through
+    // `[1.81,1.82)` is how this surfaced.
+    //
+    // The name carries the *effective* repository id, which is the mirror's
+    // when the user has one — the same id `_remote.repositories` records. jv
+    // writes the id it actually fetched from: right whenever `mvn` runs with
+    // the settings `jv sync` ran with, and inert rather than harmful when it
+    // does not, since Maven simply ignores a file it is not looking for.
+    if let Some(local) = &request.local_repository {
+        for (path, repository_id, bytes) in session.source().read_range_metadata() {
+            let Some((directory, _)) = path.rsplit_once('/') else {
+                continue;
+            };
+            let destination = local
+                .join(directory)
+                .join(format!("maven-metadata-{repository_id}.xml"));
+            if destination.exists() {
+                // Maven's own file, if it is there. Never overwritten: this
+                // directory belongs to Maven.
+                continue;
+            }
+            if let Some(parent) = destination.parent()
+                && let Err(error) = std::fs::create_dir_all(parent)
+            {
+                report.warnings.push(format!(
+                    "cannot create {}: {error}; a version range may not resolve offline",
+                    parent.display()
+                ));
+                continue;
+            }
+            if let Err(error) = std::fs::write(&destination, &bytes) {
+                report.warnings.push(format!(
+                    "cannot write {}: {error}; a version range may not resolve offline",
+                    destination.display()
+                ));
+            } else {
+                report.materialized.push(destination);
+            }
+        }
     }
 
     if let Some(local) = &request.local_repository {
@@ -687,6 +744,7 @@ fn plugin_dependencies(
     session: &Session,
     artifact: &Artifact,
     plugin: &Plugin,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<Artifact>, DriverError> {
     let request = CollectRequest {
         root_dependency: Some(Dependency {
@@ -701,11 +759,25 @@ fn plugin_dependencies(
         ..CollectRequest::default()
     };
 
-    // A plugin jv cannot read the descriptor for is not a reason to fail the
-    // sync; the plugin's own jar is already queued, and Maven will report the
-    // real problem when it tries to run it.
-    let Ok(resolution) = session.resolve_request(&request, Verbosity::None) else {
-        return Ok(Vec::new());
+    // A plugin whose dependencies cannot be resolved is not a reason to fail
+    // the whole sync — the plugin's own jar is already queued, and the rest of
+    // the build may never invoke it. It *is* a reason to say so.
+    //
+    // This used to swallow the error and return nothing, on the theory that
+    // Maven would report the real problem later. Maven reports a different
+    // problem: a list of artifacts missing from the local repository, with no
+    // hint that jv failed to resolve them or why. The sync said "synced 3800
+    // artifacts" and looked like a success.
+    let resolution = match session.resolve_request(&request, Verbosity::None) {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            warnings.push(format!(
+                "{}:{}:{}: its dependencies could not be resolved ({error}), so none were \
+                 synced; `mvn -o` will fail when it runs this plugin",
+                artifact.group_id, artifact.artifact_id, artifact.version
+            ));
+            return Ok(Vec::new());
+        }
     };
 
     let graph = &resolution.collected.graph;

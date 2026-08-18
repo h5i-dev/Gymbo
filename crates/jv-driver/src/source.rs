@@ -83,6 +83,9 @@ impl Repositories {
     }
 }
 
+/// Fetched `maven-metadata.xml`, keyed by (repository path, repository id).
+type RangeMetadata = HashMap<(String, String), Vec<u8>>;
+
 /// Reads POMs from repositories and from disk.
 ///
 /// Cloneable and shareable: the caches are behind `Arc`, so a prefetch task and
@@ -105,6 +108,18 @@ pub struct RepositorySource {
     descriptors: Arc<Mutex<HashMap<String, Descriptor>>>,
     /// Version lists by `g:a`, for ranges.
     versions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Artifact-level `maven-metadata.xml` as fetched, by (path, repository id).
+    ///
+    /// Kept so `jv sync` can place it. Maven re-resolves a version range at
+    /// build time and reads this file to do it, so a repository holding the
+    /// jar a range selected but not the metadata behind it fails offline with
+    /// "No versions available … within specified range" — which names neither
+    /// the file nor the reason.
+    ///
+    /// Only the artifact-level file is recorded. Version-level metadata is the
+    /// snapshot case, and `LocalSnapshot` already writes the
+    /// `maven-metadata-local.xml` that Maven accepts from any configuration.
+    range_metadata: Arc<Mutex<RangeMetadata>>,
     /// Resolved timestamped versions by `g:a:baseVersion`.
     snapshots: Arc<Mutex<HashMap<String, String>>>,
     /// POMs of projects loaded from disk, by `g:a:v`. Consulted before any
@@ -170,6 +185,7 @@ impl RepositorySource {
             types: Arc::new(TypeRegistry::default()),
             descriptors: Arc::default(),
             versions: Arc::default(),
+            range_metadata: Arc::default(),
             snapshots: Arc::default(),
             reactor: Arc::default(),
             forced_update: None,
@@ -451,6 +467,16 @@ impl RepositorySource {
     /// taken from the first hit: each repository knows only about the versions it
     /// holds, and a range must see all of them.
     fn metadata(&self, path: &str, version_hint: &str) -> Result<Vec<Metadata>, DriverError> {
+        self.metadata_recording(path, version_hint, false)
+    }
+
+    /// As [`Self::metadata`], optionally keeping the bytes for `jv sync`.
+    fn metadata_recording(
+        &self,
+        path: &str,
+        version_hint: &str,
+        record: bool,
+    ) -> Result<Vec<Metadata>, DriverError> {
         let repositories = self.repositories();
         // All at once, not one after another. This sits on the synchronous
         // critical path — every version range and every snapshot resolution goes
@@ -468,9 +494,38 @@ impl RepositorySource {
 
         let mut found = Vec::new();
         for (repository, fetched) in repositories.iter().zip(fetched) {
-            let Some(fetched) = fetched? else { continue };
+            // An unreachable repository must not stop a resolve the others can
+            // complete — the same rule the corrupt-metadata arm below already
+            // follows, and the one Maven follows.
+            //
+            // This used to propagate. A single dead repository declared by some
+            // transitive POM — `maven.java.net` is the classic, offline for
+            // years and still named in POMs on Central — failed the whole
+            // version-range resolution, which in `jv sync` abandoned every
+            // dependency of the plugin that needed it. The build then failed
+            // offline on a list of artifacts with nothing to connect them to a
+            // repository nobody meant to use.
+            let fetched = match fetched {
+                Ok(fetched) => fetched,
+                Err(error) => {
+                    self.warn(format!(
+                        "{}/{path} could not be read and was ignored: {error}",
+                        repository.url
+                    ));
+                    continue;
+                }
+            };
+            let Some(fetched) = fetched else { continue };
             match parse_metadata(&String::from_utf8_lossy(&fetched.bytes)) {
-                Ok(metadata) => found.push(metadata),
+                Ok(metadata) => {
+                    if record {
+                        self.range_metadata.lock().expect("range metadata").insert(
+                            (path.to_owned(), repository.id.clone()),
+                            fetched.bytes.clone(),
+                        );
+                    }
+                    found.push(metadata);
+                }
                 // Corrupt metadata in one repository must not stop a resolve that
                 // another repository can complete.
                 Err(error) => self.warn(format!(
@@ -519,6 +574,21 @@ impl RepositorySource {
     /// reaches parents and BOMs through the same `ModelSource::get` that fills
     /// this memo — so the memo is exactly the set Maven will look for, and is a
     /// superset of any per-artifact parent walk.
+    /// Artifact-level metadata read during resolution, for `jv sync` to place.
+    ///
+    /// Returned as `(repository path, repository id, bytes)`, where the path
+    /// still ends in `maven-metadata.xml` — the caller renames it to the
+    /// `-<id>` form Maven looks for, because only the caller knows whether it
+    /// is writing into a local repository at all.
+    pub fn read_range_metadata(&self) -> Vec<(String, String, Vec<u8>)> {
+        self.range_metadata
+            .lock()
+            .expect("range metadata")
+            .iter()
+            .map(|((path, id), bytes)| (path.clone(), id.clone(), bytes.clone()))
+            .collect()
+    }
+
     pub fn read_poms(&self) -> Vec<Artifact> {
         self.poms
             .lock()
@@ -666,8 +736,10 @@ impl DescriptorSource for RepositorySource {
             group_id,
             artifact_id,
         };
+        // Recorded: this is the version list a range or `LATEST` resolves
+        // against, and Maven needs the same file to resolve it again offline.
         let metadata = self
-            .metadata(&location.path(), "")
+            .metadata_recording(&location.path(), "", true)
             .map_err(|error| error.to_string())?;
 
         let mut versions: Vec<String> = Vec::new();
