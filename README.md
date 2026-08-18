@@ -8,8 +8,8 @@
   <a href="https://github.com/h5i-dev/jv/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/h5i-dev/jv?style=social"></a>
 </p>
 
-**jv** answers the dependency questions Maven answers — which versions win, what
-the classpath is, what to download — without starting a JVM. It reads your
+**jv** answers the dependency questions Maven answers (which versions win, what
+the classpath is, what to download) without starting a JVM. It reads your
 `pom.xml` and your `~/.m2/settings.xml`, resolves with Maven 3.9's exact rules,
 and shares Maven's local repository.
 
@@ -52,7 +52,7 @@ keeps using `mvn`.
 Median of five warm runs on one project (Jackson, HttpClient 5, Guava, JUnit 5;
 23 nodes), 10-core aarch64 Linux, Maven 3.9.9. Both tools start from an empty
 cache for the cold row. `scripts/benchmark.sh` produces this table, and refuses
-to report a time unless the two tools' output matches first — a benchmark
+to report a time unless the two tools' output matches first: a benchmark
 against wrong output measures nothing. Cold timings are network-bound and will
 differ on your machine; the warm row is the one that reflects the tool.
 
@@ -94,12 +94,12 @@ v0.x targets Linux and macOS; on Windows, use WSL2.
 ## Adopting it
 
 You do not have to adopt jv all at once, and you never have to give up Maven.
-Three steps, in increasing order of commitment — each one useful on its own.
+Three steps, in increasing order of commitment. Each is useful on its own.
 
 ### 1. Replace the commands you use to *look* at dependencies
 
-These only read. They cannot change what your build produces, which makes this
-the step with nothing to weigh up.
+These only read. They cannot change what your build produces, so there is
+nothing to weigh up.
 
 | What you run today | With jv | |
 |---|---|---|
@@ -126,19 +126,19 @@ com.example:demo:jar:1.0
 
 ### 2. Take the download out of your build
 
-`jv sync` populates Maven's local repository with everything the build needs —
+`jv sync` populates Maven's local repository with everything the build needs:
 dependencies, plugins, and the plugins the lifecycle binds for your packaging,
-which are in no POM anywhere. Maven then builds with no network at all:
+which appear in no POM anywhere. Maven then builds with no network at all:
 
 ```bash
 jv sync --recursive     # or just `jv sync` for a single module
-mvn -o verify           # compiles, tests, packages — offline
+mvn -o verify           # compiles, tests, packages, with no network
 ```
 
-This is the change worth making in CI. Dependency download is the slow,
-network-bound, flaky part of a Maven build; `mvn -o` afterwards does no network
+This is the change to make in CI. Dependency download is the slow,
+network-bound part of a Maven build; `mvn -o` afterwards does no network
 I/O, so the build cannot fail because Central had a bad minute. Your POM, your
-plugins, and your build output are untouched — Maven still does all the
+plugins, and your build output are untouched. Maven still does all the
 building.
 
 `jv sync` writes into `~/.m2/repository`, the same place `mvn` does. Use
@@ -147,7 +147,7 @@ jv's own cache and leave Maven's repository alone.
 
 ### 3. Run tools without installing them
 
-`jvx` runs any published JVM tool straight from its coordinates — the `uvx`
+`jvx` runs any published JVM tool straight from its coordinates, on the `uvx`
 model. No install step, no wrapper script, no `<plugin>` block added to a POM
 just to run something once.
 
@@ -159,9 +159,9 @@ jvx org.jacoco:org.jacoco.cli:0.8.12:nodeps -- report --help
 
 The endpoint is `group:artifact[:version[:classifier]][@mainClass]`. Omit the
 version and jv resolves the latest release; everything after `--` goes to the
-tool untouched. The two optional fields are how you reach tools whose jar does
-not advertise itself — a `:classifier` when the runnable artifact sits beside
-the default one, and `@mainClass` when the manifest names no `Main-Class`:
+tool untouched. The two optional fields reach tools whose jar does not
+advertise itself. Use a `:classifier` when the runnable artifact sits beside the
+default one, and `@mainClass` when the manifest names no `Main-Class`:
 
 ```bash
 jvx com.puppycrawl.tools:checkstyle:10.17.0@com.puppycrawl.tools.checkstyle.Main -- --version
@@ -181,11 +181,11 @@ The two steps above, as one action:
 - run: mvn -o verify
 ```
 
-It installs jv, verifies the archive's checksum, caches jv's store keyed by
-your POMs — so a dependency change invalidates the cache and nothing else
-does — and runs `jv sync --recursive`. See [`action.yml`](action.yml). The `v1`
-tag appears with the first release; until then the action can only be used from
-a branch ref.
+It installs jv, verifies the archive's checksum, caches jv's store keyed by your
+POMs, and runs `jv sync --recursive`. Keying on the POMs means a dependency
+change invalidates the cache and nothing else does. See
+[`action.yml`](action.yml). The `v1` tag appears with the first release; until
+then the action can only be used from a branch ref.
 
 ---
 
@@ -197,14 +197,14 @@ a branch ref.
 - **It follows Maven 3.9, not Maven 4.** The two differ in ways that change
   resolved versions. `docs/spec/` records both, and says which one jv follows
   wherever they diverge.
-- **Gradle projects are out of scope** for v0.x — no `build.gradle`, no Gradle
+- **Gradle projects are out of scope** for v0.x: no `build.gradle`, no Gradle
   Module Metadata. A Gradle-built *dependency* resolves fine; its POM is what
   Maven reads too.
 - **`<proxies>` in `settings.xml` is parsed but not yet applied.** Set
   `HTTPS_PROXY`/`NO_PROXY` in the environment, which jv does honour. Mirrors,
   `<servers>` credentials, and profiles work.
-- **No JDK management, and no daemon.** The first is v0.3; the second is the
-  point — a single-shot process fast enough to make a daemon pointless.
+- **No JDK management, and no daemon.** The first lands in v0.2. The second is
+  deliberate: a single-shot process fast enough to make a daemon pointless.
 
 ---
 
@@ -214,10 +214,10 @@ Compatibility *is* the product, so jv is measured against Maven rather than
 against its own expectations:
 
 - `jv tree` matches `mvn dependency:tree` byte for byte on every fixture in the
-  differential harness, each chosen for a resolution behaviour — nearest-wins,
+  differential harness, each chosen for a resolution behaviour (nearest-wins,
   managed transitives, BOM imports, exclusions, the scope matrix, optional
-  dependencies, conflict ordering — in all five output formats, and again
-  under `-Dverbose`, which keeps the losers and annotates the survivors.
+  dependencies, conflict ordering) in all five output formats, and again under
+  `-Dverbose`, which keeps the losers and annotates the survivors.
 - And on real projects nobody wrote for jv's benefit: `scripts/ring3.sh` diffs
   every module of spring-petclinic, dropwizard, jackson-databind, commons-lang
   and maven-dependency-plugin at pinned commits. 46 modules, 0 differing.
@@ -225,14 +225,14 @@ against its own expectations:
   jv populated and nothing else.
 - `jvx` launches eleven real published tools, and refuses the nine libraries
   among them with a message naming why.
-- Version ordering agrees with maven-resolver's own `GenericVersion` — compiled
-  from source and driven as an oracle — across 50,862 generated inputs.
+- Version ordering agrees with maven-resolver's own `GenericVersion`, compiled
+  from source and driven as an oracle, across 50,862 generated inputs.
 - Effective POMs match `mvn help:effective-pom` from Maven 3.9.9 exactly.
 - The POM parser reads every POM in the Maven, maven-resolver and
   maven-dependency-plugin repositories.
 
-Where jv has no Maven command to compare against — `jv resolve`'s line format,
-`jvx`'s endpoint syntax — it is tested against transcribed upstream corpora
+Where jv has no Maven command to compare against (`jv resolve`'s line format,
+`jvx`'s endpoint syntax), it is tested against transcribed upstream corpora
 instead, and the tests say which of the two they are.
 
 ---
@@ -250,9 +250,9 @@ instead, and the tests say which of the two they are.
 | `jv-driver` sync | `jv sync` — populate `~/.m2` so `mvn -o` works | ✅ |
 | `jv-exec` | `jvx` — run a tool from its coordinates | ✅ |
 
-Next: a lockfile, then JDK management. [`ROADMAP.md`](ROADMAP.md) holds the
-architecture and the milestones; [`docs/development.md`](docs/development.md)
-explains how to run the tests.
+Next: `jv add`, a lockfile, then JDK management. [`ROADMAP.md`](ROADMAP.md)
+holds the architecture and the milestones;
+[`docs/development.md`](docs/development.md) explains how to run the tests.
 
 ---
 
