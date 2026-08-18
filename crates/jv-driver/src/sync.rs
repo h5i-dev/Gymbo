@@ -95,6 +95,7 @@ use jv_model::{Artifact, Dependency, Plugin, Scope, is_snapshot_version};
 use jv_resolver::{CollectRequest, Verbosity};
 
 use crate::error::DriverError;
+use crate::plugin_memo::{PluginMemo, Remembered};
 use crate::project::Project;
 use crate::session::Session;
 use crate::snapshot::LocalSnapshot;
@@ -203,6 +204,29 @@ pub fn sync(
     // execution time.
     let mut selects_reports = false;
 
+    // The repository set the plugin memo is keyed on, read before the crawler
+    // below is pointed at anything.
+    //
+    // Repositories accumulate: a dependency's POM can declare one, and the
+    // crawler registers those from background tasks. Reading the list after
+    // that has started would fingerprint a set that depends on how far the
+    // crawl happened to get, which varies between runs — and a key that varies
+    // between runs is a memo that never hits, silently and without ever being
+    // wrong enough to notice. Read here it is the settings, the super POM's
+    // Central and whatever the projects themselves declared, all of which are
+    // fixed before this function is called.
+    let memo = PluginMemo::new(
+        session.source().cache_root(),
+        &session
+            .source()
+            .repositories()
+            .iter()
+            .map(|repository| repository.url.clone())
+            .collect::<Vec<_>>(),
+        session.source().forced_update(),
+        session.source().is_offline(),
+    );
+
     // Point the POM crawler at every plugin before anything is resolved.
     //
     // The crawler is otherwise seeded only from dependencies, so plugin POM
@@ -244,7 +268,7 @@ pub fn sync(
     // nothing but a transitive dependency's POM mentions. No corpus project
     // does that, but "no corpus project does" is not "cannot happen".
     let closures = if request.plugins && request.plugin_dependencies {
-        plugin_closures(session, projects, request)?
+        plugin_closures(session, projects, request, &memo)?
     } else {
         HashMap::new()
     };
@@ -306,7 +330,15 @@ pub fn sync(
             // build, so a missing dependency here fails `mvn -o` before it
             // reaches anything a dependency graph could explain — and the
             // `.mvn/extensions.xml` path below has always said so.
-            match plugin_dependencies(session, &artifact, &Plugin::default(), &mut report.warnings)
+            match plugin_dependencies(
+                session,
+                &artifact,
+                &Plugin::default(),
+                &mut report.warnings,
+                // Not memoised: these are resolved once per sync, not once per
+                // plugin per module, so there is nothing here to save.
+                &mut true,
+            )
             {
                 Ok(dependencies) => {
                     for dependency in dependencies {
@@ -340,7 +372,15 @@ pub fn sync(
                 &extension.version,
             );
             wanted.push(&reactor, artifact.clone());
-            match plugin_dependencies(session, &artifact, &Plugin::default(), &mut report.warnings)
+            match plugin_dependencies(
+                session,
+                &artifact,
+                &Plugin::default(),
+                &mut report.warnings,
+                // Not memoised: these are resolved once per sync, not once per
+                // plugin per module, so there is nothing here to save.
+                &mut true,
+            )
             {
                 Ok(dependencies) => {
                     for dependency in dependencies {
@@ -481,6 +521,7 @@ pub fn sync(
                     &reports_plugin,
                     &Plugin::default(),
                     &mut report.warnings,
+                    &mut true,
                 )? {
                     wanted.push(&reactor, dependency);
                 }
@@ -497,7 +538,7 @@ pub fn sync(
         for launcher in aligned_launchers(&wanted.ordered) {
             wanted.push(&reactor, launcher.clone());
             for dependency in
-                plugin_dependencies(session, &launcher, &Plugin::default(), &mut report.warnings)?
+                plugin_dependencies(session, &launcher, &Plugin::default(), &mut report.warnings, &mut true)?
             {
                 wanted.push(&reactor, dependency);
             }
@@ -1080,6 +1121,7 @@ fn plugin_closures(
     session: &Session,
     projects: &[&Project],
     request: &SyncRequest,
+    memo: &PluginMemo,
 ) -> Result<HashMap<ClosureKey, PluginClosure>, DriverError> {
     use rayon::prelude::*;
 
@@ -1105,24 +1147,58 @@ fn plugin_closures(
 
     work.into_par_iter()
         .map(|(key, artifact, plugin)| {
+            // A remembered closure skips the resolve entirely, which is the
+            // whole point: the resolve is the cost. It carries no warnings
+            // because only a clean resolve is ever written down.
+            if let Some(remembered) = memo.get(&memo_key(&key)) {
+                return Ok((
+                    key,
+                    PluginClosure {
+                        dependencies: remembered.dependencies,
+                        extras: remembered.extras,
+                        warnings: Vec::new(),
+                    },
+                ));
+            }
+
             let mut warnings = Vec::new();
-            let dependencies = plugin_dependencies(session, &artifact, &plugin, &mut warnings)?;
+            let mut clean = true;
+            let dependencies =
+                plugin_dependencies(session, &artifact, &plugin, &mut warnings, &mut clean)?;
             let mut extras = Vec::new();
             for extra in runtime_selected(&artifact) {
-                let dependencies =
-                    plugin_dependencies(session, &extra, &Plugin::default(), &mut warnings)?;
+                let dependencies = plugin_dependencies(
+                    session,
+                    &extra,
+                    &Plugin::default(),
+                    &mut warnings,
+                    &mut clean,
+                )?;
                 extras.push((extra, dependencies));
             }
-            Ok((
-                key,
-                PluginClosure {
-                    dependencies,
-                    extras,
-                    warnings,
+
+            let closure = PluginClosure {
+                dependencies,
+                extras,
+                warnings,
+            };
+            memo.put(
+                &memo_key(&key),
+                &Remembered {
+                    dependencies: closure.dependencies.clone(),
+                    extras: closure.extras.clone(),
                 },
-            ))
+                clean && closure.warnings.is_empty(),
+            );
+            Ok((key, closure))
         })
         .collect()
+}
+
+/// The key in the form the memo takes, which is a string rather than a tuple.
+fn memo_key(key: &ClosureKey) -> String {
+    let (group_id, artifact_id, version, dependencies) = key;
+    format!("{group_id}:{artifact_id}:{version}|{dependencies}")
 }
 
 fn plugin_dependencies(
@@ -1130,6 +1206,7 @@ fn plugin_dependencies(
     artifact: &Artifact,
     plugin: &Plugin,
     warnings: &mut Vec<String>,
+    clean: &mut bool,
 ) -> Result<Vec<Artifact>, DriverError> {
     let request = CollectRequest {
         root_dependency: Some(Dependency {
@@ -1161,9 +1238,19 @@ fn plugin_dependencies(
                  synced; `mvn -o` will fail when it runs this plugin",
                 artifact.group_id, artifact.artifact_id, artifact.version
             ));
+            *clean = false;
             return Ok(Vec::new());
         }
     };
+
+    // A graph with an unreadable descriptor in it is missing whatever that POM
+    // would have contributed. Maven tolerates it and so does jv, but it is not
+    // an answer to write down: remembering it would repeat the gap on every
+    // later run, and silently, because the run that reads the memo does no
+    // resolving and so has nothing to warn about.
+    if !resolution.collected.missing_descriptors.is_empty() {
+        *clean = false;
+    }
 
     let graph = &resolution.collected.graph;
     let mut artifacts = Vec::new();

@@ -33,6 +33,7 @@
 //! in `ROADMAP.md` rather than hidden here.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use jv_cache::{Fetcher, Origin};
@@ -289,6 +290,21 @@ impl RepositorySource {
     }
 
     /// The repositories currently known, in the order they are consulted.
+    /// Where jv's own cache lives, for callers that keep something alongside it.
+    pub fn cache_root(&self) -> &Path {
+        self.fetcher.store().root()
+    }
+
+    /// Whether repositories will be contacted at all.
+    pub fn is_offline(&self) -> bool {
+        self.fetcher.is_offline()
+    }
+
+    /// The update policy forced over every repository, as `-U` does.
+    pub fn forced_update(&self) -> Option<jv_repo::UpdatePolicy> {
+        self.forced_update
+    }
+
     pub fn repositories(&self) -> Vec<Repository> {
         self.repositories
             .lock()

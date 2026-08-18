@@ -469,6 +469,60 @@ that captures only the dependency tree would leave 95% of the warm cost in
 place. Correctness and supply-chain auditability are still the headline reasons
 to build it — this is the reason it also makes `jv sync` fast.
 
+**Done, as a cache rather than a lockfile** (`jv-driver/src/plugin_memo.rs`).
+Closures are remembered between runs in jv's cache, keyed on the plugin's
+coordinates, its `<dependencies>` block and the repository set. Expiry reuses
+`UpdatePolicy` rather than inventing a second notion of stale, so a remembered
+closure can never be staler than what Maven's own daily metadata check would
+have used, and `-U` bypasses it. Degraded resolves are never written: a cached
+warning is a warning that never prints again, because the run that reads the
+memo does no work.
+
+    warm sync, offline, alternated, medians
+                        this morning   parallel   +memo
+    commons-io                 368ms      213ms    99ms   3.72x
+    dropwizard  (38 mod)      1724ms      854ms   775ms   2.22x
+    log4j2      (37 mod)      2029ms      772ms   638ms   3.18x
+    surefire    (15 mod)       711ms      232ms   216ms   3.29x
+    maven-resolver (15 mod)    649ms      216ms   169ms   3.84x
+    byte-buddy  (15 mod)       641ms      206ms   150ms   4.27x
+
+The lockfile itself is still worth building for the reasons it was always worth
+building; it no longer has to carry the performance argument alone.
+
+What is left in a warm sync is placement — which is what §3.12 is for.
+
+### 3.12 Store the artifacts where Maven reads them (v0.2)
+
+jv keeps a URL-keyed store and then materialises it into `~/.m2` so Maven can
+read it. Maven's cache *is* the repository it reads, so on a warm run Maven has
+no prepare step at all and jv has one. That is a structural disadvantage no
+amount of optimisation removes.
+
+It is a remapping rather than a rewrite. The store path is already the
+repository base followed by the Maven layout path:
+
+    store:  cache/https/repo.maven.apache.org/maven2/  commons-io/commons-io/2.16.1/commons-io-2.16.1.jar
+    m2:                                        ~/.m2/  commons-io/commons-io/2.16.1/commons-io-2.16.1.jar
+
+so `path_for` changes from "scheme/host/path" to "strip the repository base,
+root at the local repository", and the materialisation pass disappears. Four
+things need care:
+
+- **Two repositories serving one GAV.** Maven layout holds one, with
+  `_remote.repositories` recording which — a file jv already writes. jv can
+  currently represent a state Maven cannot, and collapses it during
+  materialisation anyway.
+- **`maven-metadata.xml`** becomes repo-qualified (`maven-metadata-<id>.xml`),
+  which is Maven's own scheme.
+- **Negative caching and freshness** move from URL-keyed sidecars to Maven's
+  `.lastUpdated` markers, which improves `mvn -U` interop.
+- **`jvx --no-local-repository`** points at a scratch Maven-layout directory.
+
+Beyond the prepare step, this halves what CI caches: a runner currently restores
+jv's store *and* a materialised local repository, two trees holding the same
+bytes.
+
 ### 3.11 POM mutation (`jv-edit`, v0.2)
 
 `jv add`, `jv remove`, `jv upgrade`, `jv outdated`.

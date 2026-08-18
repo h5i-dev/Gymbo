@@ -119,6 +119,15 @@ impl Fetcher {
         self
     }
 
+    /// Whether this fetcher will refuse to contact a repository.
+    ///
+    /// Read by callers that cache a *derived* answer rather than bytes: nothing
+    /// upstream can change while offline, so a remembered answer cannot go
+    /// stale.
+    pub fn is_offline(&self) -> bool {
+        self.offline
+    }
+
     pub fn store(&self) -> &Store {
         &self.store
     }
