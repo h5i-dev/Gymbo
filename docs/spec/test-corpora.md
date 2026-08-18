@@ -9,7 +9,7 @@ test corpora without reading the Java.
 |---|---|
 | Upstream | [Apache Maven Resolver](https://github.com/apache/maven-resolver) |
 | License | Apache License 2.0 (corpus files and the Java described here are ASF-licensed) |
-| Local clone | `/home/koukyosyumei/Dev/jv/_reference/maven-resolver` |
+| Local clone | `_reference/maven-resolver` |
 | Clone commit | `ed4a939a850b73d9a85722c277da9de14b64f1e0` |
 
 Java sources this document was derived from (paths relative to the clone root):

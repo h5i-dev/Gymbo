@@ -6,8 +6,8 @@
 >
 > | Clone | Commit |
 > |---|---|
-> | `/home/koukyosyumei/Dev/jv/_reference/maven-resolver` | `ed4a939a850b73d9a85722c277da9de14b64f1e0` |
-> | `/home/koukyosyumei/Dev/jv/_reference/maven` | `945813a7d4d91f32fe92d2c5a81d0a8223bc10b9` |
+> | `_reference/maven-resolver` | `ed4a939a850b73d9a85722c277da9de14b64f1e0` |
+> | `_reference/maven` | `945813a7d4d91f32fe92d2c5a81d0a8223bc10b9` |
 >
 > Primary sources (paths relative to the `maven-resolver` clone root unless marked otherwise):
 >
