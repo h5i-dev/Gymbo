@@ -87,7 +87,7 @@
 //! that directory belongs to Maven, and a file already there is Maven's answer,
 //! not jv's to correct.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use jv_model::toolchains::{self, Toolchains};
@@ -217,6 +217,37 @@ pub fn sync(
             .collect();
         session.source().prefetch_artifacts(plugins);
     }
+
+    // Every plugin's dependency closure, resolved before the loop that orders
+    // them.
+    //
+    // Each closure is its own `resolve_request`, and on a warm cache they are
+    // where a sync spends nearly all of its time. Measured on commons-io with
+    // both the store and the local repository already populated: 442ms of a
+    // 466ms sync, against 18ms to resolve the project's own dependency tree and
+    // 35ms to place 5,602 files. They were resolved one plugin at a time, and
+    // no closure depends on another, so they are resolved together here.
+    //
+    // The loop below stays sequential and reads the answers rather than
+    // computing them. That is deliberate: `_remote.repositories` and the
+    // snapshot metadata both depend on the order artifacts are pushed, so the
+    // ordering has to come out exactly as it did before even though the work it
+    // was interleaved with did not have to.
+    //
+    // One real change, worth stating rather than discovering later: closures
+    // used to resolve *after* the project whose loop iteration they sat in had
+    // its dependency graph collected, so they could see repositories that a
+    // dependency's POM declared along the way (`Trust::Untrusted`). They now
+    // resolve before any of that. A project's own repositories are unaffected —
+    // `load_project` registers those before this function is called — so this
+    // only bites a plugin whose dependencies live solely in a repository that
+    // nothing but a transitive dependency's POM mentions. No corpus project
+    // does that, but "no corpus project does" is not "cannot happen".
+    let closures = if request.plugins && request.plugin_dependencies {
+        plugin_closures(session, projects, request)?
+    } else {
+        HashMap::new()
+    };
 
     // Toolchains: not downloadable, but checkable. A missing one fails the
     // build long after the sync reported success, with an error that does not
@@ -371,22 +402,23 @@ pub fn sync(
                 };
 
                 if request.plugin_dependencies && closure {
-                    for dependency in
-                        plugin_dependencies(session, &artifact, &plugin, &mut report.warnings)?
-                    {
-                        wanted.push(&reactor, dependency);
-                    }
-                    // And whatever the plugin will pick for itself at run time,
-                    // which is in no POM and which `go-offline` also misses.
-                    for extra in runtime_selected(&artifact) {
-                        wanted.push(&reactor, extra.clone());
-                        for dependency in plugin_dependencies(
-                            session,
-                            &extra,
-                            &Plugin::default(),
-                            &mut report.warnings,
-                        )? {
-                            wanted.push(&reactor, dependency);
+                    // Resolved above, in parallel. The warnings are replayed
+                    // per declaration rather than per distinct closure, so a
+                    // plugin forty modules declare still reports forty times —
+                    // which is what it did when each of the forty resolved it.
+                    if let Some(resolved) = closures.get(&closure_key(&artifact, &plugin)) {
+                        report.warnings.extend(resolved.warnings.iter().cloned());
+                        for dependency in &resolved.dependencies {
+                            wanted.push(&reactor, dependency.clone());
+                        }
+                        // And whatever the plugin will pick for itself at run
+                        // time, which is in no POM and which `go-offline` also
+                        // misses.
+                        for (extra, dependencies) in &resolved.extras {
+                            wanted.push(&reactor, extra.clone());
+                            for dependency in dependencies {
+                                wanted.push(&reactor, dependency.clone());
+                            }
                         }
                     }
                     selects_providers |= selects_providers_for(&artifact);
@@ -1007,6 +1039,92 @@ fn plugin_artifact(plugin: &Plugin) -> Option<Artifact> {
 /// `<dependencies>` the POM added to it.
 ///
 /// Resolved at runtime scope, which is what a plugin classloader gets.
+/// A plugin's resolved dependency closure, and what resolving it had to say.
+#[derive(Debug, Default)]
+struct PluginClosure {
+    /// The plugin's own transitive dependencies, compile and runtime scope.
+    dependencies: Vec<Artifact>,
+    /// What the plugin selects for itself at run time, each with its own
+    /// closure — Surefire's providers, which appear in no POM.
+    extras: Vec<(Artifact, Vec<Artifact>)>,
+    /// Replayed once per declaration by the caller, not once per closure.
+    warnings: Vec<String>,
+}
+
+/// What makes two plugin closures the same piece of work.
+///
+/// The coordinates alone are not enough: `<plugin><dependencies>` adds to or
+/// replaces what the plugin declares, which is how a project pins a JDBC driver
+/// or a compiler, so two plugins at the same version can resolve differently.
+type ClosureKey = (String, String, String, String);
+
+fn closure_key(artifact: &Artifact, plugin: &Plugin) -> ClosureKey {
+    (
+        artifact.group_id.clone(),
+        artifact.artifact_id.clone(),
+        artifact.version.clone(),
+        // A structural fingerprint of the block, which is cheaper to write than
+        // a hand-rolled hash and does not have to be stable across versions:
+        // nothing outside this run reads it.
+        format!("{:?}", plugin.dependencies),
+    )
+}
+
+/// Resolves every distinct plugin closure in the build, in parallel.
+///
+/// Two savings, and the second is the larger one on a real project. Closures no
+/// longer run one after another, and a plugin that many modules declare the same
+/// way is resolved once instead of once per module — a fifty-module reactor
+/// declares much the same dozen plugins fifty times over.
+fn plugin_closures(
+    session: &Session,
+    projects: &[&Project],
+    request: &SyncRequest,
+) -> Result<HashMap<ClosureKey, PluginClosure>, DriverError> {
+    use rayon::prelude::*;
+
+    // Distinct work only, gathered in declaration order so that a run is
+    // reproducible even though the resolves themselves finish in any order.
+    let mut work: Vec<(ClosureKey, Artifact, Plugin)> = Vec::new();
+    let mut seen: HashSet<ClosureKey> = HashSet::new();
+    for project in projects {
+        for (plugin, origin) in project_plugins(project) {
+            let closure = match origin {
+                PluginOrigin::Declared => true,
+                PluginOrigin::Managed => request.managed_plugin_dependencies,
+            };
+            let Some(artifact) = plugin_artifact(&plugin).filter(|_| closure) else {
+                continue;
+            };
+            let key = closure_key(&artifact, &plugin);
+            if seen.insert(key.clone()) {
+                work.push((key, artifact, plugin));
+            }
+        }
+    }
+
+    work.into_par_iter()
+        .map(|(key, artifact, plugin)| {
+            let mut warnings = Vec::new();
+            let dependencies = plugin_dependencies(session, &artifact, &plugin, &mut warnings)?;
+            let mut extras = Vec::new();
+            for extra in runtime_selected(&artifact) {
+                let dependencies =
+                    plugin_dependencies(session, &extra, &Plugin::default(), &mut warnings)?;
+                extras.push((extra, dependencies));
+            }
+            Ok((
+                key,
+                PluginClosure {
+                    dependencies,
+                    extras,
+                    warnings,
+                },
+            ))
+        })
+        .collect()
+}
+
 fn plugin_dependencies(
     session: &Session,
     artifact: &Artifact,
@@ -1195,6 +1313,37 @@ mod tests {
             path: PathBuf::from("pom.xml"),
             modules: Vec::new(),
         }
+    }
+
+    #[test]
+    fn one_closure_per_distinct_plugin_declaration() {
+        // The saving: forty modules declaring the same plugin the same way is
+        // one closure, not forty.
+        let same = plugin(None, "maven-compiler-plugin", Some("3.13.0"));
+        let artifact = plugin_artifact(&same).expect("a versioned plugin");
+        assert_eq!(closure_key(&artifact, &same), closure_key(&artifact, &same));
+    }
+
+    #[test]
+    fn a_plugins_own_dependencies_make_it_a_different_closure() {
+        // The trap the key exists to avoid. `<plugin><dependencies>` is how a
+        // project pins a JDBC driver or a compiler under an otherwise identical
+        // plugin, so two declarations at the same version can resolve to
+        // different closures. Keying on coordinates alone would hand the second
+        // module the first one's answer.
+        let plain = plugin(None, "maven-compiler-plugin", Some("3.13.0"));
+        let mut pinned = plain.clone();
+        pinned.dependencies = vec![Dependency {
+            group_id: "org.postgresql".to_owned(),
+            artifact_id: "postgresql".to_owned(),
+            version: Some("42.7.3".to_owned()),
+            ..Dependency::default()
+        }];
+        let artifact = plugin_artifact(&plain).expect("a versioned plugin");
+        assert_ne!(
+            closure_key(&artifact, &plain),
+            closure_key(&artifact, &pinned)
+        );
     }
 
     #[test]

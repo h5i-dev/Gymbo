@@ -446,6 +446,29 @@ supply-chain-security story (its own blog post). Design:
 - Prior art to read: yummy `ym-lock.json` + `src/workspace/lockfile_diff.rs`;
   coursier `ArtifactsLock.scala`; uv's lockfile docs for UX conventions.
 
+**Lock the plugin closures, not just the dependency tree.** The speed argument
+for a lockfile is usually "skip resolution", and on jv that argument is close to
+worthless: resolving commons-io's own dependency tree from a warm cache takes
+18ms. Where a warm sync actually goes, measured with both the store and the
+local repository populated:
+
+    plugin closures   442ms    95%
+    placing files      35ms
+    dependency tree    18ms
+
+Each plugin gets its own full `resolve_request`, and a reactor resolves the same
+plugin once per module. Resolving them in parallel and collapsing identical
+declarations took warm sync to 1.85x–3.40x (commons-io 420→213ms, log4j2
+2100→795ms, surefire 735→216ms) with byte-identical output trees — so the
+remaining warm cost is *still* plugin closures, roughly 190ms of a 213ms sync.
+
+A closure is a pure function of the plugin's coordinates and its
+`<plugin><dependencies>` block, which is exactly what a lockfile can record. So
+the lockfile's performance case is memoising plugin closures across runs; a lock
+that captures only the dependency tree would leave 95% of the warm cost in
+place. Correctness and supply-chain auditability are still the headline reasons
+to build it — this is the reason it also makes `jv sync` fast.
+
 ### 3.11 POM mutation (`jv-edit`, v0.2)
 
 `jv add`, `jv remove`, `jv upgrade`, `jv outdated`.

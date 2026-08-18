@@ -339,8 +339,17 @@ impl RepositorySource {
     }
 
     /// Everything worth telling the user that did not stop the resolve.
+    ///
+    /// Sorted, because the order they were discovered in is not stable: plugin
+    /// closures resolve in parallel, so which thread first reads the POM that
+    /// declares a blocked repository varies from run to run. Two identical runs
+    /// were printing the same warnings in three different orders, which turns
+    /// every CI log comparison into noise. Sorting also groups warnings of the
+    /// same kind, since they share a prefix.
     pub fn warnings(&self) -> Vec<String> {
-        self.warnings.lock().expect("warnings").clone()
+        let mut warnings = self.warnings.lock().expect("warnings").clone();
+        warnings.sort();
+        warnings
     }
 
     /// The build context profile activation and interpolation run against.
