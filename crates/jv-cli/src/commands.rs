@@ -11,7 +11,7 @@ use jv_resolver::{Graph, Verbosity};
 use jv_tree::{Format, Options, render};
 use owo_colors::OwoColorize;
 
-use crate::args::{CommonArgs, ProfileArgs, ResolveArgs, SyncArgs, TreeArgs};
+use crate::args::{AddArgs, CommonArgs, ProfileArgs, ResolveArgs, SyncArgs, TreeArgs};
 
 /// Builds the driver config the flags describe.
 pub(crate) fn config(common: &CommonArgs) -> Config {
@@ -464,6 +464,142 @@ fn profiler_jar(given: Option<PathBuf>) -> Result<PathBuf> {
          --profiler-jar or $JV_PROFILER_JAR at it. Looked in:\n  {}",
         tried.join("\n  ")
     )
+}
+
+
+/// Adds a dependency to a POM.
+///
+/// The edit itself is `jv-edit`'s problem — it rewrites one span and copies the
+/// rest byte for byte. What is decided here is *what to write*, and the part
+/// that matters is the version.
+pub fn add(args: &AddArgs) -> Result<()> {
+    let (group_id, artifact_id, given_version) = split_coordinates(&args.coordinates)?;
+
+    let config = config(&args.common);
+    let session = Session::new(&config)?;
+    let root = project(&session, args.file.as_deref())?;
+    let target = match &args.module {
+        Some(module) => root
+            .reactor()
+            .into_iter()
+            .find(|project| project.model.artifact_id.as_deref() == Some(module.as_str()))
+            .with_context(|| {
+                format!(
+                    "no module named {module}; this build has: {}",
+                    root.reactor()
+                        .iter()
+                        .filter_map(|project| project.model.artifact_id.as_deref())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?,
+        None => &root,
+    };
+
+    let version = match given_version {
+        Some(version) => Some(version),
+        // Managed already — by `<dependencyManagement>`, or by a BOM the
+        // project imported. Writing a version here would pin what the project
+        // deliberately left for its management to decide, and quietly diverge
+        // from every other module the next time the BOM moves. This is the
+        // single behaviour that decides whether a tool like this is trusted.
+        None if managed(target, &group_id, &artifact_id) => {
+            eprintln!(
+                "{} {group_id}:{artifact_id} is already managed; adding it without a version",
+                "note:".cyan()
+            );
+            None
+        }
+        None => Some(newest_release(&session, &group_id, &artifact_id)?),
+    };
+
+    let dependency = jv_edit::Dependency {
+        group_id: group_id.clone(),
+        artifact_id: artifact_id.clone(),
+        version,
+        scope: if args.test {
+            Some("test".to_owned())
+        } else {
+            args.scope.clone()
+        },
+        classifier: args.classifier.clone(),
+        type_: args.type_.clone(),
+        optional: args.optional,
+    };
+
+    let before = std::fs::read_to_string(&target.path)
+        .with_context(|| format!("cannot read {}", target.path.display()))?;
+    match jv_edit::add_dependency(&before, &dependency)? {
+        jv_edit::Added::AlreadyPresent { line, version } => {
+            let declared = version.unwrap_or_else(|| "no version".to_owned());
+            println!(
+                "{group_id}:{artifact_id} is already a dependency ({} at {}:{line}); nothing to do",
+                declared,
+                target.path.display()
+            );
+        }
+        jv_edit::Added::Inserted(after) if args.dry_run => {
+            print!("{after}");
+        }
+        jv_edit::Added::Inserted(after) => {
+            std::fs::write(&target.path, &after)
+                .with_context(|| format!("cannot write {}", target.path.display()))?;
+            let shown = dependency
+                .version
+                .as_deref()
+                .map_or_else(String::new, |version| format!(":{version}"));
+            println!(
+                "added {group_id}:{artifact_id}{shown} to {}",
+                target.path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Splits `group:artifact` or `group:artifact:version`.
+fn split_coordinates(text: &str) -> Result<(String, String, Option<String>)> {
+    let parts: Vec<&str> = text.split(':').collect();
+    let (group_id, artifact_id, version) = match parts.as_slice() {
+        [group, artifact] => (*group, *artifact, None),
+        [group, artifact, version] => (*group, *artifact, Some((*version).to_owned())),
+        _ => bail!("expected group:artifact or group:artifact:version, got {text}"),
+    };
+    if group_id.is_empty() || artifact_id.is_empty() {
+        bail!("{text}: neither the group nor the artifact may be empty");
+    }
+    Ok((group_id.to_owned(), artifact_id.to_owned(), version))
+}
+
+/// Whether the project already manages a version for these coordinates.
+///
+/// Read from the *effective* model, so a version supplied by a parent or by an
+/// imported BOM counts, which is the whole point — those are exactly the cases
+/// a raw read of this one POM would miss.
+fn managed(project: &Project, group_id: &str, artifact_id: &str) -> bool {
+    project
+        .model
+        .dependency_management
+        .iter()
+        .any(|managed| {
+            managed.group_id == group_id
+                && managed.artifact_id == artifact_id
+                && managed.version.is_some()
+        })
+}
+
+/// The newest released version, as Maven would pick it for `RELEASE`.
+fn newest_release(session: &Session, group_id: &str, artifact_id: &str) -> Result<String> {
+    session
+        .source()
+        .plugin_version(group_id, artifact_id)
+        .with_context(|| format!("cannot read the versions of {group_id}:{artifact_id}"))?
+        .with_context(|| {
+            format!(
+                "{group_id}:{artifact_id} has no released version in any configured repository; \
+                 give one explicitly as {group_id}:{artifact_id}:VERSION"
+            )
+        })
 }
 
 #[cfg(test)]

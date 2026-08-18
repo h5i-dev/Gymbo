@@ -26,6 +26,7 @@ path = "src/jvx.rs"
 [dependencies]
 jv-cache = { workspace = true }
 jv-driver = { workspace = true }
+jv-edit = { workspace = true }
 jv-exec = { workspace = true }
 jv-model = { workspace = true }
 jv-repo = { workspace = true }

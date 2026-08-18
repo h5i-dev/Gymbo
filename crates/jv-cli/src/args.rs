@@ -31,6 +31,55 @@ pub enum Command {
     Sync(SyncArgs),
     /// Report where a Maven build spends its time.
     Profile(ProfileArgs),
+    /// Add a dependency to a POM.
+    Add(AddArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AddArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// The dependency, as `group:artifact` or `group:artifact:version`.
+    ///
+    /// With no version, jv writes none if the project already manages one —
+    /// through `<dependencyManagement>` or an imported BOM — and otherwise
+    /// resolves the newest release from the repository.
+    #[arg(value_name = "COORDINATES")]
+    pub coordinates: String,
+
+    /// The pom.xml to edit. Defaults to the nearest one at or above the working
+    /// directory.
+    #[arg(short = 'f', long = "file", value_name = "POM")]
+    pub file: Option<PathBuf>,
+
+    /// Add to this module of a multi-module build, by artifact id.
+    #[arg(short = 'm', long, value_name = "MODULE")]
+    pub module: Option<String>,
+
+    /// `<scope>` to declare. `--test` is shorthand for `--scope test`.
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+
+    /// Shorthand for `--scope test`.
+    #[arg(long, conflicts_with = "scope")]
+    pub test: bool,
+
+    /// `<classifier>` to declare.
+    #[arg(long, value_name = "CLASSIFIER")]
+    pub classifier: Option<String>,
+
+    /// `<type>` to declare, such as `pom` or `test-jar`.
+    #[arg(long = "type", value_name = "TYPE")]
+    pub type_: Option<String>,
+
+    /// Mark the dependency `<optional>`.
+    #[arg(long)]
+    pub optional: bool,
+
+    /// Print the edited POM instead of writing it.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]

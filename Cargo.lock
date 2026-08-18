@@ -871,6 +871,7 @@ dependencies = [
  "clap",
  "jv-cache",
  "jv-driver",
+ "jv-edit",
  "jv-exec",
  "jv-model",
  "jv-repo",
@@ -898,6 +899,15 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "jv-edit"
+version = "0.1.0-dev"
+dependencies = [
+ "jv-model",
+ "quick-xml",
+ "thiserror",
 ]
 
 [[package]]

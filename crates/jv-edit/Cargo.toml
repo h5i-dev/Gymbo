@@ -1,0 +1,18 @@
+[package]
+name = "jv-edit"
+description = "Editing POMs without reformatting them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+jv-model = { workspace = true }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
