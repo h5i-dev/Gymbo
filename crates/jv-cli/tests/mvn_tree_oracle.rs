@@ -226,13 +226,26 @@ impl Fixture {
 /// `json` arrived in maven-dependency-plugin 3.7.0 — 3.6.1 silently falls back
 /// to text for an unknown `-DoutputType`, which is the behaviour jv's own
 /// `Format::from_str` deliberately refuses to copy.
-const FORMATS: &[(&str, Comparison)] = &[
-    ("text", Comparison::Bytes),
-    ("dot", Comparison::Bytes),
-    ("json", Comparison::Bytes),
-    ("tgf", Comparison::ModuloNodeIds),
-    ("graphml", Comparison::ModuloNodeIds),
+const FORMATS: &[(&str, Comparison, Verbose)] = &[
+    ("text", Comparison::Bytes, Verbose::No),
+    ("dot", Comparison::Bytes, Verbose::No),
+    ("json", Comparison::Bytes, Verbose::No),
+    ("tgf", Comparison::ModuloNodeIds, Verbose::No),
+    ("graphml", Comparison::ModuloNodeIds, Verbose::No),
+    // `-Dverbose` is a separate renderer, not a flag on the one above: it keeps
+    // the losers in the tree and annotates what conflict resolution did to the
+    // survivors. It went uncompared until a hand-check found jv annotating
+    // every node with "(scope updated from compile)" where Maven annotates
+    // none, so it is in the matrix now.
+    ("text", Comparison::Bytes, Verbose::Yes),
 ];
+
+/// Whether to ask both tools for the verbose rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verbose {
+    No,
+    Yes,
+}
 
 /// How exactly a format can be compared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,8 +352,10 @@ fn maven_tree(
     project: &Path,
     local_repository: &Path,
     format: &str,
+    verbose: Verbose,
 ) -> Result<String, String> {
-    let output = Command::new(mvn)
+    let mut command = Command::new(mvn);
+    command
         .current_dir(project)
         .arg("-q")
         .arg("--batch-mode")
@@ -348,7 +363,11 @@ fn maven_tree(
         .arg(PLUGIN)
         .arg(format!("-DoutputType={format}"))
         .arg("-DoutputFile=tree.txt")
-        .arg("-DappendOutput=false")
+        .arg("-DappendOutput=false");
+    if verbose == Verbose::Yes {
+        command.arg("-Dverbose");
+    }
+    let output = command
         .output()
         .map_err(|error| format!("cannot run {}: {error}", mvn.display()))?;
 
@@ -371,8 +390,9 @@ fn maven_tree(
 /// nothing and neither is advantaged by a cache the other does not have. `HOME`
 /// is redirected at the project so a developer's own `settings.xml` cannot
 /// change what this resolves.
-fn jv_tree(project: &Path, cache: &Path, format: &str) -> Result<String, String> {
-    let output = Command::new(jv_binary())
+fn jv_tree(project: &Path, cache: &Path, format: &str, verbose: Verbose) -> Result<String, String> {
+    let mut command = Command::new(jv_binary());
+    command
         .current_dir(project)
         .arg("tree")
         .arg("--output-type")
@@ -380,7 +400,11 @@ fn jv_tree(project: &Path, cache: &Path, format: &str) -> Result<String, String>
         .arg("--cache-dir")
         .arg(cache)
         .arg("--no-local-repository")
-        .env("HOME", project)
+        .env("HOME", project);
+    if verbose == Verbose::Yes {
+        command.arg("--verbose");
+    }
+    let output = command
         .output()
         .map_err(|error| format!("cannot run jv: {error}"))?;
 
@@ -444,16 +468,19 @@ fn jv_tree_matches_mvn_dependency_tree() {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("pom.xml"), fixture.pom()).unwrap();
 
-        for (format, comparison) in FORMATS {
-            let what = format!("{} / {format}", fixture.name);
-            let expected = match maven_tree(&mvn, &project, &local_repository, format) {
+        for (format, comparison, verbose) in FORMATS {
+            let what = match verbose {
+                Verbose::No => format!("{} / {format}", fixture.name),
+                Verbose::Yes => format!("{} / {format} -Dverbose", fixture.name),
+            };
+            let expected = match maven_tree(&mvn, &project, &local_repository, format, *verbose) {
                 Ok(tree) => tree,
                 Err(reason) => {
                     differences.push(format!("{what}: {reason}"));
                     continue;
                 }
             };
-            let actual = match jv_tree(&project, &cache, format) {
+            let actual = match jv_tree(&project, &cache, format, *verbose) {
                 Ok(tree) => tree,
                 Err(reason) => {
                     differences.push(format!("{what}: {reason}"));

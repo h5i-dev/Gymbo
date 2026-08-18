@@ -4,7 +4,7 @@
 > under the **Apache License, Version 2.0**. No source code is reproduced verbatim beyond short
 > identifiers, expressions and literal constants required to specify behaviour.
 >
-> * Clone: `/home/koukyosyumei/Dev/jv/_reference/maven`
+> * Clone: `_reference/maven`
 > * Commit: `945813a7d4d91f32fe92d2c5a81d0a8223bc10b9`
 > * Root `pom.xml` version: **4.1.0-SNAPSHOT** (parent `org.apache:apache:49`)
 >

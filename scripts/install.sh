@@ -2,7 +2,7 @@
 #
 # Installs jv.
 #
-#   curl -LsSf https://raw.githubusercontent.com/Koukyosyumei/jv/main/scripts/install.sh | sh
+#   curl -LsSf https://raw.githubusercontent.com/h5i-dev/jv/main/scripts/install.sh | sh
 #
 # Options, as environment variables:
 #
@@ -27,7 +27,7 @@
 
 set -eu
 
-REPOSITORY="Koukyosyumei/jv"
+REPOSITORY="h5i-dev/jv"
 install_dir="${JV_INSTALL_DIR:-$HOME/.local/bin}"
 
 say() { printf 'jv: %s\n' "$1" >&2; }

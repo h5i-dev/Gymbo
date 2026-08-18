@@ -771,6 +771,18 @@ impl Management {
         // Exclusions apply from level 1; everything else from level 2, because
         // the model builder already applied a POM's own management to its own
         // dependencies.
+        // Throughout: the trigger is *management supplying a value*, never the
+        // value differing from what the dependency already had.
+        //
+        // `PremanagedDependency.create` guards each field on
+        // `depMngt.getX() != null` alone, so management that resolves to the
+        // same version still records a premanaged version and still sets the
+        // managed bit. Guarding on inequality instead loses the
+        // `version managed from <v>` annotation that Maven prints whenever a
+        // BOM manages a dependency to the version it already declared — which
+        // is the common case, not an edge case — and, for scope and optional,
+        // silently changes resolution, because those bits suppress derivation
+        // and inheritance.
         if let Some(managed) = self.exclusions.get(&key) {
             let mut merged = dependency.exclusions.clone();
             for exclusion in managed {
@@ -778,10 +790,8 @@ impl Management {
                     merged.push(exclusion.clone());
                 }
             }
-            if merged != dependency.exclusions {
-                dependency.exclusions = merged;
-                flags.exclusions = true;
-            }
+            dependency.exclusions = merged;
+            flags.exclusions = true;
         }
 
         if level < 2 {
@@ -793,25 +803,19 @@ impl Management {
             .get(&key)
             .filter(|_| !disable_version_management)
         {
-            if dependency.version.as_deref() != Some(version.as_str()) {
-                premanaged.version = dependency.version.clone();
-                dependency.version = Some(version.clone());
-                flags.version = true;
-            }
+            premanaged.version = dependency.version.clone();
+            dependency.version = Some(version.clone());
+            flags.version = true;
         }
         if let Some(scope) = self.scopes.get(&key) {
-            if dependency.scope != Some(*scope) {
-                premanaged.scope = dependency.scope;
-                dependency.scope = Some(*scope);
-                flags.scope = true;
-            }
+            premanaged.scope = dependency.scope;
+            dependency.scope = Some(*scope);
+            flags.scope = true;
         }
         if let Some(optional) = self.optionals.get(&key) {
-            if dependency.optional != Some(*optional) {
-                premanaged.optional = dependency.optional;
-                dependency.optional = Some(*optional);
-                flags.optional = true;
-            }
+            premanaged.optional = dependency.optional;
+            dependency.optional = Some(*optional);
+            flags.optional = true;
         }
         (flags, premanaged)
     }

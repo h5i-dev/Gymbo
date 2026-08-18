@@ -4,7 +4,7 @@
 > licensed under the **Apache License, Version 2.0**. It is a description of the observable POM
 > contract, written for a clean-room Rust reimplementation.
 >
-> **Clone:** `/home/koukyosyumei/Dev/jv/_reference/maven`
+> **Clone:** `_reference/maven`
 > **Commit:** `945813a7d4d91f32fe92d2c5a81d0a8223bc10b9`
 > **Version in root `pom.xml`:** `4.1.0-SNAPSHOT` (Maven 4 development line)
 >

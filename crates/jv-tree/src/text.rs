@@ -363,10 +363,13 @@ com.example:demo:jar:1.0
     }
 
     #[test]
-    fn verbose_reports_scope_changes_from_conflict_resolution() {
+    fn verbose_reports_a_scope_conflict_resolution_declined_to_apply() {
         let mut graph = Graph::new(project_root("com.example", "demo", "1.0"));
         let root = graph.root();
         let mut node = dependency_node("g", "a", "1.0", Some(Scope::Compile));
+        // Set, and deliberately not rendered: maven-dependency-tree never
+        // populates its equivalent, so `scope updated from` cannot appear in
+        // real `-Dverbose` output. See `verbose_string`.
         node.original_scope = Some(Scope::Runtime);
         node.ignored_scope = Some(Scope::Test);
         let id = graph.add(node);
@@ -380,10 +383,12 @@ com.example:demo:jar:1.0
             },
         );
         assert!(
-            rendered.contains(
-                "g:a:jar:1.0:compile (scope updated from runtime; scope not updated to test)"
-            ),
+            rendered.contains("g:a:jar:1.0:compile (scope not updated to test)"),
             "got {rendered}"
+        );
+        assert!(
+            !rendered.contains("scope updated from"),
+            "the dead upstream annotation came back: {rendered}"
         );
     }
 
@@ -394,7 +399,7 @@ com.example:demo:jar:1.0
         let mut node = dependency_node("g", "a", "2.0", Some(Scope::Runtime));
         node.premanaged.version = Some("1.0".to_owned());
         node.premanaged.scope = Some(Scope::Compile);
-        node.original_scope = Some(Scope::Test);
+        node.ignored_scope = Some(Scope::Test);
         let id = graph.add(node);
         graph.add_child(root, id);
 
@@ -407,7 +412,7 @@ com.example:demo:jar:1.0
         );
         assert!(
             rendered.contains(
-                "(version managed from 1.0; scope managed from compile; scope updated from test)"
+                "(version managed from 1.0; scope managed from compile; scope not updated to test)"
             ),
             "got {rendered}"
         );

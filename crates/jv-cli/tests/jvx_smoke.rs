@@ -53,7 +53,7 @@ const TOOLS: &[Tool] = &[
         endpoint: "com.google.googlejavaformat:google-java-format",
         covers: "no version given; the latest release is chosen",
         args: &["--version"],
-        expect: Expect::Says("google-java-format"),
+        expect: Expect::Says("google-java-format: version"),
     },
     Tool {
         endpoint: "org.openrewrite:rewrite-java:8.30.0",
@@ -62,16 +62,21 @@ const TOOLS: &[Tool] = &[
         expect: Expect::NoMainClass,
     },
     Tool {
-        endpoint: "com.puppycrawl.tools:checkstyle:10.17.0",
-        covers: "an uber-jar that exits non-zero when given no files",
+        endpoint: "com.puppycrawl.tools:checkstyle:10.17.0@com.puppycrawl.tools.checkstyle.Main",
+        // Checkstyle publishes its uber-jar on GitHub, not Central, so the
+        // artifact Central has is a plain jar with no `Main-Class` and a main
+        // class that only `@mainClass` can name.
+        covers: "`@mainClass` naming a class the manifest does not",
         args: &["--version"],
-        expect: Expect::Says("10.17.0"),
+        expect: Expect::Says("checkstyle version"),
     },
     Tool {
-        endpoint: "org.jacoco:org.jacoco.cli:0.8.12",
-        covers: "a classifier-less CLI whose main class is in the jar itself",
+        endpoint: "org.jacoco:org.jacoco.cli:0.8.12:nodeps",
+        // The default artifact is a thin jar with no `Main-Class`; the runnable
+        // one is a classifier beside it.
+        covers: "a classifier selecting the runnable artifact",
         args: &[],
-        expect: Expect::Says("jacoco"),
+        expect: Expect::Says("command line interface"),
     },
     Tool {
         endpoint: "org.apache.maven.shared:maven-invoker:3.3.0",
@@ -89,13 +94,13 @@ const TOOLS: &[Tool] = &[
         endpoint: "org.jetbrains.kotlin:kotlin-compiler:1.9.24",
         covers: "a Kotlin toolchain jar",
         args: &["-version"],
-        expect: Expect::Says("kotlin"),
+        expect: Expect::Says("kotlinc-jvm"),
     },
     Tool {
-        endpoint: "org.scala-lang:scala-compiler:2.13.14",
-        covers: "a Scala toolchain jar",
+        endpoint: "org.scala-lang:scala-compiler:2.13.14@scala.tools.nsc.Main",
+        covers: "a Scala toolchain jar, whose entry point is `@mainClass` too",
         args: &["-version"],
-        expect: Expect::Says("cala"),
+        expect: Expect::Says("scala compiler version"),
     },
     Tool {
         endpoint: "net.sourceforge.pmd:pmd-java:7.3.0",
@@ -113,13 +118,13 @@ const TOOLS: &[Tool] = &[
         endpoint: "info.picocli:picocli:4.7.6",
         covers: "a framework jar with an AutoComplete main class",
         args: &["--help"],
-        expect: Expect::Says("picocli"),
+        expect: Expect::Says("generates a bash completion script"),
     },
     Tool {
         endpoint: "org.antlr:antlr4:4.13.1",
         covers: "a code generator whose usage goes to stderr",
         args: &[],
-        expect: Expect::Says("ANTLR"),
+        expect: Expect::Says("antlr parser generator"),
     },
     Tool {
         endpoint: "com.beust:jcommander:1.82",
@@ -128,10 +133,10 @@ const TOOLS: &[Tool] = &[
         expect: Expect::NoMainClass,
     },
     Tool {
-        endpoint: "org.openjdk.jol:jol-cli:0.17",
+        endpoint: "org.openjdk.jol:jol-cli:0.17@org.openjdk.jol.Main",
         covers: "a tool published with a `full` classifier alternative",
         args: &[],
-        expect: Expect::Says("jol"),
+        expect: Expect::Says("usage: jol-cli.jar"),
     },
     Tool {
         endpoint: "com.github.spotbugs:spotbugs:4.8.5",
@@ -144,7 +149,7 @@ const TOOLS: &[Tool] = &[
         endpoint: "org.codehaus.groovy:groovy:3.0.21",
         covers: "a language runtime whose jar is also a CLI",
         args: &["--version"],
-        expect: Expect::Says("roovy"),
+        expect: Expect::Says("groovy version:"),
     },
     Tool {
         endpoint: "org.apache.commons:commons-lang3:3.14.0",
@@ -254,13 +259,19 @@ fn jvx_launches_real_tools() {
             continue;
         }
 
+        // jvx's refusal quotes the endpoint and the jar's file name, so a
+        // `Says` text drawn from the coordinates — a version, or the artifact
+        // id — matches the refusal just as happily as a launch. Four entries
+        // passed that way for as long as this test existed. Ruling the refusal
+        // out first is what makes `Says` mean "a JVM ran".
+        let refused = said.contains("which class to run");
         let (wanted, satisfied) = match tool.expect {
-            Expect::Says(text) => (text, said.contains(&text.to_lowercase())),
+            Expect::Says(text) => (text, !refused && said.contains(&text.to_lowercase())),
             // A refusal, not a launch: the message has to name the problem, and
             // the process must not have started a JVM to find that out.
             Expect::NoMainClass => (
                 "a refusal naming the missing main class",
-                said.contains("which class to run") && said.contains("main-class"),
+                refused && said.contains("main-class"),
             ),
         };
         if !satisfied {
