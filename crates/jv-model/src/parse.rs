@@ -118,6 +118,24 @@ impl<'i> XmlParser<'i> {
         self.warnings.push(message.into());
     }
 
+    /// Stores a repeated wrapper element's contents, saying so if it replaces
+    /// something.
+    ///
+    /// Maven's generated reader rejects a duplicated tag outright, so a POM that
+    /// declares `<dependencies>` twice is one Maven will not read at all. jv is
+    /// lenient and keeps the last, but silently resolving a dependency set that
+    /// Maven refuses is the worst of both — the warning is what makes the
+    /// difference visible.
+    fn replace_repeated<T>(&mut self, name: &str, slot: &mut Vec<T>, parsed: Vec<T>) {
+        if !slot.is_empty() {
+            self.warn(format!(
+                "<{name}> appears more than once; Maven rejects that, and jv is \
+                 using only the last"
+            ));
+        }
+        *slot = parsed;
+    }
+
     fn read_event(&mut self) -> Result<Event<'i>, ParseError> {
         Ok(self.reader.read_event()?)
     }
@@ -274,11 +292,17 @@ impl<'i> XmlParser<'i> {
                 Ok(true)
             }
             b"dependencies" => {
-                model.dependencies = parser.parse_dependencies()?;
+                let parsed = parser.parse_dependencies()?;
+                parser.replace_repeated("dependencies", &mut model.dependencies, parsed);
                 Ok(true)
             }
             b"dependencyManagement" => {
-                model.dependency_management = parser.parse_dependency_management()?;
+                let parsed = parser.parse_dependency_management()?;
+                parser.replace_repeated(
+                    "dependencyManagement",
+                    &mut model.dependency_management,
+                    parsed,
+                );
                 Ok(true)
             }
             // Maven 4 renamed <modules> to <subprojects>, and renamed the item
@@ -301,20 +325,27 @@ impl<'i> XmlParser<'i> {
                 Ok(true)
             }
             b"profiles" => {
-                model.profiles = parser.list("profiles", b"profile", XmlParser::parse_profile)?;
+                let parsed = parser.list("profiles", b"profile", XmlParser::parse_profile)?;
+                parser.replace_repeated("profiles", &mut model.profiles, parsed);
                 Ok(true)
             }
             b"repositories" => {
-                model.repositories =
+                let parsed =
                     parser.list("repositories", b"repository", XmlParser::parse_repository)?;
+                parser.replace_repeated("repositories", &mut model.repositories, parsed);
                 Ok(true)
             }
             b"pluginRepositories" => {
-                model.plugin_repositories = parser.list(
+                let parsed = parser.list(
                     "pluginRepositories",
                     b"pluginRepository",
                     XmlParser::parse_repository,
                 )?;
+                parser.replace_repeated(
+                    "pluginRepositories",
+                    &mut model.plugin_repositories,
+                    parsed,
+                );
                 Ok(true)
             }
             b"distributionManagement" => {
@@ -379,6 +410,12 @@ impl<'i> XmlParser<'i> {
             b"classifier" => parser.text_into(&mut dependency.classifier),
             b"scope" => {
                 let raw = parser.text()?;
+                // An empty `<scope/>` is absent, not unrecognized. Maven's
+                // validator returns early on a blank value, and warning about it
+                // would put noise in the channel real problems arrive on.
+                if raw.trim().is_empty() {
+                    return Ok(true);
+                }
                 match raw.parse::<Scope>() {
                     Ok(scope) => dependency.scope = Some(scope),
                     Err(_) if crate::scope::is_maven_4_scope(&raw) => {
@@ -697,6 +734,53 @@ impl<'i> XmlParser<'i> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_wrapper_is_reported_rather_than_silently_dropped() {
+        // Maven's own reader rejects a duplicated tag outright, so a POM like
+        // this is one Maven will not read at all. Resolving it silently — with
+        // half its dependencies gone — is the worst available answer.
+        let parsed = parse_pom(
+            r#"<project>
+                 <dependencies><dependency><groupId>g</groupId>
+                   <artifactId>first</artifactId></dependency></dependencies>
+                 <dependencies><dependency><groupId>g</groupId>
+                   <artifactId>second</artifactId></dependency></dependencies>
+               </project>"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.model.dependencies.len(), 1);
+        assert_eq!(parsed.model.dependencies[0].artifact_id, "second");
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("<dependencies>")),
+            "expected a warning, got {:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn a_wrapper_that_appears_once_warns_about_nothing() {
+        let parsed = parse_pom(
+            r#"<project><dependencies><dependency><groupId>g</groupId>
+                 <artifactId>a</artifactId></dependency></dependencies></project>"#,
+        )
+        .unwrap();
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn an_empty_scope_is_absent_rather_than_unrecognized() {
+        // Maven's validator returns early on a blank value. Warning here would
+        // put noise in the channel real problems arrive on.
+        let parsed = parse_pom(
+            r#"<project><dependencies><dependency>
+                 <groupId>g</groupId><artifactId>a</artifactId><scope/>
+               </dependency></dependencies></project>"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.model.dependencies[0].scope, None);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
 
     fn parse(xml: &str) -> ParsedPom {
         parse_pom(xml).expect("parse")

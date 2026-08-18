@@ -121,33 +121,50 @@ impl Mirror {
     /// `mirrorOf` is a comma-separated list of repository ids with three
     /// wildcards: `*` matches every repository, `external:*` every repository
     /// that is not on localhost or a `file:` URL, and `external:http:*` the same
-    /// but only for insecure HTTP. Any entry may be negated with `!`, and a
-    /// single negation wins over every positive match — that is how
-    /// `*,!internal` means "mirror everything except the internal repository".
+    /// but only for insecure HTTP.
     ///
-    /// Ported from `org.eclipse.aether.util.repository.DefaultMirrorSelector`.
+    /// Ported from `DefaultMirrorSelector.matchPattern`, whose details are
+    /// easy to get wrong and all load-bearing:
+    ///
+    /// * **Entries are not trimmed.** `central, jcenter` has a second entry of
+    ///   `" jcenter"`, which matches no repository. Trimming it — which reads
+    ///   like a kindness — silently redirects a repository Maven leaves alone.
+    /// * **`!` negates an id and only an id.** `!external:*` excludes a
+    ///   repository literally named `external:*`; it is not a negated wildcard.
+    ///   So `*,!external:*` mirrors everything, localhost included.
+    /// * **An exact match stops the scan; a wildcard does not**, so a later
+    ///   negation can still veto a wildcard but not an exact match. That is why
+    ///   `central,!central` mirrors `central`.
     pub fn matches(&self, repository_id: &str, repository_url: &str) -> bool {
-        let Some(mirror_of) = self.mirror_of.as_deref() else {
+        let Some(pattern) = self.mirror_of.as_deref() else {
             return false;
         };
+        // Upstream short-circuits the whole pattern before splitting it, which
+        // is what makes a lone `*` or a lone id match without the list rules
+        // applying at all.
+        if pattern == "*" || pattern == repository_id {
+            return true;
+        }
+
         let mut matched = false;
-        for pattern in mirror_of.split(',').map(str::trim) {
-            let (negated, pattern) = match pattern.strip_prefix('!') {
-                Some(rest) => (true, rest),
-                None => (false, pattern),
-            };
-            let hit = match pattern {
-                "*" => true,
-                "external:*" => is_external(repository_url),
-                "external:http:*" => is_external_http(repository_url),
-                exact => exact == repository_id,
-            };
-            if hit {
-                // An exclusion anywhere in the list vetoes the whole mirror.
-                if negated {
+        for entry in pattern.split(',') {
+            if entry.len() > 1 && entry.starts_with('!') {
+                if &entry[1..] == repository_id {
+                    // Explicitly excluded, and nothing later can undo it.
                     return false;
                 }
-                matched = true;
+            } else if entry == repository_id {
+                return true;
+            } else {
+                // The wildcards do not stop the scan, so a later negation can
+                // still veto one. That asymmetry with an exact match is
+                // upstream's and is the whole reason `*,!internal` works.
+                matched |= match entry {
+                    "*" => true,
+                    "external:*" => is_external(repository_url),
+                    "external:http:*" => is_external_http(repository_url),
+                    _ => false,
+                };
             }
         }
         matched
@@ -156,20 +173,36 @@ impl Mirror {
 
 /// Whether a repository lives outside this machine.
 fn is_external(url: &str) -> bool {
-    let lowered = url.to_ascii_lowercase();
-    if lowered.starts_with("file:") {
-        return false;
-    }
-    !matches!(
-        host_of(&lowered).as_deref(),
-        Some("localhost" | "127.0.0.1")
-    )
+    !is_local_host(url) && !protocol_of(url).eq_ignore_ascii_case("file")
 }
 
 /// Whether a repository is external *and* reached over plain HTTP.
+///
+/// The four protocols are upstream's: WebDAV over HTTP is spelled three
+/// different ways in the wild and all three are as insecure as `http`.
 fn is_external_http(url: &str) -> bool {
-    let lowered = url.to_ascii_lowercase();
-    (lowered.starts_with("http:") || lowered.starts_with("dav:http:")) && is_external(&lowered)
+    let protocol = protocol_of(url);
+    ["http", "dav", "dav:http", "dav+http"]
+        .iter()
+        .any(|known| protocol.eq_ignore_ascii_case(known))
+        && !is_local_host(url)
+}
+
+fn is_local_host(url: &str) -> bool {
+    matches!(host_of(url).as_deref(), Some("localhost" | "127.0.0.1"))
+}
+
+/// The protocol of a repository URL.
+///
+/// Not simply "everything before the first colon": Maven's own URL pattern
+/// allows a second segment when it is followed by `://`, so `dav:http://host`
+/// has the protocol `dav:http` rather than `dav`. That spelling is exactly the
+/// one `external:http:*` has to recognise.
+fn protocol_of(url: &str) -> &str {
+    let Some((head, _)) = url.split_once("://") else {
+        return url.split_once(':').map_or("", |(scheme, _)| scheme);
+    };
+    head
 }
 
 /// The host component of a URL, without pulling in a URL parser for what is a
@@ -465,6 +498,65 @@ mod tests {
         assert!(mirror.matches("insecure", "http://repo.example.com/maven2"));
         assert!(!mirror.matches("secure", "https://repo.example.com/maven2"));
         assert!(!mirror.matches("local", "http://localhost/repo"));
+    }
+
+    #[test]
+    fn mirror_entries_are_not_trimmed() {
+        // `central, jcenter` has a second entry of `" jcenter"`, which is not
+        // any repository's id. Trimming it reads like a kindness and silently
+        // redirects a repository Maven would have left alone.
+        let mirror = mirror_of("central, jcenter");
+        assert!(mirror.matches("central", "https://repo1.maven.org/maven2"));
+        assert!(!mirror.matches("jcenter", "https://jcenter.bintray.com"));
+    }
+
+    #[test]
+    fn negation_excludes_an_id_and_not_a_wildcard() {
+        // `!external:*` excludes a repository literally *named* `external:*`.
+        // It is not a negated wildcard, so this mirrors everything — localhost
+        // included, which is the surprising half.
+        let mirror = mirror_of("*,!external:*");
+        assert!(mirror.matches("central", "https://repo1.maven.org/maven2"));
+        assert!(mirror.matches("local", "http://localhost/x"));
+
+        // Negating a real id does work.
+        let mirror = mirror_of("*,!internal");
+        assert!(mirror.matches("central", "https://repo1.maven.org/maven2"));
+        assert!(!mirror.matches("internal", "https://internal.corp/repo"));
+    }
+
+    #[test]
+    fn an_exact_match_stops_the_scan_but_a_wildcard_does_not() {
+        // An exact match returns immediately, so a later negation of the same id
+        // never runs.
+        assert!(mirror_of("central,!central").matches("central", "https://repo1.maven.org/maven2"));
+        // A wildcard keeps scanning, so a later negation can still veto it.
+        assert!(!mirror_of("*,!central").matches("central", "https://repo1.maven.org/maven2"));
+    }
+
+    #[test]
+    fn a_lone_pattern_matches_before_the_list_rules_apply() {
+        // Upstream short-circuits on the whole pattern, which is why an id
+        // containing a comma still matches itself.
+        assert!(mirror_of("*").matches("anything", "https://example/repo"));
+        assert!(mirror_of("odd,id").matches("odd,id", "https://example/repo"));
+    }
+
+    #[test]
+    fn webdav_over_http_counts_as_insecure() {
+        // WebDAV over HTTP is spelled three ways in the wild and every one is as
+        // insecure as plain http, which is what the wildcard is for.
+        let mirror = mirror_of("external:http:*");
+        for url in [
+            "http://repo.example.com/m2",
+            "dav:http://repo.example.com/m2",
+            "dav+http://repo.example.com/m2",
+            "dav://repo.example.com/m2",
+        ] {
+            assert!(mirror.matches("r", url), "{url} should count as insecure");
+        }
+        assert!(!mirror.matches("r", "https://repo.example.com/m2"));
+        assert!(!mirror.matches("r", "dav:https://repo.example.com/m2"));
     }
 
     #[test]

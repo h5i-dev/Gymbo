@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The three ways a POM can meet its own lifecycle bindings:
+  a plugin it declares outright, a plugin it only pins through
+  <pluginManagement>, and a plugin no lifecycle binds at all.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>dev.jv.itest</groupId>
+  <artifactId>lifecycle-bindings</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+  <build>
+    <pluginManagement>
+      <plugins>
+        <!-- Bound by the lifecycle at 3.13.0; this pin has to win. -->
+        <plugin>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>3.11.0</version>
+        </plugin>
+        <!-- Bound by no lifecycle, so it must not reach <plugins>. -->
+        <plugin>
+          <artifactId>maven-enforcer-plugin</artifactId>
+          <version>3.4.1</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+    <plugins>
+      <!-- Declared, so it keeps its version and gains default-test. -->
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.1.2</version>
+      </plugin>
+      <!-- Declared with an execution whose id collides with a bound one. -->
+      <plugin>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.1</version>
+        <executions>
+          <execution>
+            <id>default-jar</id>
+            <phase>prepare-package</phase>
+          </execution>
+          <execution>
+            <id>tests-jar</id>
+            <phase>package</phase>
+            <goals>
+              <goal>test-jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

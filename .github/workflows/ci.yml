@@ -14,7 +14,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -30,7 +30,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -38,7 +38,7 @@ jobs:
       # Maven, so both a JDK and the upstream sources have to be present. A
       # missing oracle silently skips those tests locally; JV_REQUIRE_ORACLE
       # makes that a failure here, which is the whole point of running them.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
@@ -47,7 +47,7 @@ jobs:
       - name: Fetch spec sources
         run: ./scripts/fetch-reference.sh
 
-      # A real Maven 3.9 is the oracle for effective POMs and, later, for
+      # A real Maven 3.9 is the oracle for effective POMs and for
       # `dependency:tree` output parity. Pinned and checksum-verified because the
       # answers jv is compared against must not drift silently.
       - name: Install Maven 3.9.9
@@ -68,7 +68,7 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --all-features

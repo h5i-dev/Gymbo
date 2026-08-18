@@ -1,0 +1,18 @@
+[package]
+name = "jv-testkit"
+description = "Readers for Maven Resolver's test corpora, so jv can be checked against them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+jv-model = { workspace = true }
+jv-version = { workspace = true }
+jv-resolver = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

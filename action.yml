@@ -1,0 +1,93 @@
+# setup-jv — install jv in a GitHub Actions job, and optionally warm ~/.m2.
+#
+#   - uses: Koukyosyumei/jv@v1
+#     with:
+#       sync: true
+#   - run: mvn -o verify
+#
+# The point of `sync: true` is that jv does the downloading and Maven does the
+# building. Dependency download is the part of a Maven CI run that is slow and
+# network-bound; `mvn -o verify` afterwards does no network I/O at all, which
+# also means the build cannot fail because Maven Central had a bad minute.
+#
+# Two things this action does that a hand-rolled install step usually does not:
+#
+#   * It verifies the downloaded archive's checksum (scripts/install.sh does),
+#     rather than trusting TLS alone.
+#   * It caches jv's own store keyed by the POMs, not by a hand-maintained key,
+#     so a dependency change invalidates the cache and nothing else does.
+name: setup-jv
+description: Install jv, and optionally populate ~/.m2 so Maven can build offline.
+branding:
+  icon: package
+  color: orange
+
+inputs:
+  version:
+    description: The jv release to install, e.g. v0.1.0. Defaults to the latest.
+    required: false
+    default: ""
+  sync:
+    description: Run `jv sync` so `mvn -o` works afterwards.
+    required: false
+    default: "false"
+  working-directory:
+    description: Where the project is. Defaults to the repository root.
+    required: false
+    default: "."
+  cache:
+    description: Cache jv's store between runs.
+    required: false
+    default: "true"
+  cache-key-files:
+    description: >-
+      Glob whose hash keys the cache. Defaults to every pom.xml, so the cache is
+      invalidated exactly when the dependency set can have changed.
+    required: false
+    default: "**/pom.xml"
+
+outputs:
+  jv-version:
+    description: The version that was installed.
+    value: ${{ steps.install.outputs.version }}
+  cache-hit:
+    description: Whether the dependency cache was restored.
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install jv
+      id: install
+      shell: bash
+      env:
+        JV_VERSION: ${{ inputs.version }}
+        JV_INSTALL_DIR: ${{ runner.temp }}/jv-bin
+      run: |
+        set -euo pipefail
+        curl -LsSf "https://raw.githubusercontent.com/Koukyosyumei/jv/main/scripts/install.sh" | sh
+        echo "$JV_INSTALL_DIR" >> "$GITHUB_PATH"
+        echo "version=$("$JV_INSTALL_DIR/jv" --version)" >> "$GITHUB_OUTPUT"
+
+    # Restored before the sync so a hit makes the sync a no-op rather than a
+    # second download of everything.
+    - name: Restore the dependency cache
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/jv
+          ~/Library/Caches/jv
+          ~/.m2/repository
+        key: jv-${{ runner.os }}-${{ hashFiles(inputs.cache-key-files) }}
+        # A partial restore still saves most of the download: the dependency set
+        # usually changes by one entry, not wholesale.
+        restore-keys: |
+          jv-${{ runner.os }}-
+
+    - name: Sync dependencies
+      if: inputs.sync == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: jv sync --recursive

@@ -82,8 +82,13 @@ impl Range {
                     return Err(invalid("single version must be surrounded by []"));
                 }
                 let version = body.trim();
-                if let Some(prefix) = version.strip_suffix('*') {
-                    // "[1.2.*]" is shorthand for "[1.2.min,1.2.max]".
+                // `[1.2.*]` is shorthand for `[1.2.min,1.2.max]`. The dot is
+                // required and is kept: upstream tests `endsWith(".*")` and
+                // strips only the star. Firing on a bare `*` would turn `[1.2*]`
+                // — an exact version to Maven, matching essentially nothing —
+                // into a range over every 1.2.x, and `[*]` into everything.
+                if version.ends_with(".*") {
+                    let prefix = &version[..version.len() - 1];
                     (
                         Some(Version::parse(&format!("{prefix}min"))),
                         Some(Version::parse(&format!("{prefix}max"))),

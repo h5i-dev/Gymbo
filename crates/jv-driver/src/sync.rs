@@ -1,0 +1,877 @@
+//! `jv sync` — download everything a build needs, and put it where Maven looks.
+//!
+//! This is jv's way into a CI pipeline that is not ready to stop using Maven.
+//! `jv sync && mvn -o verify` should work: jv does the downloading, which is the
+//! slow part, and Maven does the building, which is the part nobody wants to
+//! reimplement. That only works if the result is indistinguishable from what
+//! Maven would have downloaded itself, which is what this module is about.
+//!
+//! # Two passes, because a build needs more than its dependencies
+//!
+//! `dependency:go-offline` resolves the project's dependencies *and* its
+//! plugins, and the plugins are the half people forget: a `~/.m2` with every jar
+//! the code imports but no `maven-compiler-plugin` cannot compile anything.
+//! Ported from `GoOfflineMojo` and `ResolverUtil.getProjectPlugins`, which take
+//! plugins from three places — `<reporting><plugins>`, `<build><plugins>` and
+//! `<build><pluginManagement><plugins>` — in that order.
+//!
+//! # Plugins that choose dependencies at run time
+//!
+//! Surefire does not declare which test framework it will run. It inspects the
+//! test classpath at execution time and resolves a matching *provider* —
+//! `surefire-junit-platform` for JUnit 5, `surefire-testng` for TestNG, and so
+//! on — from coordinates that appear in no POM. `mvn dependency:go-offline` does
+//! not find them either: a repository it populated fails `mvn -o verify` at the
+//! test phase, which was confirmed by running it.
+//!
+//! jv does better rather than matching that, because "sync then build offline"
+//! is the entire proposition and a sync that cannot run tests does not deliver
+//! it. When surefire or failsafe is in the plugin set, jv fetches every provider
+//! at the plugin's own version. The list is small, stable, and versioned in
+//! lockstep with the plugin; a provider that does not exist for some version
+//! simply 404s and is skipped, which is already how a missing artifact behaves.
+//!
+//! # Known gap: snapshots
+//!
+//! A snapshot downloaded from a repository lives in Maven's local repository
+//! under its *timestamped* file name, and Maven finds it through a
+//! `maven-metadata-<repositoryId>.xml` beside it. jv places the file correctly
+//! but does not yet write that metadata, and cannot write it safely in general:
+//! the id in the file name is the *effective* repository id, which is the
+//! mirror's when the user has one, and there is no unconditional fallback the
+//! way `_remote.repositories` has one. So `jv sync` warns on a snapshot rather
+//! than writing metadata that would be right only sometimes. Recorded in
+//! `docs/spec/local-repository.md` and `ROADMAP.md`.
+//!
+//! # Why the artifacts are hardlinked
+//!
+//! jv's cache is keyed by URL; Maven's local repository is keyed by coordinates.
+//! Copying would double the disk a CI cache has to carry, so jv hardlinks and
+//! falls back to copying when the two live on different filesystems. Either way
+//! jv only ever *creates* files in the local repository, never overwrites one:
+//! that directory belongs to Maven, and a file already there is Maven's answer,
+//! not jv's to correct.
+
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
+
+use jv_model::{Artifact, Dependency, Plugin, Scope, is_snapshot_version};
+use jv_resolver::{CollectRequest, Verbosity};
+
+use crate::error::DriverError;
+use crate::project::Project;
+use crate::session::Session;
+use crate::snapshot::LocalSnapshot;
+use crate::tracking::Tracking;
+
+/// What to sync.
+#[derive(Clone, Debug)]
+pub struct SyncRequest {
+    /// Resolve `<build><plugins>` and friends as well as dependencies.
+    ///
+    /// On by default: without it the result does not support `mvn -o`, which is
+    /// the entire point.
+    pub plugins: bool,
+    /// Also fetch each dependency's transitive plugin dependencies.
+    pub plugin_dependencies: bool,
+    /// Materialize into Maven's local repository. Off leaves everything in jv's
+    /// own cache, which is enough for `jv` itself but not for `mvn -o`.
+    pub local_repository: Option<PathBuf>,
+    /// Skip artifacts the reactor itself produces; nothing has published them.
+    pub exclude_reactor: bool,
+}
+
+impl Default for SyncRequest {
+    fn default() -> Self {
+        Self {
+            plugins: true,
+            plugin_dependencies: true,
+            local_repository: None,
+            exclude_reactor: true,
+        }
+    }
+}
+
+/// What a sync did.
+#[derive(Debug, Default)]
+pub struct SyncReport {
+    /// Artifacts now present in the cache.
+    pub artifacts: Vec<Artifact>,
+    /// Artifacts linked or copied into Maven's local repository.
+    pub materialized: Vec<PathBuf>,
+    /// Artifacts no repository has. Not fatal: an optional dependency's jar and
+    /// a plugin that only exists in a private repository both land here, and
+    /// failing the whole sync over one would make jv useless on real projects.
+    pub missing: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+impl SyncReport {
+    pub fn is_empty(&self) -> bool {
+        self.artifacts.is_empty()
+    }
+}
+
+/// Downloads everything `projects` need and, when asked, puts it where Maven
+/// looks for it.
+pub fn sync(
+    session: &Session,
+    projects: &[&Project],
+    request: &SyncRequest,
+) -> Result<SyncReport, DriverError> {
+    let mut report = SyncReport::default();
+
+    // The reactor's own artifacts are built, not downloaded; asking a repository
+    // for one produces a 404 that means nothing.
+    let reactor: BTreeSet<String> = if request.exclude_reactor {
+        projects
+            .iter()
+            .map(|project| {
+                let artifact = project.artifact();
+                format!("{}:{}", artifact.group_id, artifact.artifact_id)
+            })
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+
+    let mut wanted = Wanted::default();
+    // Whether any plugin in the build resolves a test provider at run time.
+    let mut selects_providers = false;
+
+    for project in projects {
+        // Test scope, because a build runs tests: it is the widest composition
+        // and anything narrower leaves `mvn -o test` unable to start.
+        let resolution = session.resolve_project(project, Verbosity::None)?;
+        for (id, _depth) in resolution.collected.graph.preorder() {
+            let node = resolution.collected.graph.node(id);
+            if node.omitted_for.is_some() {
+                continue;
+            }
+            // `system` dependencies are on a path the POM states; there is
+            // nothing to download and no repository that would have them.
+            if node.scope() == Scope::System {
+                continue;
+            }
+            let Some(artifact) = &node.artifact else {
+                continue;
+            };
+            wanted.push(&reactor, artifact.clone());
+        }
+
+        if request.plugins {
+            for plugin in project_plugins(project) {
+                let Some(artifact) = plugin_artifact(&plugin) else {
+                    // A plugin with no version is one whose version Maven would
+                    // resolve from metadata at build time; jv cannot pick it
+                    // without guessing, so it says so rather than guessing.
+                    report.warnings.push(format!(
+                        "{}: plugin {}:{} declares no version and was not synced",
+                        project.path.display(),
+                        plugin.group_id_or_default(),
+                        plugin.artifact_id.as_deref().unwrap_or("[unknown]")
+                    ));
+                    continue;
+                };
+                wanted.push(&reactor, artifact.clone());
+
+                if request.plugin_dependencies {
+                    for dependency in plugin_dependencies(session, &artifact, &plugin)? {
+                        wanted.push(&reactor, dependency);
+                    }
+                    // And whatever the plugin will pick for itself at run time,
+                    // which is in no POM and which `go-offline` also misses.
+                    for extra in runtime_selected(&artifact) {
+                        wanted.push(&reactor, extra.clone());
+                        for dependency in plugin_dependencies(session, &extra, &Plugin::default())?
+                        {
+                            wanted.push(&reactor, dependency);
+                        }
+                    }
+                    selects_providers |= selects_providers_for(&artifact);
+                }
+            }
+        }
+    }
+
+    // Surefire aligns its JUnit Platform launcher to the platform version it
+    // finds on the *test classpath*, not to anything the provider declares — so
+    // the version can only be read off the graph, after it is collected.
+    if selects_providers {
+        for launcher in aligned_launchers(&wanted.ordered) {
+            wanted.push(&reactor, launcher.clone());
+            for dependency in plugin_dependencies(session, &launcher, &Plugin::default())? {
+                wanted.push(&reactor, dependency);
+            }
+        }
+    }
+
+    // Tracking files are per directory, and a directory holds every file of one
+    // GAV, so they are collected as the artifacts are placed and written once at
+    // the end. Writing per file would rewrite the same file three times.
+    let mut tracking: BTreeMap<PathBuf, Tracking> = BTreeMap::new();
+    // One per snapshot version directory, written once every file of that
+    // version has been placed.
+    let mut snapshots: BTreeMap<String, LocalSnapshot> = BTreeMap::new();
+    // What has already been dealt with, so the POM sweep below does not redo it.
+    let mut placed: BTreeSet<Artifact> = BTreeSet::new();
+
+    for artifact in std::mem::take(&mut wanted.ordered) {
+        // The POM travels with the jar: Maven reads it on every resolve, and a
+        // local repository holding jars without POMs is one `mvn -o` rejects.
+        let pom = Artifact {
+            classifier: String::new(),
+            extension: "pom".to_owned(),
+            ..artifact.clone()
+        };
+        for candidate in [pom, artifact] {
+            match session.source().materialize(&candidate)? {
+                Some(found) => {
+                    if let Some(local) = &request.local_repository {
+                        // The *resolved* path: a snapshot lives in its
+                        // `-SNAPSHOT` directory under a timestamped file name,
+                        // and placing it under the base name would give Maven a
+                        // file it never looks for.
+                        let relative = session.source().repository_path(&candidate)?;
+                        // A snapshot is installed rather than cached: base-version
+                        // file name, and a `maven-metadata-local.xml` written
+                        // below once every file of that version is placed.
+                        let relative = if is_snapshot_version(&candidate.version) {
+                            let base = Artifact {
+                                version: candidate.base_version(),
+                                ..candidate.clone()
+                            };
+                            let placed = jv_repo::artifact_path(&base);
+                            // The version directory, which is the path without
+                            // the file name — one metadata file serves every
+                            // file of one snapshot version.
+                            let directory = placed
+                                .rsplit_once('/')
+                                .map(|(head, _)| head.to_owned())
+                                .unwrap_or_default();
+                            snapshots
+                                .entry(directory)
+                                .or_insert_with(|| LocalSnapshot::new(&base))
+                                .record(&base);
+                            placed
+                        } else {
+                            relative
+                        };
+                        if let Some(linked) =
+                            materialize(&found.path, local, &relative, &mut report)?
+                        {
+                            record_tracking(&mut tracking, &linked, found.repository.as_deref())?;
+                            report.materialized.push(linked);
+                        }
+                    }
+                    placed.insert(candidate.clone());
+                    report.artifacts.push(candidate);
+                }
+                None => report.missing.push(format!(
+                    "{}:{}:{}:{}",
+                    candidate.group_id,
+                    candidate.artifact_id,
+                    candidate.extension,
+                    candidate.version
+                )),
+            }
+        }
+    }
+
+    // Every POM jv read on the way here, which is more than the POMs of the
+    // artifacts themselves: Maven walks each one's parents and imported BOMs
+    // when it re-reads them, and a missing grandparent POM fails a build whose
+    // jars are all present. jv already fetched them; they just have to travel.
+    for pom in session.source().read_poms() {
+        if placed.contains(&pom) {
+            continue;
+        }
+        let Some(found) = session.source().materialize(&pom)? else {
+            continue;
+        };
+        if let Some(local) = &request.local_repository {
+            let relative = session.source().repository_path(&pom)?;
+            if let Some(linked) = materialize(&found.path, local, &relative, &mut report)? {
+                record_tracking(&mut tracking, &linked, found.repository.as_deref())?;
+                report.materialized.push(linked);
+            }
+        }
+        report.artifacts.push(pom);
+    }
+
+    if let Some(local) = &request.local_repository {
+        for (directory, snapshot) in &snapshots {
+            if snapshot.is_empty() {
+                continue;
+            }
+            if let Err(error) = snapshot.write(&local.join(directory)) {
+                report
+                    .warnings
+                    .push(format!("cannot write the snapshot metadata: {error}"));
+            }
+        }
+    }
+
+    for (directory, entries) in &tracking {
+        if let Err(error) = entries.write(directory) {
+            // Maven resolves an untracked file anyway, so failing to write the
+            // tracking file costs fidelity, not correctness.
+            report
+                .warnings
+                .push(format!("cannot write the tracking file: {error}"));
+        }
+    }
+
+    report.warnings.extend(session.warnings());
+    // A snapshot warns once per file it placed, and a repository problem warns
+    // once per artifact that hit it. Saying the same sentence forty times buries
+    // everything else in the report.
+    let mut seen = BTreeSet::new();
+    report
+        .warnings
+        .retain(|warning| seen.insert(warning.clone()));
+    Ok(report)
+}
+
+/// Records a placed file in its directory's tracking file, reading what Maven
+/// already wrote there the first time the directory is touched.
+fn record_tracking(
+    tracking: &mut BTreeMap<PathBuf, Tracking>,
+    placed: &Path,
+    repository: Option<&str>,
+) -> Result<(), DriverError> {
+    let (Some(directory), Some(file_name)) = (placed.parent(), placed.file_name()) else {
+        return Ok(());
+    };
+    let entries = match tracking.get_mut(directory) {
+        Some(entries) => entries,
+        None => tracking
+            .entry(directory.to_path_buf())
+            .or_insert(Tracking::read(directory)?),
+    };
+    entries.record(&file_name.to_string_lossy(), repository);
+    Ok(())
+}
+
+/// The queue of artifacts to fetch: a list for order, a set for membership.
+///
+/// Order matters — it is the order things are downloaded and reported in — but
+/// `Vec::contains` on a struct of five `String`s is a full comparison per entry,
+/// and a real build queues a few thousand. The set makes the membership test
+/// constant.
+#[derive(Debug, Default)]
+struct Wanted {
+    ordered: Vec<Artifact>,
+    seen: HashSet<Artifact>,
+}
+
+impl Wanted {
+    /// Adds an artifact once, skipping anything the reactor produces.
+    fn push(&mut self, reactor: &BTreeSet<String>, artifact: Artifact) {
+        if reactor.contains(&format!("{}:{}", artifact.group_id, artifact.artifact_id)) {
+            return;
+        }
+        if self.seen.insert(artifact.clone()) {
+            self.ordered.push(artifact);
+        }
+    }
+}
+
+/// The plugins a project uses, in the order `ResolverUtil.getProjectPlugins`
+/// gathers them: reporting, then build, then pluginManagement.
+///
+/// Order decides which declaration of a duplicated plugin supplies the version,
+/// so it is not cosmetic.
+fn project_plugins(project: &Project) -> Vec<Plugin> {
+    let mut plugins: Vec<Plugin> = Vec::new();
+    let mut push_unique = |plugin: &Plugin| {
+        let key = (
+            plugin.group_id_or_default().to_owned(),
+            plugin.artifact_id.clone(),
+        );
+        let already = plugins.iter().any(|held: &Plugin| {
+            (
+                held.group_id_or_default().to_owned(),
+                held.artifact_id.clone(),
+            ) == key
+        });
+        if !already {
+            plugins.push(plugin.clone());
+        }
+    };
+
+    // `<reporting>` is not modelled yet; when it is, its plugins come first.
+    if let Some(build) = &project.model.build {
+        for plugin in &build.plugins {
+            push_unique(plugin);
+        }
+        for plugin in &build.plugin_management {
+            push_unique(plugin);
+        }
+    }
+    plugins
+}
+
+/// Surefire's providers, which are versioned in lockstep with the plugin.
+///
+/// Surefire picks one of these at execution time by looking at what is on the
+/// test classpath, so none of them appears in any POM and no amount of static
+/// analysis finds them. Fetching all of them costs a few hundred kilobytes and
+/// is what lets `mvn -o test` run whichever framework the project actually uses.
+///
+/// `common-junit48` and `common-java5` are not providers but are what the JUnit
+/// providers depend on at the same version; they are listed because a provider's
+/// own POM is resolved through the same path and a missing one fails the same
+/// way.
+const SUREFIRE_PROVIDERS: &[&str] = &[
+    "surefire-junit-platform",
+    "surefire-junit47",
+    "surefire-junit4",
+    "surefire-junit3",
+    "surefire-testng",
+    "surefire-testng-utils",
+    "common-junit48",
+    "common-java5",
+];
+
+/// Whether a plugin picks a test provider at execution time.
+///
+/// Surefire and failsafe are the two in the default lifecycle that do.
+fn selects_providers_for(plugin: &Artifact) -> bool {
+    plugin.group_id == "org.apache.maven.plugins"
+        && matches!(
+            plugin.artifact_id.as_str(),
+            "maven-surefire-plugin" | "maven-failsafe-plugin"
+        )
+}
+
+/// Artifacts a plugin will resolve for itself at execution time.
+fn runtime_selected(plugin: &Artifact) -> Vec<Artifact> {
+    if !selects_providers_for(plugin) {
+        return Vec::new();
+    }
+    SUREFIRE_PROVIDERS
+        .iter()
+        .map(|provider| Artifact::new("org.apache.maven.surefire", *provider, &plugin.version))
+        .collect()
+}
+
+/// The JUnit Platform launcher, at the platform version already in the graph.
+///
+/// Surefire's JUnit Platform provider does not depend on the launcher at a fixed
+/// version: it reads the platform version off the test classpath and resolves a
+/// matching launcher, so that a project pinning JUnit 5.10 is not run by a
+/// launcher built for 5.12. The version is therefore knowable only from the
+/// resolved graph, which is why this runs after collection rather than beside
+/// the plugin that needs it.
+fn aligned_launchers(wanted: &[Artifact]) -> Vec<Artifact> {
+    let mut launchers: Vec<Artifact> = Vec::new();
+    for artifact in wanted {
+        if artifact.group_id != "org.junit.platform" {
+            continue;
+        }
+        if !matches!(
+            artifact.artifact_id.as_str(),
+            "junit-platform-commons" | "junit-platform-engine"
+        ) {
+            continue;
+        }
+        let launcher = Artifact::new(
+            "org.junit.platform",
+            "junit-platform-launcher",
+            &artifact.version,
+        );
+        if !launchers.contains(&launcher) {
+            launchers.push(launcher);
+        }
+    }
+    launchers
+}
+
+/// A plugin's own artifact, if it states a version.
+fn plugin_artifact(plugin: &Plugin) -> Option<Artifact> {
+    Some(Artifact::new(
+        plugin.group_id_or_default(),
+        plugin.artifact_id.as_deref()?,
+        plugin.version.as_deref()?,
+    ))
+}
+
+/// Everything a plugin needs to run: its own dependency tree, plus any
+/// `<dependencies>` the POM added to it.
+///
+/// Resolved at runtime scope, which is what a plugin classloader gets.
+fn plugin_dependencies(
+    session: &Session,
+    artifact: &Artifact,
+    plugin: &Plugin,
+) -> Result<Vec<Artifact>, DriverError> {
+    let request = CollectRequest {
+        root_dependency: Some(Dependency {
+            group_id: artifact.group_id.clone(),
+            artifact_id: artifact.artifact_id.clone(),
+            version: Some(artifact.version.clone()),
+            ..Dependency::default()
+        }),
+        // A `<plugin><dependencies>` entry replaces or adds to what the plugin
+        // declares, which is how projects pin a driver or a compiler version.
+        dependencies: plugin.dependencies.clone(),
+        ..CollectRequest::default()
+    };
+
+    // A plugin jv cannot read the descriptor for is not a reason to fail the
+    // sync; the plugin's own jar is already queued, and Maven will report the
+    // real problem when it tries to run it.
+    let Ok(resolution) = session.resolve_request(&request, Verbosity::None) else {
+        return Ok(Vec::new());
+    };
+
+    let graph = &resolution.collected.graph;
+    let mut artifacts = Vec::new();
+    for (id, _depth) in graph.preorder() {
+        let node = graph.node(id);
+        if node.omitted_for.is_some() {
+            continue;
+        }
+        if !matches!(node.scope(), Scope::Compile | Scope::Runtime) {
+            continue;
+        }
+        if let Some(found) = &node.artifact {
+            artifacts.push(found.clone());
+        }
+    }
+    Ok(artifacts)
+}
+
+/// Puts a cached file where Maven expects it.
+///
+/// Returns the destination, or `None` when something is already there. A file
+/// already in the local repository is Maven's, and replacing it would be jv
+/// overwriting an answer it was not asked to give.
+fn materialize(
+    cached: &Path,
+    local_repository: &Path,
+    relative: &str,
+    report: &mut SyncReport,
+) -> Result<Option<PathBuf>, DriverError> {
+    let destination = local_repository.join(relative);
+
+    // `artifact_path` already sanitizes the coordinates, so this cannot trigger
+    // on any path jv builds. It is here because the consequence of being wrong is
+    // writing attacker-controlled bytes to an attacker-chosen location, and a
+    // check that costs one string comparison is worth having between that and a
+    // future caller who passes `relative` in from somewhere new.
+    if !destination.starts_with(local_repository) {
+        report.warnings.push(format!(
+            "refusing to write {} outside {}",
+            destination.display(),
+            local_repository.display()
+        ));
+        return Ok(None);
+    }
+
+    // `symlink_metadata`, not `exists`: `exists` follows the link, so a dangling
+    // symlink planted at the destination reads as absent and the copy below then
+    // creates and fills whatever it points at.
+    if destination.symlink_metadata().is_ok() {
+        return Ok(None);
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| DriverError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    // A hardlink costs no disk, which matters because a CI cache pays for the
+    // local repository and jv's cache both. It fails across filesystems and on
+    // filesystems without hardlinks, so a copy is the fallback rather than an
+    // error.
+    //
+    // Not when the source is already in a local repository, though: `Fetcher`
+    // serves `~/.m2` hits straight from that directory, and linking one of those
+    // into jv's output would put Maven's file on the other end of the link.
+    // Anything that later rewrote jv's copy in place — jar signing, repackaging,
+    // an `mvn install` — would silently rewrite the developer's `~/.m2` too. jv
+    // promises to read that directory and never write to it.
+    let linkable = !cached.starts_with(local_repository) && is_inside_a_cache(cached);
+    if linkable && std::fs::hard_link(cached, &destination).is_ok() {
+        return Ok(Some(destination));
+    }
+    match copy_new(cached, &destination) {
+        Ok(()) => Ok(Some(destination)),
+        // Somebody else placed it between the check above and the create. That
+        // is another `jv sync` — or a Maven — winning a race jv does not need to
+        // win, so it is a success with nothing to report. Treating it as a
+        // failure produced a warning per artifact whenever two syncs shared a
+        // local repository, which is the CI case this command exists for.
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(source) => {
+            // One unwritable file should not abort a sync of a thousand.
+            report
+                .warnings
+                .push(format!("cannot place {}: {source}", destination.display()));
+            Ok(None)
+        }
+    }
+}
+
+/// Whether a path looks like it is inside jv's own cache rather than a directory
+/// another tool owns.
+///
+/// jv's cache is URL-keyed, so every entry sits under a scheme directory —
+/// `https/`, `file/` — which a Maven layout never produces because a group id
+/// cannot be a bare scheme name followed by a host.
+fn is_inside_a_cache(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some("https" | "http" | "file")
+        )
+    })
+}
+
+/// Copies to a path that must not already exist, without following a symlink
+/// there.
+///
+/// `fs::copy` opens the destination with `O_CREAT|O_TRUNC` and follows symlinks,
+/// which is what let a planted link redirect the write. `create_new` refuses to
+/// open anything that exists, link or file.
+fn copy_new(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut reader = std::fs::File::open(source)?;
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    std::io::copy(&mut reader, &mut writer)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jv_model::{Build, Model};
+    use jv_repo::artifact_path;
+
+    fn plugin(group: Option<&str>, artifact: &str, version: Option<&str>) -> Plugin {
+        Plugin {
+            group_id: group.map(str::to_owned),
+            artifact_id: Some(artifact.to_owned()),
+            version: version.map(str::to_owned),
+            ..Plugin::default()
+        }
+    }
+
+    fn project_with(build: Build) -> Project {
+        Project {
+            model: Model {
+                group_id: Some("com.example".to_owned()),
+                artifact_id: Some("app".to_owned()),
+                version: Some("1.0".to_owned()),
+                build: Some(build),
+                ..Model::default()
+            },
+            path: PathBuf::from("pom.xml"),
+            modules: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn build_plugins_come_before_managed_ones() {
+        // The first declaration supplies the version, so a managed entry must
+        // not displace the build one.
+        let project = project_with(Build {
+            plugins: vec![plugin(None, "maven-compiler-plugin", Some("3.13.0"))],
+            plugin_management: vec![
+                plugin(None, "maven-compiler-plugin", Some("3.0.0")),
+                plugin(None, "maven-surefire-plugin", Some("3.2.5")),
+            ],
+            ..Build::default()
+        });
+        let plugins = project_plugins(&project);
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0].version.as_deref(), Some("3.13.0"));
+        assert_eq!(
+            plugins[1].artifact_id.as_deref(),
+            Some("maven-surefire-plugin")
+        );
+    }
+
+    #[test]
+    fn a_plugin_without_a_group_defaults_to_mavens() {
+        let found = plugin_artifact(&plugin(None, "maven-jar-plugin", Some("3.4.1"))).unwrap();
+        assert_eq!(found.group_id, "org.apache.maven.plugins");
+        // And a plugin's own artifact is a jar, not a pom.
+        assert_eq!(found.extension, "jar");
+    }
+
+    #[test]
+    fn a_plugin_without_a_version_cannot_be_addressed() {
+        // Maven would resolve it from metadata at build time; jv refuses to
+        // guess, and the caller turns this into a warning.
+        assert!(plugin_artifact(&plugin(None, "maven-jar-plugin", None)).is_none());
+    }
+
+    #[test]
+    fn the_reactors_own_artifacts_are_not_queued() {
+        let reactor: BTreeSet<String> = ["com.example:lib".to_owned()].into_iter().collect();
+        let mut wanted = Wanted::default();
+        wanted.push(&reactor, Artifact::new("com.example", "lib", "1.0"));
+        wanted.push(&reactor, Artifact::new("org.slf4j", "slf4j-api", "2.0.9"));
+        // Nothing has published the reactor's own module; asking for it produces
+        // a 404 that means nothing.
+        assert_eq!(wanted.ordered.len(), 1);
+        assert_eq!(wanted.ordered[0].artifact_id, "slf4j-api");
+    }
+
+    #[test]
+    fn an_artifact_is_queued_once_however_often_it_appears() {
+        let mut wanted = Wanted::default();
+        for _ in 0..3 {
+            wanted.push(
+                &BTreeSet::new(),
+                Artifact::new("org.slf4j", "slf4j-api", "2.0.9"),
+            );
+        }
+        assert_eq!(wanted.ordered.len(), 1);
+    }
+
+    #[test]
+    fn a_symlink_at_the_destination_is_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("https/host/cached.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"payload").unwrap();
+
+        let local = dir.path().join("m2");
+        let artifact = Artifact::new("org.slf4j", "slf4j-api", "2.0.9");
+        let destination = local.join(artifact_path(&artifact));
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+        // A *dangling* link: `exists()` follows it and reports false, so the copy
+        // used to create and fill whatever it pointed at.
+        let victim = dir.path().join("victim");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, &destination).unwrap();
+
+        let mut report = SyncReport::default();
+        let placed = materialize(&cached, &local, &artifact_path(&artifact), &mut report).unwrap();
+        assert_eq!(placed, None);
+        assert!(!victim.exists(), "the write followed the symlink");
+    }
+
+    #[test]
+    fn losing_the_race_to_place_a_file_is_not_a_complaint() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("https/host/a.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"payload").unwrap();
+
+        let local = dir.path().join("m2");
+        let artifact = Artifact::new("org.slf4j", "slf4j-api", "2.0.9");
+        let relative = artifact_path(&artifact);
+        let destination = local.join(&relative);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+        // First placement succeeds; the second finds it already there. Two
+        // concurrent syncs sharing a local repository hit this on nearly every
+        // artifact, and reporting it warned once per file for nothing.
+        let mut report = SyncReport::default();
+        assert!(
+            materialize(&cached, &local, &relative, &mut report)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            materialize(&cached, &local, &relative, &mut report).unwrap(),
+            None
+        );
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn a_path_outside_the_local_repository_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("https/host/a.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"payload").unwrap();
+        let local = dir.path().join("m2");
+
+        let mut report = SyncReport::default();
+        // `artifact_path` sanitizes coordinates so jv cannot produce this, but the
+        // consequence of being wrong is an arbitrary write and the check is one
+        // comparison.
+        let escaped = dir.path().join("elsewhere").to_string_lossy().into_owned();
+        assert_eq!(
+            materialize(&cached, &local, &escaped, &mut report).unwrap(),
+            None
+        );
+        assert!(!dir.path().join("elsewhere").exists());
+        assert!(report.warnings.iter().any(|w| w.contains("refusing")));
+    }
+
+    #[test]
+    fn a_file_already_in_the_local_repository_is_never_linked_into_the_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = Artifact::new("org.slf4j", "slf4j-api", "2.0.9");
+        let relative = artifact_path(&artifact);
+
+        // The fetcher serves `~/.m2` hits straight from that directory, so this
+        // is the path it would hand back.
+        let home_m2 = dir.path().join("home-m2");
+        let source = home_m2.join(&relative);
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"maven's copy").unwrap();
+
+        let output = dir.path().join("ci-m2");
+        let mut report = SyncReport::default();
+        let placed = materialize(&source, &output, &relative, &mut report)
+            .unwrap()
+            .expect("a destination");
+
+        // Rewriting jv's output in place must not reach through to Maven's copy.
+        std::fs::write(&placed, b"rewritten by a later build step").unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"maven's copy");
+    }
+
+    #[test]
+    fn materializing_never_replaces_what_maven_already_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("https/host/cached.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"from jv").unwrap();
+
+        let local = dir.path().join("m2");
+        let artifact = Artifact::new("org.slf4j", "slf4j-api", "2.0.9");
+        let destination = local.join(artifact_path(&artifact));
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(&destination, b"maven put this here").unwrap();
+
+        let mut report = SyncReport::default();
+        assert_eq!(
+            materialize(&cached, &local, &artifact_path(&artifact), &mut report).unwrap(),
+            None
+        );
+        // That directory belongs to Maven; a file already in it is Maven's
+        // answer, not jv's to correct.
+        assert_eq!(std::fs::read(&destination).unwrap(), b"maven put this here");
+    }
+
+    #[test]
+    fn materializing_places_a_file_at_mavens_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("https/host/cached.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"jar bytes").unwrap();
+        let local = dir.path().join("m2");
+
+        let artifact = Artifact::new("org.slf4j", "slf4j-api", "2.0.9");
+        let mut report = SyncReport::default();
+        let placed = materialize(&cached, &local, &artifact_path(&artifact), &mut report)
+            .unwrap()
+            .expect("a destination");
+        assert!(placed.ends_with("org/slf4j/slf4j-api/2.0.9/slf4j-api-2.0.9.jar"));
+        assert_eq!(std::fs::read(&placed).unwrap(), b"jar bytes");
+        assert!(report.warnings.is_empty());
+    }
+}

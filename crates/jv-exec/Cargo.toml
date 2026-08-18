@@ -1,0 +1,22 @@
+[package]
+name = "jv-exec"
+description = "jvx: endpoint parsing, main-class detection, and launching a JVM tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+jv-driver = { workspace = true }
+jv-model = { workspace = true }
+jv-version = { workspace = true }
+thiserror = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

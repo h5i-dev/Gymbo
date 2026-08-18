@@ -1,0 +1,28 @@
+[package]
+name = "jv-driver"
+description = "Drives resolution: settings, repositories, POM fetching, and the collect/resolve pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+jv-cache = { workspace = true }
+jv-model = { workspace = true }
+jv-model-builder = { workspace = true }
+jv-repo = { workspace = true }
+jv-resolver = { workspace = true }
+jv-version = { workspace = true }
+dirs = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+jv-tree = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

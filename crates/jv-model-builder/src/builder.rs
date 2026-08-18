@@ -21,14 +21,17 @@
 //! phase 2
 //!   translate relative build paths against the project directory
 //!   inject pluginManagement
+//!   inject the lifecycle bindings (opt-in)
 //!   import BOMs
 //!   inject dependencyManagement
 //!   materialize the compile scope default
 //! ```
 //!
-//! Lifecycle-bindings injection is absent on purpose: it exists to decide which
-//! plugins a build runs, and jv does not run builds. `jv sync` reports that as a
-//! known gap rather than pretending its plugin list is complete.
+//! Lifecycle bindings come *after* pluginManagement injection, and that is not an
+//! arrangement of convenience: the injection pass can only reach plugins already
+//! in `<plugins>`, so putting it first is what leaves the merge in
+//! [`crate::lifecycle`] responsible for letting a managed version beat the
+//! version a lifecycle binds.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -38,6 +41,7 @@ use jv_model::{Dependency, Model, Profile, SettingsProfile, parse_pom};
 use crate::activation::{ActivationContext, ProfileSource, select_active_profiles};
 use crate::context::BuildContext;
 use crate::interpolate::{interpolate_model, replace_ci_friendly_version};
+use crate::lifecycle::inject_lifecycle_bindings;
 use crate::management::{
     extract_bom_imports, inject_default_values, inject_dependency_management,
     inject_plugin_management, merge_duplicates, merge_imported_management,
@@ -46,9 +50,18 @@ use crate::merge::assemble_inheritance;
 use crate::problem::{BuildError, Problem};
 use crate::source::{ModelSource, SourcedModel};
 
+/// The user property Maven seeds so `<activation><property><name>packaging</name>`
+/// has something to match against.
+const PACKAGING_PROPERTY: &str = "packaging";
+
 /// Bounds the parent chain. Real chains are single digits deep; anything near
 /// this is a cycle the identity checks somehow missed.
 const MAX_LINEAGE: usize = 64;
+
+/// Bounds nested BOM imports, for the same reason and with more urgency: the
+/// import path recurses, so an unbounded chain is a stack overflow rather than a
+/// slow build. Real nesting is two or three deep.
+const MAX_IMPORT_DEPTH: usize = 64;
 
 /// Maven 3.9's super POM, the implicit root of every parent chain.
 ///
@@ -95,6 +108,7 @@ pub struct ModelBuilder<'a> {
     source: &'a dyn ModelSource,
     context: BuildContext,
     external_profiles: Vec<Profile>,
+    lifecycle_bindings: bool,
 }
 
 impl std::fmt::Debug for ModelBuilder<'_> {
@@ -102,6 +116,7 @@ impl std::fmt::Debug for ModelBuilder<'_> {
         f.debug_struct("ModelBuilder")
             .field("context", &self.context)
             .field("external_profiles", &self.external_profiles.len())
+            .field("lifecycle_bindings", &self.lifecycle_bindings)
             .finish_non_exhaustive()
     }
 }
@@ -112,6 +127,7 @@ impl<'a> ModelBuilder<'a> {
             source,
             context,
             external_profiles: Vec::new(),
+            lifecycle_bindings: false,
         }
     }
 
@@ -124,9 +140,22 @@ impl<'a> ModelBuilder<'a> {
         self
     }
 
+    /// Adds the plugins the packaging's lifecycle binds, the way Maven does for a
+    /// request with `processPlugins` set.
+    ///
+    /// Off by default, matching `DefaultModelBuildingRequest`: resolving
+    /// dependencies never reads `<build><plugins>`, so `jv tree` and `jv resolve`
+    /// would be paying for a plugin list nothing looks at. `jv sync` needs it,
+    /// because the plugins are artifacts a later `mvn -o` will demand from the
+    /// local repository.
+    pub fn with_lifecycle_bindings(mut self, enabled: bool) -> Self {
+        self.lifecycle_bindings = enabled;
+        self
+    }
+
     /// Builds the effective model for an already-read POM.
     pub fn build(&self, root: SourcedModel) -> Result<EffectiveModel, BuildError> {
-        self.build_with_import_chain(root, &mut Vec::new())
+        self.build_with_import_chain(root, &mut Vec::new(), self.lifecycle_bindings)
     }
 
     /// The pipeline, threading the BOM-import chain so that a BOM's own imports
@@ -135,6 +164,7 @@ impl<'a> ModelBuilder<'a> {
         &self,
         root: SourcedModel,
         import_ids: &mut Vec<String>,
+        lifecycle_bindings: bool,
     ) -> Result<EffectiveModel, BuildError> {
         let mut problems = Vec::new();
         let mut active_profiles = Vec::new();
@@ -165,6 +195,21 @@ impl<'a> ModelBuilder<'a> {
                 context.user_properties.insert(key.clone(), value.clone());
             }
         }
+
+        // `<property><name>packaging</name>` is activated against a property
+        // Maven seeds rather than one anybody declares:
+        // `getProfileActivationContext` does
+        // `userProperties.computeIfAbsent("packaging", …)`. Without it that
+        // activator never fires at all.
+        //
+        // It is the *root* POM's packaging, for the whole lineage — so a
+        // parent's profile testing `packaging=jar` activates while building a
+        // jar child of a pom parent. `computeIfAbsent` also means an explicit
+        // `-Dpackaging` wins, which is why this does not overwrite.
+        context
+            .user_properties
+            .entry(PACKAGING_PROPERTY.to_owned())
+            .or_insert_with(|| root.model.packaging_or_default().to_owned());
 
         // Phase 1: walk the lineage, transforming each model in place.
         let basedir = root.basedir.clone();
@@ -202,7 +247,15 @@ impl<'a> ModelBuilder<'a> {
             let own_properties = model.model.properties.clone();
             let activation = ActivationContext {
                 context: &context,
-                basedir: model.basedir.as_deref().or(basedir.as_deref()),
+                // The directory of the POM being *built*, for every model in the
+                // lineage — not each model's own. Maven sets `projectDirectory`
+                // once from the request's POM file, so a parent's
+                // `<file><exists>marker.txt</exists></file>` looks for
+                // `marker.txt` beside the child, and `${basedir}` in an
+                // ancestor's activation means the child's directory too.
+                // Verified: a marker file next to the parent does *not* activate
+                // that profile when Maven builds the child.
+                basedir: basedir.as_deref(),
                 model_properties: &own_properties,
             };
             let active = select_active_profiles(
@@ -284,6 +337,9 @@ impl<'a> ModelBuilder<'a> {
         // Phase 2.
         translate_paths(&mut assembled, basedir.as_deref());
         inject_plugin_management(&mut assembled);
+        if lifecycle_bindings {
+            inject_lifecycle_bindings(&mut assembled, &source_name, &mut problems);
+        }
         self.import_boms(&mut assembled, &source_name, import_ids, &mut problems);
         inject_dependency_management(&mut assembled);
         inject_default_values(&mut assembled);
@@ -293,6 +349,10 @@ impl<'a> ModelBuilder<'a> {
                 coordinates: source_name,
             });
         }
+
+        // Last, on the effective model, where Maven validates: `${...}` has to
+        // be resolved and management applied before a coordinate can be judged.
+        problems.extend(crate::validate::validate(&mut assembled, &source_name));
 
         Ok(EffectiveModel {
             model: assembled,
@@ -367,6 +427,23 @@ impl<'a> ModelBuilder<'a> {
             return;
         }
 
+        // Bounded like the parent chain is. A BOM that imports a BOM that
+        // imports a BOM recurses through `build_bom`, and a repository serving a
+        // long enough chain overflowed the stack — which with `panic = "abort"`
+        // is a process abort an embedder cannot catch, not a build failure.
+        // Maven throws a `StackOverflowError` and reports it; jv reports it
+        // before the stack runs out.
+        if import_ids.len() >= MAX_IMPORT_DEPTH {
+            problems.push(Problem::error(
+                source_name,
+                format!(
+                    "dependencies of type=pom and scope=import are nested more than \
+                     {MAX_IMPORT_DEPTH} deep; the rest were not read"
+                ),
+            ));
+            return;
+        }
+
         let own = format!(
             "{}:{}:{}",
             model.declared_or_parent_group_id().unwrap_or_default(),
@@ -429,8 +506,10 @@ impl<'a> ModelBuilder<'a> {
         };
 
         // A BOM is built like any other POM, sharing the outer cycle-detection
-        // chain so that a loop spanning two levels is still caught.
-        let mut built = match self.build_with_import_chain(sourced, import_ids) {
+        // chain so that a loop spanning two levels is still caught. Its lifecycle
+        // bindings are never injected: only its `<dependencyManagement>` is read,
+        // and upstream builds an imported POM with plugin processing off too.
+        let mut built = match self.build_with_import_chain(sourced, import_ids, false) {
             Ok(built) => built,
             Err(error) => {
                 problems.push(Problem::error(

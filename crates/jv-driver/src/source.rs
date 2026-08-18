@@ -1,0 +1,841 @@
+//! Reading POMs and descriptors out of repositories.
+//!
+//! # Why this is synchronous
+//!
+//! `jv-model-builder` and `jv-resolver` are pure and synchronous on purpose: the
+//! parent chain is serial by nature, and the collector's breadth-first walk is
+//! far easier to keep faithful to Maven when it is straight-line code. Only the
+//! I/O beneath them wants to be concurrent. So this module is the seam: it
+//! presents the synchronous [`ModelSource`] and [`DescriptorSource`] the pure
+//! crates expect, and gets its bytes by blocking on the async fetcher.
+//!
+//! The concurrency is not lost, it is moved. Every time a descriptor is read,
+//! the POMs of everything it depends on are speculatively fetched in the
+//! background. By the time the collector's walk reaches the next level, those
+//! downloads have usually already landed in the cache, so the blocking call
+//! returns a cache hit. This is what makes a cold resolve fast without making
+//! the resolution logic asynchronous.
+//!
+//! # Blocking rules
+//!
+//! [`Session`](crate::Session) must be driven from a thread that is *not* a
+//! tokio worker, because `Handle::block_on` panics on one. The CLI satisfies
+//! this by building a runtime in `main` and never entering it.
+//!
+//! # Known divergence: repository scope
+//!
+//! Maven scopes `<repositories>` per node — a dependency's declared repositories
+//! apply to its own subtree. [`DescriptorSource`] has no node context to hang
+//! that on, so jv accumulates discovered repositories into one ordered list that
+//! every later fetch sees. In practice this finds strictly more artifacts than
+//! Maven, never fewer, but it does mean a repository declared deep in the graph
+//! can serve a sibling subtree that Maven would not have offered it to. Recorded
+//! in `ROADMAP.md` rather than hidden here.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use jv_cache::{Fetcher, Origin};
+use jv_model::{
+    Artifact, Dependency, Metadata, Model, Settings, TypeRegistry, is_snapshot_version,
+    parse_metadata, parse_pom,
+};
+use jv_model_builder::{BuildContext, ModelBuilder, ModelSource, SourcedModel};
+use jv_repo::{
+    MetadataLocation, Repository, Trust, artifact_path, resolve_repositories, resolve_with_trust,
+};
+use jv_resolver::{Descriptor, DescriptorSource};
+use jv_version::Version;
+
+use crate::error::DriverError;
+
+/// The extension a POM is stored under, which is what every descriptor read
+/// actually asks the repository for.
+const POM: &str = "pom";
+
+/// Repositories to consult, in order, growing as POMs declare more.
+///
+/// Shared because both the model source and the descriptor source read it, and
+/// the descriptor source appends to it.
+#[derive(Debug, Default)]
+struct Repositories {
+    ordered: Vec<Repository>,
+}
+
+impl Repositories {
+    /// Adds repositories a POM declared, ignoring ids already known.
+    ///
+    /// Ignoring by id rather than by URL matches Maven: two POMs declaring `id`
+    /// with different URLs is a project bug, and the first declaration wins.
+    fn extend(&mut self, discovered: Vec<Repository>) {
+        for repository in discovered {
+            if !self.ordered.iter().any(|held| held.id == repository.id) {
+                self.ordered.push(repository);
+            }
+        }
+    }
+}
+
+/// Reads POMs from repositories and from disk.
+///
+/// Cloneable and shareable: the caches are behind `Arc`, so a prefetch task and
+/// the collector share both the memo table and the discovered repository list.
+#[derive(Clone)]
+pub struct RepositorySource {
+    fetcher: Arc<Fetcher>,
+    runtime: tokio::runtime::Handle,
+    settings: Arc<Settings>,
+    context: BuildContext,
+    types: Arc<TypeRegistry>,
+    repositories: Arc<Mutex<Repositories>>,
+    /// POMs parsed once, by `g:a:v`. `None` records a coordinate no repository
+    /// has, so an absence is not re-requested either.
+    ///
+    /// Shared with the crawler, which fills it in from background threads — see
+    /// `prefetch.rs`.
+    poms: Arc<Mutex<HashMap<String, Option<Arc<Model>>>>>,
+    /// Built descriptors by `g:a:v`, which is the expensive half.
+    descriptors: Arc<Mutex<HashMap<String, Descriptor>>>,
+    /// Version lists by `g:a`, for ranges.
+    versions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Resolved timestamped versions by `g:a:baseVersion`.
+    snapshots: Arc<Mutex<HashMap<String, String>>>,
+    /// POMs of projects loaded from disk, by `g:a:v`. Consulted before any
+    /// repository, so a dependency on a sibling module in a multi-module build
+    /// resolves against the working tree rather than against a repository that
+    /// has never heard of it.
+    reactor: Arc<Mutex<HashMap<String, String>>>,
+    /// Warnings gathered along the way, to show once at the end.
+    warnings: Arc<Mutex<Vec<String>>>,
+    /// Crawls POMs ahead of collection. See `prefetch.rs`.
+    prefetcher: crate::prefetch::Prefetcher,
+    /// An update policy forced on every repository, as Maven's `-U` does. It
+    /// applies to repositories discovered later too, which is why it lives here
+    /// rather than being baked into the list once.
+    forced_update: Option<jv_repo::UpdatePolicy>,
+    /// Whether effective models should carry the lifecycle's plugins. Only
+    /// `jv sync` wants them.
+    lifecycle_bindings: bool,
+    /// Whether plaintext HTTP repositories may be contacted.
+    allow_insecure_http: bool,
+}
+
+impl std::fmt::Debug for RepositorySource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositorySource")
+            .field("repositories", &self.repositories)
+            .field("prefetcher", &self.prefetcher)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RepositorySource {
+    /// Builds a source over a fetcher.
+    ///
+    /// `declared` is the repository list to start from — normally just Maven
+    /// Central, since the super POM supplies it — and is put through the
+    /// settings' mirrors before anything is contacted.
+    pub fn new(
+        fetcher: Arc<Fetcher>,
+        runtime: tokio::runtime::Handle,
+        settings: Arc<Settings>,
+        context: BuildContext,
+        declared: &[Repository],
+    ) -> Self {
+        let sink = crate::prefetch::Sink::default();
+        Self {
+            prefetcher: crate::prefetch::Prefetcher::new(
+                Arc::clone(&fetcher),
+                runtime.clone(),
+                sink.clone(),
+                true,
+            ),
+            poms: Arc::clone(&sink.poms),
+            warnings: Arc::clone(&sink.warnings),
+            fetcher,
+            runtime,
+            repositories: Arc::new(Mutex::new(Repositories {
+                ordered: resolve_repositories(declared, &settings),
+            })),
+            settings,
+            context,
+            types: Arc::new(TypeRegistry::default()),
+            descriptors: Arc::default(),
+            versions: Arc::default(),
+            snapshots: Arc::default(),
+            reactor: Arc::default(),
+            forced_update: None,
+            lifecycle_bindings: false,
+            allow_insecure_http: false,
+        }
+    }
+
+    /// Allows plaintext HTTP repositories.
+    pub fn with_insecure_http(mut self, allowed: bool) -> Self {
+        self.allow_insecure_http = allowed;
+        self
+    }
+
+    /// Injects the plugins the packaging's lifecycle binds into every model this
+    /// source builds.
+    pub fn with_lifecycle_bindings(mut self, enabled: bool) -> Self {
+        self.lifecycle_bindings = enabled;
+        self
+    }
+
+    /// Whether lifecycle bindings are injected.
+    pub fn lifecycle_bindings(&self) -> bool {
+        self.lifecycle_bindings
+    }
+
+    /// Forces an update policy on every repository, present and future.
+    pub fn with_forced_update(self, update: Option<jv_repo::UpdatePolicy>) -> Self {
+        let source = Self {
+            forced_update: update,
+            ..self
+        };
+        if update.is_some() {
+            let mut repositories = source.repositories.lock().expect("repositories");
+            let existing = std::mem::take(&mut repositories.ordered);
+            repositories.ordered = existing
+                .into_iter()
+                .map(|repository| source.apply_forced_update(repository))
+                .collect();
+        }
+        source
+    }
+
+    fn apply_forced_update(&self, mut repository: Repository) -> Repository {
+        if let Some(update) = self.forced_update {
+            repository.releases.update = update;
+            repository.snapshots.update = update;
+        }
+        repository
+    }
+
+    /// Turns off speculative prefetching.
+    ///
+    /// Only useful for tests that count requests, where background work would
+    /// make the count depend on timing.
+    pub fn without_prefetch(self) -> Self {
+        let prefetcher = crate::prefetch::Prefetcher::new(
+            Arc::clone(&self.fetcher),
+            self.runtime.clone(),
+            crate::prefetch::Sink {
+                poms: Arc::clone(&self.poms),
+                warnings: Arc::clone(&self.warnings),
+            },
+            false,
+        );
+        Self { prefetcher, ..self }
+    }
+
+    /// The repositories currently known, in the order they are consulted.
+    pub fn repositories(&self) -> Vec<Repository> {
+        self.repositories
+            .lock()
+            .expect("repositories")
+            .ordered
+            .clone()
+    }
+
+    /// Adds repositories the user configured or declared themselves.
+    pub fn add_repositories(&self, declared: &[Repository]) {
+        self.add_with_trust(declared, Trust::Configured);
+    }
+
+    /// Adds repositories, recording whether the declaration is the user's.
+    fn add_with_trust(&self, declared: &[Repository], trust: Trust) {
+        let mut resolved = Vec::new();
+        for repository in resolve_with_trust(declared, &self.settings, trust) {
+            if repository.is_insecure() && !self.allow_insecure_http {
+                // Blocked rather than dropped, so the repository still appears in
+                // `jv tree`'s reasoning and the message says what to do.
+                self.warn(format!(
+                    "{} ({}) is plaintext HTTP and was blocked; pass \
+                     --allow-insecure-http to contact it anyway",
+                    repository.id, repository.url
+                ));
+                continue;
+            }
+            resolved.push(self.apply_forced_update(repository));
+        }
+        self.repositories
+            .lock()
+            .expect("repositories")
+            .extend(resolved);
+    }
+
+    /// Everything worth telling the user that did not stop the resolve.
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings.lock().expect("warnings").clone()
+    }
+
+    /// The build context profile activation and interpolation run against.
+    pub fn context(&self) -> &BuildContext {
+        &self.context
+    }
+
+    /// The `settings.xml` profiles, which contribute properties and repositories.
+    pub fn settings_profiles(&self) -> &[jv_model::SettingsProfile] {
+        &self.settings.profiles
+    }
+
+    /// Registers a POM read from the working tree.
+    ///
+    /// Everything afterwards sees these before any repository, which is what
+    /// makes a multi-module build resolve its own modules.
+    pub fn register_reactor_pom(
+        &self,
+        group_id: &str,
+        artifact_id: &str,
+        version: &str,
+        pom: String,
+    ) {
+        self.reactor
+            .lock()
+            .expect("reactor")
+            .insert(format!("{group_id}:{artifact_id}:{version}"), pom);
+    }
+
+    /// Records a warning to show once, at the end.
+    pub fn record_warning(&self, message: impl Into<String>) {
+        self.warn(message);
+    }
+
+    /// Records the repositories the project being built declares.
+    ///
+    /// Trusted, unlike a dependency's: this POM is the user's own.
+    pub fn register_project_repositories(&self, model: &Model) {
+        let declared = declared_repositories(model);
+        if !declared.is_empty() {
+            self.add_with_trust(&declared, Trust::Configured);
+        }
+    }
+
+    fn warn(&self, message: impl Into<String>) {
+        let message = message.into();
+        let mut warnings = self.warnings.lock().expect("warnings");
+        // Repeating the same warning once per node would bury everything else;
+        // a resolve touches the same repository hundreds of times.
+        if !warnings.contains(&message) {
+            warnings.push(message);
+        }
+    }
+
+    /// Fetches an artifact's bytes, blocking.
+    fn bytes(&self, artifact: &Artifact) -> Result<Option<Vec<u8>>, DriverError> {
+        let repositories = self.repositories();
+        let fetched = self
+            .runtime
+            .block_on(self.fetcher.artifact(&repositories, artifact));
+        match fetched {
+            Ok(fetched) => {
+                for warning in &fetched.warnings {
+                    self.warn(warning.clone());
+                }
+                Ok(Some(fetched.bytes))
+            }
+            Err(jv_cache::FetchError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// A POM, parsed once and shared.
+    ///
+    /// Memoizing the *parsed* model rather than its text is worth a good deal
+    /// more than it looks. A parent POM is read once per child that inherits from
+    /// it — `spring-boot-dependencies` by every Spring module in the graph — and
+    /// the old memo handed back a fresh `String` copy of the file each time for
+    /// the caller to re-parse. Parsing several hundred kilobytes of XML fifty
+    /// times over was the largest cost of a warm resolve after JVM startup.
+    fn cached_pom(&self, artifact: &Artifact) -> Result<Option<Arc<Model>>, DriverError> {
+        let key = coordinates(artifact);
+
+        // The reactor is consulted *before* the memo, not after. The crawler
+        // writes into that memo from background threads and knows nothing about
+        // the working tree, so with the checks the other way round a published
+        // sibling module could beat the one being built — decided by whichever
+        // won a race, which made it appear only on projects with enough
+        // dependencies to give the crawler a head start.
+        let from_reactor = self.reactor.lock().expect("reactor").get(&key).cloned();
+        if from_reactor.is_none() {
+            if let Some(cached) = self.poms.lock().expect("poms").get(&key) {
+                return Ok(cached.clone());
+            }
+        }
+
+        let text = match from_reactor {
+            Some(text) => Some(text),
+            None => {
+                let pom_artifact = Artifact {
+                    classifier: String::new(),
+                    extension: POM.to_owned(),
+                    version: self.resolved_version(artifact)?,
+                    ..artifact.clone()
+                };
+                self.bytes(&pom_artifact)?
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+
+        let parsed = match &text {
+            Some(text) => {
+                let parsed = parse_pom(text).map_err(|source| DriverError::Pom {
+                    source_name: key.clone(),
+                    source,
+                })?;
+                // Reported here, and only here: the memo means this runs once per
+                // POM however many times it is inherited from. Discarding them —
+                // which is what happened before — hid every problem the parser
+                // knows how to report.
+                for warning in parsed.warnings {
+                    self.warn(format!("{key}: {warning}"));
+                }
+                Some(Arc::new(parsed.model))
+            }
+            None => None,
+        };
+
+        self.poms.lock().expect("poms").insert(key, parsed.clone());
+        Ok(parsed)
+    }
+
+    /// The concrete version to request from a repository.
+    ///
+    /// For a release this is the version itself. For a `-SNAPSHOT` it is the
+    /// timestamped build the repository's metadata currently points at, because
+    /// that is the file name on disk — the *directory* keeps the `-SNAPSHOT`
+    /// spelling, which [`artifact_path`] already knows.
+    fn resolved_version(&self, artifact: &Artifact) -> Result<String, DriverError> {
+        if !is_snapshot_version(&artifact.version) {
+            return Ok(artifact.version.clone());
+        }
+        let key = coordinates(artifact);
+        if let Some(cached) = self.snapshots.lock().expect("snapshots").get(&key) {
+            return Ok(cached.clone());
+        }
+
+        let location = MetadataLocation::Version {
+            group_id: &artifact.group_id,
+            artifact_id: &artifact.artifact_id,
+            version: &artifact.version,
+        };
+        // The newest build across repositories wins, which is what Maven's
+        // metadata merge amounts to for a single snapshot.
+        let resolved = self
+            .metadata(&location.path(), &artifact.version)?
+            .into_iter()
+            .filter_map(|metadata| metadata.snapshot_version(POM, ""))
+            .max_by(|left, right| Version::parse(left).cmp(&Version::parse(right)))
+            .unwrap_or_else(|| artifact.version.clone());
+
+        self.snapshots
+            .lock()
+            .expect("snapshots")
+            .insert(key, resolved.clone());
+        Ok(resolved)
+    }
+
+    /// Reads one metadata path from every repository that has it.
+    ///
+    /// Unlike an artifact, metadata is *merged* across repositories rather than
+    /// taken from the first hit: each repository knows only about the versions it
+    /// holds, and a range must see all of them.
+    fn metadata(&self, path: &str, version_hint: &str) -> Result<Vec<Metadata>, DriverError> {
+        let repositories = self.repositories();
+        // All at once, not one after another. This sits on the synchronous
+        // critical path — every version range and every snapshot resolution goes
+        // through it — so asking three repositories in turn spent three round
+        // trips where one would do, and unlike a POM fetch there is no
+        // prefetcher running ahead to hide them.
+        let fetched: Vec<_> =
+            self.runtime
+                .block_on(futures_util::future::join_all(repositories.iter().map(
+                    |repository| {
+                        self.fetcher
+                            .optional(std::slice::from_ref(repository), path, version_hint)
+                    },
+                )));
+
+        let mut found = Vec::new();
+        for (repository, fetched) in repositories.iter().zip(fetched) {
+            let Some(fetched) = fetched? else { continue };
+            match parse_metadata(&String::from_utf8_lossy(&fetched.bytes)) {
+                Ok(metadata) => found.push(metadata),
+                // Corrupt metadata in one repository must not stop a resolve that
+                // another repository can complete.
+                Err(error) => self.warn(format!(
+                    "{}/{path} is not readable metadata and was ignored: {error}",
+                    repository.url
+                )),
+            }
+        }
+        Ok(found)
+    }
+
+    /// Builds the effective model for an artifact, or `None` when no repository
+    /// has its POM.
+    pub fn effective_model(&self, artifact: &Artifact) -> Result<Option<Model>, DriverError> {
+        let Some(model) = self.cached_pom(artifact)? else {
+            return Ok(None);
+        };
+        let source_name = coordinates(artifact);
+
+        let built = ModelBuilder::new(self, self.context.clone())
+            .with_settings_profiles(&self.settings.profiles)
+            .with_lifecycle_bindings(self.lifecycle_bindings)
+            .build(SourcedModel::new((*model).clone(), source_name.clone()))
+            .map_err(|source| DriverError::Model {
+                source_name,
+                source,
+            })?;
+
+        for problem in built.errors() {
+            // The message alone: `Problem`'s own `Display` prefixes a severity,
+            // and the CLI adds one too, so using it here reads as "warning:
+            // error: ...".
+            self.warn(format!("{} ({})", problem.message, problem.source));
+        }
+        self.register_repositories(&built.model);
+        Ok(Some(built.model))
+    }
+
+    /// Every POM this source has successfully read.
+    ///
+    /// `jv sync` needs this and nothing else needs it. Maven re-reads every POM
+    /// in the local repository and walks its parents and its imported BOMs, so a
+    /// jar whose grandparent POM or whose surefire BOM is absent fails to
+    /// resolve offline even though the jar itself is right there. jv already
+    /// fetched every one of those POMs during resolution — the model builder
+    /// reaches parents and BOMs through the same `ModelSource::get` that fills
+    /// this memo — so the memo is exactly the set Maven will look for, and is a
+    /// superset of any per-artifact parent walk.
+    pub fn read_poms(&self) -> Vec<Artifact> {
+        self.poms
+            .lock()
+            .expect("poms")
+            .iter()
+            .filter(|(_, parsed)| parsed.is_some())
+            .filter_map(|(key, _)| parse_coordinates(key))
+            .collect()
+    }
+
+    /// Records the repositories a *dependency's* POM declares.
+    ///
+    /// Contacted but never authenticated to — see [`Trust::Untrusted`]. A
+    /// dependency four levels down should not be able to name an id the user has
+    /// a password for and be handed it.
+    fn register_repositories(&self, model: &Model) {
+        let declared = declared_repositories(model);
+        if !declared.is_empty() {
+            self.add_with_trust(&declared, Trust::Untrusted);
+        }
+    }
+
+    /// Starts background fetches for the POMs of a descriptor's dependencies.
+    ///
+    /// Fire-and-forget: a failure here is not reported, because the blocking read
+    /// that follows will hit the same URL and report it properly. The only thing
+    /// this is allowed to change is how long that read takes.
+    /// Points the crawler at everything a descriptor leads to.
+    ///
+    /// The crawler follows parents and BOMs from here, so one call per
+    /// descriptor is enough to keep it a level or more ahead of collection.
+    fn prefetch_children(&self, dependencies: &[Dependency]) {
+        let repositories = self.repositories();
+        self.prefetcher.seed(
+            &repositories,
+            dependencies.iter().filter_map(|dependency| {
+                Some(Artifact {
+                    group_id: dependency.group_id.clone(),
+                    artifact_id: dependency.artifact_id.clone(),
+                    version: dependency.version.clone()?,
+                    classifier: String::new(),
+                    extension: POM.to_owned(),
+                })
+            }),
+        );
+    }
+
+    /// Starts the crawler from a project's own dependencies.
+    ///
+    /// Called before collection begins, so the first level is already arriving
+    /// while the root's own model is still being built.
+    pub fn prefetch_from(&self, dependencies: &[Dependency]) {
+        self.prefetch_children(dependencies);
+    }
+}
+
+impl ModelSource for RepositorySource {
+    fn get(
+        &self,
+        group_id: &str,
+        artifact_id: &str,
+        version: &str,
+    ) -> Result<SourcedModel, String> {
+        let artifact = Artifact::new(group_id, artifact_id, version);
+        let model = self
+            .cached_pom(&artifact)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!("{group_id}:{artifact_id}:{version} is not in any configured repository")
+            })?;
+        Ok(SourcedModel::new(
+            (*model).clone(),
+            format!("{group_id}:{artifact_id}:{version}"),
+        ))
+    }
+
+    fn get_at_path(&self, path: &std::path::Path) -> Result<Option<SourcedModel>, String> {
+        // A `<relativePath>` may name either a POM or the directory holding one,
+        // and Maven accepts both.
+        let file = if path.is_dir() {
+            path.join("pom.xml")
+        } else {
+            path.to_path_buf()
+        };
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("{}: {error}", file.display())),
+        };
+        let parsed = parse_pom(&text).map_err(|error| format!("{}: {error}", file.display()))?;
+        let basedir = file.parent().map(std::path::Path::to_path_buf);
+        let mut sourced = SourcedModel::new(parsed.model, file.display().to_string());
+        sourced.basedir = basedir;
+        Ok(Some(sourced))
+    }
+}
+
+impl DescriptorSource for RepositorySource {
+    fn descriptor(&self, artifact: &Artifact) -> Result<Descriptor, String> {
+        let key = coordinates(artifact);
+        if let Some(cached) = self.descriptors.lock().expect("descriptors").get(&key) {
+            return Ok(cached.clone());
+        }
+
+        let descriptor = self
+            .read_descriptor(artifact, &mut Vec::new())
+            .map_err(|error| error.to_string())?;
+        self.descriptors
+            .lock()
+            .expect("descriptors")
+            .insert(key, descriptor.clone());
+        self.prefetch_children(&descriptor.dependencies);
+        Ok(descriptor)
+    }
+
+    fn versions(&self, group_id: &str, artifact_id: &str) -> Result<Vec<String>, String> {
+        let key = format!("{group_id}:{artifact_id}");
+        if let Some(cached) = self.versions.lock().expect("versions").get(&key) {
+            return Ok(cached.clone());
+        }
+
+        let location = MetadataLocation::Artifact {
+            group_id,
+            artifact_id,
+        };
+        let metadata = self
+            .metadata(&location.path(), "")
+            .map_err(|error| error.to_string())?;
+
+        let mut versions: Vec<String> = Vec::new();
+        for entry in metadata {
+            for version in entry.versions() {
+                if !versions.iter().any(|held| held == version) {
+                    versions.push(version.clone());
+                }
+            }
+        }
+        // Repositories append on deploy, so the file's order says nothing about
+        // which version is greatest. Ranges need them sorted.
+        versions.sort_by(|left, right| Version::parse(left).cmp(&Version::parse(right)));
+
+        self.versions
+            .lock()
+            .expect("versions")
+            .insert(key, versions.clone());
+        Ok(versions)
+    }
+}
+
+impl RepositorySource {
+    /// Reads a descriptor, following relocations.
+    ///
+    /// `seen` guards against a relocation cycle, which is rare but has happened
+    /// in published POMs and would otherwise recurse forever.
+    fn read_descriptor(
+        &self,
+        artifact: &Artifact,
+        seen: &mut Vec<String>,
+    ) -> Result<Descriptor, DriverError> {
+        let key = coordinates(artifact);
+        if seen.contains(&key) {
+            self.warn(format!(
+                "{key} relocates in a cycle; the relocation was ignored"
+            ));
+            return Ok(Descriptor {
+                artifact: artifact.clone(),
+                ..Default::default()
+            });
+        }
+        seen.push(key);
+
+        // A POM no repository has yields an empty descriptor rather than an
+        // error, the way Maven carries on past an unreadable POM.
+        let Some(model) = self.effective_model(artifact)? else {
+            return Ok(Descriptor {
+                artifact: artifact.clone(),
+                ..Default::default()
+            });
+        };
+
+        if let Some(target) = relocation_target(artifact, &model) {
+            let mut relocated = self.read_descriptor(&target, seen)?;
+            relocated.relocations.insert(0, artifact.clone());
+            if let Some(message) = relocation_message(&model) {
+                self.warn(format!("{}: {message}", coordinates(artifact)));
+            }
+            return Ok(relocated);
+        }
+
+        Ok(Descriptor {
+            artifact: artifact.clone(),
+            dependencies: model.dependencies,
+            managed_dependencies: model.dependency_management,
+            relocations: Vec::new(),
+        })
+    }
+
+    /// The type registry the collector should use.
+    pub fn types(&self) -> &TypeRegistry {
+        &self.types
+    }
+
+    /// Where an artifact's file is, once resolved. Used by `jv sync` and by
+    /// anything that reports paths.
+    pub fn repository_path(&self, artifact: &Artifact) -> Result<String, DriverError> {
+        let resolved = Artifact {
+            version: self.resolved_version(artifact)?,
+            ..artifact.clone()
+        };
+        Ok(artifact_path(&resolved))
+    }
+
+    /// Downloads an artifact's own file.
+    pub fn materialize(&self, artifact: &Artifact) -> Result<Option<Materialized>, DriverError> {
+        let resolved = Artifact {
+            version: self.resolved_version(artifact)?,
+            ..artifact.clone()
+        };
+        let repositories = self.repositories();
+        // `locate`, not `artifact`: the caller wants the file on disk, not its
+        // contents, and reading a few hundred jars into memory to throw them away
+        // is the whole cost of a large `jv sync`.
+        match self
+            .runtime
+            .block_on(self.fetcher.locate(&repositories, &resolved))
+        {
+            Ok(fetched) => {
+                for warning in &fetched.warnings {
+                    self.warn(warning.clone());
+                }
+                Ok(Some(Materialized {
+                    origin: fetched.origin,
+                    path: fetched.path,
+                    repository: fetched.repository,
+                }))
+            }
+            Err(jv_cache::FetchError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+/// A file that is now on disk.
+#[derive(Clone, Debug)]
+pub struct Materialized {
+    pub origin: Origin,
+    /// Where the bytes are: in jv's cache, or in `~/.m2` when that is where they
+    /// were found.
+    pub path: std::path::PathBuf,
+    /// The repository that served it, when one did. `jv sync` records this in
+    /// `_remote.repositories`, which is why it has to survive this far.
+    pub repository: Option<String>,
+}
+
+/// The coordinates a relocation points at, with absent fields keeping the
+/// original's value.
+fn relocation_target(artifact: &Artifact, model: &Model) -> Option<Artifact> {
+    let relocation = model
+        .distribution_management
+        .as_ref()?
+        .relocation
+        .as_ref()?;
+    let target = Artifact {
+        group_id: relocation
+            .group_id
+            .clone()
+            .unwrap_or_else(|| artifact.group_id.clone()),
+        artifact_id: relocation
+            .artifact_id
+            .clone()
+            .unwrap_or_else(|| artifact.artifact_id.clone()),
+        version: relocation
+            .version
+            .clone()
+            .unwrap_or_else(|| artifact.version.clone()),
+        ..artifact.clone()
+    };
+    // A relocation that names nothing new is a no-op, and following it would
+    // recurse straight back into the same POM.
+    (target != *artifact).then_some(target)
+}
+
+fn relocation_message(model: &Model) -> Option<&str> {
+    model
+        .distribution_management
+        .as_ref()?
+        .relocation
+        .as_ref()?
+        .message
+        .as_deref()
+}
+
+/// The repositories a model declares, as ones jv could contact.
+fn declared_repositories(model: &Model) -> Vec<Repository> {
+    model
+        .repositories
+        .iter()
+        .filter_map(jv_repo::from_model)
+        .collect()
+}
+
+/// Reads a `g:a:v` string back into an artifact.
+///
+/// The lineage records coordinates as strings because a POM's source may be a
+/// file path rather than coordinates; anything that is not three colon-separated
+/// fields is one of those and is skipped.
+fn parse_coordinates(text: &str) -> Option<Artifact> {
+    let mut fields = text.split(':');
+    let (group_id, artifact_id, version) = (fields.next()?, fields.next()?, fields.next()?);
+    if fields.next().is_some() || version.contains('$') {
+        return None;
+    }
+    Some(Artifact {
+        group_id: group_id.to_owned(),
+        artifact_id: artifact_id.to_owned(),
+        version: version.to_owned(),
+        classifier: String::new(),
+        extension: POM.to_owned(),
+    })
+}
+
+fn coordinates(artifact: &Artifact) -> String {
+    format!(
+        "{}:{}:{}",
+        artifact.group_id, artifact.artifact_id, artifact.version
+    )
+}

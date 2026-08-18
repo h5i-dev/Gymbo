@@ -218,11 +218,16 @@ fn interpolate_activation_value(text: &str, activation: &ActivationContext<'_>) 
             "basedir" | "project.basedir" => activation
                 .basedir
                 .map(|dir| dir.to_string_lossy().into_owned()),
+            // Model properties first, then user, then system — the order
+            // `DefaultModelBuilder.interpolateActivations` registers its value
+            // sources in, and the reverse of the priority interpolation proper
+            // uses. Confirmed against 3.9.9: with `<flavour>frompom</flavour>` in
+            // the POM and `-Dflavour=fromcli` on the command line, an activation
+            // value of `${flavour}` compares as `frompom`.
             other => activation
-                .context
-                .user_properties
+                .model_properties
                 .get(other)
-                .or_else(|| activation.model_properties.get(other))
+                .or_else(|| activation.context.user_properties.get(other))
                 .or_else(|| activation.context.system_properties.get(other))
                 .cloned(),
         };
@@ -426,10 +431,12 @@ fn os_matches(os: &ActivationOs, activation: &ActivationContext<'_>) -> bool {
 
     // Evaluated family, name, arch, version — all ANDed.
     if let Some(family) = &os.family {
-        let family = interpolate_activation_value(family, activation);
+        // Lower-cased first: Maven 3.9's `determineFamilyMatch` does
+        // `family.toLowerCase(Locale.ENGLISH)` before comparing, so
+        // `<family>Unix</family>` matches on Linux. (Maven 4 dropped that, which
+        // is what the code here used to implement.) Verified against 3.9.9.
+        let family = interpolate_activation_value(family, activation).to_lowercase();
         let (negated, family) = split_negation(&family);
-        // Upstream does not lower-case the declared family before dispatching;
-        // the substring fallback is what makes mixed case appear to work.
         if negated == is_family(family, &actual_name, &path_separator) {
             return false;
         }
@@ -449,14 +456,21 @@ fn os_matches(os: &ActivationOs, activation: &ActivationContext<'_>) -> bool {
         }
     }
     if let Some(version) = &os.version {
-        let version = interpolate_activation_value(version, activation).to_lowercase();
+        let version = interpolate_activation_value(version, activation);
         // `regex:` is checked before negation, so `!regex:…` is a literal
         // comparison against the whole string.
+        //
+        // The pattern keeps its case. Only the plain-comparison branch is
+        // lower-cased, because upstream lower-cases the *value* it compares
+        // against and uses the pattern as written — `regex:.*MICROSOFT.*`
+        // matches nothing on a host whose `os.version` is lower-case, and jv
+        // used to match it by folding the pattern too.
         if let Some(pattern) = version.strip_prefix("regex:") {
             if !regex_full_match(pattern, &actual_version) {
                 return false;
             }
         } else {
+            let version = version.to_lowercase();
             let (negated, version) = split_negation(&version);
             if negated == (actual_version == version) {
                 return false;
@@ -747,6 +761,7 @@ fn file_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use jv_model::parse_pom;
 
     fn profiles_of(xml: &str) -> Vec<Profile> {
@@ -975,6 +990,60 @@ mod tests {
             .with_system_property(OS_VERSION, version)
             .with_system_property("path.separator", ":");
         !activate(&profiles, &context, None).0.is_empty()
+    }
+
+    /// Both checked against a real Maven 3.9.9 before being written down.
+    #[test]
+    fn an_os_family_is_matched_case_insensitively() {
+        // Maven 3.9's `determineFamilyMatch` lower-cases the declared family
+        // first. Maven 4 dropped that, and jv had implemented Maven 4's rule, so
+        // `<family>Unix</family>` silently stopped matching on Linux — and an
+        // activator that never matches looks exactly like one whose condition is
+        // false.
+        for spelling in ["unix", "Unix", "UNIX"] {
+            assert!(
+                os_active(
+                    &format!("<family>{spelling}</family>"),
+                    "Linux",
+                    "amd64",
+                    "6.1"
+                ),
+                "{spelling} should match"
+            );
+        }
+        assert!(!os_active(
+            "<family>Windows</family>",
+            "Linux",
+            "amd64",
+            "6.1"
+        ));
+    }
+
+    #[test]
+    fn an_os_version_regex_keeps_its_case_while_a_plain_comparison_does_not() {
+        // Upstream lower-cases the value it compares against and uses the
+        // pattern as written, so a pattern spelled in upper case matches
+        // nothing. Folding the pattern too made it match, which Maven does not.
+        assert!(os_active(
+            "<version>regex:.*microsoft.*</version>",
+            "Linux",
+            "amd64",
+            "6.6.87-microsoft-standard"
+        ));
+        assert!(!os_active(
+            "<version>regex:.*MICROSOFT.*</version>",
+            "Linux",
+            "amd64",
+            "6.6.87-microsoft-standard"
+        ));
+        // A plain comparison stays case-insensitive.
+        assert!(os_active("<version>6.1</version>", "Linux", "amd64", "6.1"));
+        assert!(os_active(
+            "<version>6.1-RC</version>",
+            "Linux",
+            "amd64",
+            "6.1-rc"
+        ));
     }
 
     #[test]

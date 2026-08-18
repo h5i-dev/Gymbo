@@ -22,6 +22,7 @@
 //! Maven 4's `${var:-default}` / `${var:+alt}` operators and `\${` escaping do
 //! not exist in 3.9 and are deliberately not implemented.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use jv_model::{Dependency, Model};
@@ -35,12 +36,59 @@ use crate::problem::Problem;
 const PROJECT_PREFIXES: &[&str] = &["pom.", "project."];
 
 /// Expands `${...}` against a model and its environment.
+/// How deep a chain of `${a}` -> `${b}` -> ... may go.
+///
+/// Real POMs are two or three. The bound is here because expansion recurses, and
+/// a POM built to be deep would otherwise overflow the stack — which with
+/// `panic = "abort"` is a process abort rather than an error.
+const MAX_EXPANSION_DEPTH: usize = 128;
+
+/// The expressions currently being expanded, for cycle detection.
+///
+/// A vector for the order and a set for the membership test. The linear scan it
+/// replaces was O(depth) at every level, which is another factor of n on a POM
+/// whose properties form a long chain.
+#[derive(Debug, Default)]
+struct Stack {
+    order: Vec<String>,
+    held: std::collections::HashSet<String>,
+}
+
+impl Stack {
+    fn contains(&self, expression: &str) -> bool {
+        self.held.contains(expression)
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn push(&mut self, expression: &str) {
+        self.order.push(expression.to_owned());
+        self.held.insert(expression.to_owned());
+    }
+
+    fn pop(&mut self, expression: &str) {
+        self.order.pop();
+        self.held.remove(expression);
+    }
+}
+
 pub struct Interpolator<'a> {
     model: &'a Model,
     basedir: Option<&'a Path>,
     context: &'a BuildContext,
     /// Used to attribute problems to a POM.
     source: String,
+    /// Expressions already expanded, and what they came to.
+    ///
+    /// An expression's value does not depend on where it was reached from, so
+    /// once is enough. Without this a chain of properties each referring to the
+    /// next is re-expanded from every entry point, which made a 100 KB POM take
+    /// 25 seconds where Maven takes two — `StringSearchInterpolator` caches for
+    /// exactly this reason. Only completed expansions are stored; a cycle
+    /// resolves to nothing and must be reported every time it is reached.
+    resolved: std::cell::RefCell<HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for Interpolator<'_> {
@@ -64,6 +112,7 @@ impl<'a> Interpolator<'a> {
             basedir,
             context,
             source: source.into(),
+            resolved: std::cell::RefCell::default(),
         }
     }
 
@@ -77,7 +126,7 @@ impl<'a> Interpolator<'a> {
         if !text.contains('$') {
             return text.to_owned();
         }
-        let mut stack = Vec::new();
+        let mut stack = Stack::default();
         self.expand(text, &mut stack, problems)
     }
 
@@ -90,7 +139,7 @@ impl<'a> Interpolator<'a> {
         }
     }
 
-    fn expand(&self, text: &str, stack: &mut Vec<String>, problems: &mut Vec<Problem>) -> String {
+    fn expand(&self, text: &str, stack: &mut Stack, problems: &mut Vec<Problem>) -> String {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
         loop {
@@ -121,25 +170,49 @@ impl<'a> Interpolator<'a> {
     fn resolve(
         &self,
         expression: &str,
-        stack: &mut Vec<String>,
+        stack: &mut Stack,
         problems: &mut Vec<Problem>,
     ) -> Option<String> {
-        if stack.iter().any(|held| held == expression) {
+        if let Some(cached) = self.resolved.borrow().get(expression) {
+            return Some(cached.clone());
+        }
+        if stack.contains(expression) {
             problems.push(Problem::error(
                 &self.source,
                 format!("recursive variable reference: {expression}"),
             ));
             return None;
         }
+        // A property chain is expanded by recursion, so its depth is the chain's
+        // length. Bounded so a POM built to be deep cannot overflow the stack —
+        // which with `panic = "abort"` would be a process abort, not an error.
+        if stack.len() >= MAX_EXPANSION_DEPTH {
+            problems.push(Problem::error(
+                &self.source,
+                format!(
+                    "expression {expression} is nested more than {MAX_EXPANSION_DEPTH} deep and was left unexpanded"
+                ),
+            ));
+            return None;
+        }
+
         let raw = self.lookup(expression)?;
         // A resolved value may itself contain placeholders.
         if !raw.contains('$') {
+            self.remember(expression, &raw);
             return Some(raw);
         }
-        stack.push(expression.to_owned());
+        stack.push(expression);
         let expanded = self.expand(&raw, stack, problems);
-        stack.pop();
+        stack.pop(expression);
+        self.remember(expression, &expanded);
         Some(expanded)
+    }
+
+    fn remember(&self, expression: &str, value: &str) {
+        self.resolved
+            .borrow_mut()
+            .insert(expression.to_owned(), value.to_owned());
     }
 
     /// One expression, in Maven 3.9's source order.
@@ -189,6 +262,18 @@ impl<'a> Interpolator<'a> {
         self.basedir.map(|dir| dir.to_string_lossy().into_owned())
     }
 
+    /// A build path, resolved against the project directory.
+    ///
+    /// Left alone when it is already absolute, or when there is no directory to
+    /// resolve against — a POM read out of a repository has none.
+    fn aligned(&self, path: Option<&str>) -> Option<String> {
+        let path = path?;
+        let (Some(basedir), false) = (self.basedir, Path::new(path).is_absolute()) else {
+            return Some(path.to_owned());
+        };
+        Some(basedir.join(path).to_string_lossy().into_owned())
+    }
+
     /// Evaluates a path against the model.
     ///
     /// `basedir` and `baseUri` resolve only when reached through a `project.` or
@@ -201,8 +286,11 @@ impl<'a> Interpolator<'a> {
                 "basedir" => return self.basedir_string(),
                 "baseUri" => {
                     return self.basedir.map(|dir| {
-                        // Maven renders this as a file: URI.
-                        format!("file://{}", dir.to_string_lossy())
+                        // Maven renders this as a directory URI, and a directory
+                        // URI ends in `/`. Without it, `${project.baseUri}src`
+                        // yields a sibling of the project rather than a path
+                        // inside it.
+                        format!("file://{}/", dir.to_string_lossy().trim_end_matches('/'))
                     });
                 }
                 _ => {}
@@ -221,12 +309,27 @@ impl<'a> Interpolator<'a> {
             "parent.groupId" => model.parent.as_ref()?.group_id.clone(),
             "parent.artifactId" => model.parent.as_ref()?.artifact_id.clone(),
             "parent.version" => model.parent.as_ref()?.version.clone(),
-            "build.directory" => model.build.as_ref()?.directory.clone(),
-            "build.outputDirectory" => model.build.as_ref()?.output_directory.clone(),
-            "build.testOutputDirectory" => model.build.as_ref()?.test_output_directory.clone(),
-            "build.sourceDirectory" => model.build.as_ref()?.source_directory.clone(),
-            "build.testSourceDirectory" => model.build.as_ref()?.test_source_directory.clone(),
-            "build.scriptSourceDirectory" => model.build.as_ref()?.script_source_directory.clone(),
+            // Build paths come back absolute. Maven's `alignToBaseDirectory`
+            // runs over the *resolved* value, so `${project.build.directory}/x`
+            // is a real path and not a fragment relative to nothing — the POM's
+            // own `<directory>` stays as written, but every expression reading it
+            // gets the aligned form.
+            "build.directory" => self.aligned(model.build.as_ref()?.directory.as_deref()),
+            "build.outputDirectory" => {
+                self.aligned(model.build.as_ref()?.output_directory.as_deref())
+            }
+            "build.testOutputDirectory" => {
+                self.aligned(model.build.as_ref()?.test_output_directory.as_deref())
+            }
+            "build.sourceDirectory" => {
+                self.aligned(model.build.as_ref()?.source_directory.as_deref())
+            }
+            "build.testSourceDirectory" => {
+                self.aligned(model.build.as_ref()?.test_source_directory.as_deref())
+            }
+            "build.scriptSourceDirectory" => {
+                self.aligned(model.build.as_ref()?.script_source_directory.as_deref())
+            }
             "build.finalName" => model.build.as_ref()?.final_name.clone(),
             "build.defaultGoal" => model.build.as_ref()?.default_goal.clone(),
             "distributionManagement.status" => {
@@ -601,7 +704,9 @@ mod tests {
         );
         assert_eq!(
             interpolator.interpolate("${project.baseUri}", &mut problems),
-            "file:///work/project"
+            // Trailing slash: it is a *directory* URI, and Maven writes one.
+            // `${project.baseUri}src` must land inside the project.
+            "file:///work/project/"
         );
         // baseUri has no un-prefixed spelling.
         assert_eq!(

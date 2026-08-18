@@ -355,6 +355,29 @@ then `groupId`, `artifactId`, `version`, `extensions`, `executions`, `dependenci
 lifecycle exception above); `goals` union (target first, duplicates removed);
 `configuration`/`inherited` per `ConfigurationContainer`.
 
+#### Where the bindings themselves come from, and in what order
+
+`DefaultLifecyclePluginAnalyzer.getPluginsBoundByDefaultToAllLifecycles(packaging)` builds the source
+model's plugin list. Three things about it are not guessable from the code alone:
+
+* The data is in `maven-core-3.9.9.jar`, not in Maven's source-controlled Java: the `default`
+  lifecycle's per-packaging phase→goal mapping is `META-INF/plexus/default-bindings.xml`
+  (packagings `pom`, `jar`, `ejb`, `maven-plugin`, `war`, `ear`, `rar`), and the `clean` and `site`
+  lifecycles' packaging-independent `<default-phases>` are in `META-INF/plexus/components.xml`.
+  Each entry is `groupId:artifactId:version:goal`, comma-separated where a phase binds several.
+* Lifecycles are visited in **id order** (`getOrderedLifecycles` sorts them), so every effective POM
+  lists the `clean` binding first, then the `default` ones, then `site`.
+* Within one lifecycle the phases are visited in **`java.util.HashMap` bucket order**, because plexus
+  deserializes `<phases>` into a plain `HashMap` and the analyzer walks its `entrySet`. No mapping
+  exceeds nine phases, so the table stays at its initial 16 buckets and the order is
+  `(h ^ h >>> 16) & 15` over `String.hashCode`, ties broken by document order. This is why a `jar`
+  project's effective POM lists maven-jar-plugin *before* maven-compiler-plugin, and why
+  maven-resources-plugin's `default-testResources` execution precedes `default-resources`.
+
+A plugin is emitted once, at the first phase that binds it, accumulating one execution per goal with
+id `default-<goal>` (colliding ids get a `-1`, `-2` suffix; no 3.9.9 mapping collides) and `phase` set
+to the binding phase.
+
 ### 2.6 Reporting
 
 * `Reporting.plugins` — `InheritanceModelMerger.mergeReporting_Plugins`: parent report plugins are

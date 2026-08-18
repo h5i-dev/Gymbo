@@ -1,0 +1,42 @@
+[package]
+name = "jv-cli"
+description = "The jv command-line tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "jv_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jv"
+path = "src/main.rs"
+
+# `jvx` is a second binary rather than a second crate so that it shares one
+# definition of the flags: a `jvx -o` that meant something different from
+# `jv -o` would be a bug nobody would think to test for.
+[[bin]]
+name = "jvx"
+path = "src/jvx.rs"
+
+[dependencies]
+jv-cache = { workspace = true }
+jv-driver = { workspace = true }
+jv-exec = { workspace = true }
+jv-model = { workspace = true }
+jv-repo = { workspace = true }
+jv-resolver = { workspace = true }
+jv-tree = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+owo-colors = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

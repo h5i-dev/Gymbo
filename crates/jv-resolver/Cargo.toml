@@ -1,0 +1,20 @@
+[package]
+name = "jv-resolver"
+description = "Maven-compatible dependency collection and conflict resolution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+jv-model = { workspace = true }
+jv-version = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+jv-testkit = { workspace = true }
+
+[lints]
+workspace = true

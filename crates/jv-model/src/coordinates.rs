@@ -32,6 +32,22 @@ pub struct Artifact {
     pub extension: String,
 }
 
+impl Default for Artifact {
+    /// An empty artifact whose extension is still `jar`.
+    ///
+    /// Deriving this would leave the extension empty, which is not a value any
+    /// Maven artifact has and would produce a file name ending in a bare dot.
+    fn default() -> Self {
+        Self {
+            group_id: String::new(),
+            artifact_id: String::new(),
+            version: String::new(),
+            classifier: String::new(),
+            extension: DEFAULT_EXTENSION.to_owned(),
+        }
+    }
+}
+
 impl Artifact {
     /// Builds a plain jar artifact.
     pub fn new(
@@ -310,57 +326,83 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
 }
 
 /// The suffix that marks a version as a snapshot.
-pub const SNAPSHOT_SUFFIX: &str = "-SNAPSHOT";
+/// The suffix a declared snapshot ends with.
+///
+/// No leading dash, matching `Artifact.SNAPSHOT`. The dash is conventional, not
+/// required, and Maven's own test is `endsWith("SNAPSHOT")`.
+pub const SNAPSHOT: &str = "SNAPSHOT";
 
 /// Whether a version string denotes a snapshot, in either spelling.
 ///
-/// A declared snapshot ends in `-SNAPSHOT`; a resolved one carries the
-/// deployment timestamp and build number instead, as in
-/// `1.0-20240115.103000-7`.
+/// A declared snapshot ends in `SNAPSHOT`; a resolved one carries the deployment
+/// timestamp and build number instead, as in `1.0-20240115.103000-7`.
+///
+/// Ported from `AbstractArtifact.isSnapshot` (maven-resolver), which is
+/// `version.endsWith("SNAPSHOT")` or a match of
+/// `^(.*-)?([0-9]{8}\.[0-9]{6}-[0-9]+)$`. Note the suffix test has **no**
+/// leading dash: `1.0SNAPSHOT` is a snapshot to Maven.
 pub fn is_snapshot_version(version: &str) -> bool {
-    version.ends_with(SNAPSHOT_SUFFIX) || timestamp_suffix_start(version).is_some()
+    version.ends_with(SNAPSHOT) || timestamp_prefix_len(version).is_some()
 }
 
-/// Rewrites a resolved snapshot version back to its `-SNAPSHOT` form.
+/// Rewrites a resolved snapshot version back to its `SNAPSHOT` form.
+///
+/// Ported from `AbstractArtifact.toBaseVersion`. A version range is returned
+/// unchanged — `[1.0,2.0)` is not a version and has no base — and a bare
+/// timestamp with nothing in front of it becomes plain `SNAPSHOT`, because the
+/// regex's prefix group is optional.
 pub fn base_version_of(version: &str) -> String {
-    match timestamp_suffix_start(version) {
-        Some(start) => format!("{}{}", &version[..start], SNAPSHOT_SUFFIX),
+    // A range is not a version. Upstream checks this before the regex, and
+    // without it `[1.0-20240115.103000-7]` would be rewritten into nonsense.
+    if version.starts_with('[') || version.starts_with('(') {
+        return version.to_owned();
+    }
+    match timestamp_prefix_len(version) {
+        Some(prefix) => format!("{}{}", &version[..prefix], SNAPSHOT),
         None => version.to_owned(),
     }
 }
 
-/// Finds where a `yyyyMMdd.HHmmss-buildNumber` suffix begins, if the version has
-/// one.
+/// The length of the `(.*-)?` prefix, if the version ends in a deployment
+/// timestamp.
 ///
-/// Returns the index of the separator before the timestamp, so callers can both
-/// strip it and rebuild the base version.
-fn timestamp_suffix_start(version: &str) -> Option<usize> {
-    // The build number follows the last '-'.
-    let dash = version.rfind('-')?;
-    let build_number = &version[dash + 1..];
-    if build_number.is_empty() || !build_number.bytes().all(|b| b.is_ascii_digit()) {
+/// `Some(0)` is a real answer: it means the whole version *is* the timestamp,
+/// whose base version is a bare `SNAPSHOT`.
+///
+/// Works on bytes rather than characters, which is both faster and the reason
+/// this cannot panic. The pattern is entirely ASCII, so a byte that is part of a
+/// multi-byte character can never match a digit or a delimiter — but slicing at
+/// a fixed offset from the end *would* land inside one, and did: a version like
+/// `1.0-日本語版-1` used to abort the resolve that read it.
+fn timestamp_prefix_len(version: &str) -> Option<usize> {
+    // `-[0-9]+` at the end.
+    let bytes = version.as_bytes();
+    let dash = bytes.iter().rposition(|byte| *byte == b'-')?;
+    let build_number = &bytes[dash + 1..];
+    if build_number.is_empty() || !build_number.iter().all(u8::is_ascii_digit) {
         return None;
     }
 
-    // Before it sits `<8 digits>.<6 digits>`, itself preceded by a separator.
-    let timestamp_end = dash;
-    if timestamp_end < 15 {
+    // `[0-9]{8}\.[0-9]{6}` immediately before it.
+    const TIMESTAMP: usize = 15;
+    let timestamp_start = dash.checked_sub(TIMESTAMP)?;
+    let timestamp = &bytes[timestamp_start..dash];
+    let matches = timestamp[..8].iter().all(u8::is_ascii_digit)
+        && timestamp[8] == b'.'
+        && timestamp[9..].iter().all(u8::is_ascii_digit);
+    if !matches {
         return None;
     }
-    let timestamp = &version[timestamp_end - 15..timestamp_end];
-    let (date, time) = timestamp.split_at(8);
-    if date.bytes().all(|b| b.is_ascii_digit())
-        && time.starts_with('.')
-        && time[1..].bytes().all(|b| b.is_ascii_digit())
-    {
-        let separator = timestamp_end - 15;
-        // A bare timestamp with nothing in front of it is not a snapshot
-        // version, and the character in front must be a delimiter.
-        if separator > 0 && matches!(version.as_bytes()[separator - 1], b'-' | b'.' | b'_') {
-            return Some(separator - 1);
-        }
+
+    // The optional prefix must end in `-`, and only `-`. Accepting `.` or `_`
+    // here turns `1.0.20240115.103000-7` — a perfectly ordinary release version
+    // — into a snapshot, and jv would then look for it under a `1.0-SNAPSHOT`
+    // directory that does not exist.
+    match timestamp_start {
+        0 => Some(0),
+        _ if bytes[timestamp_start - 1] == b'-' => Some(timestamp_start),
+        _ => None,
     }
-    None
 }
 
 #[cfg(test)]
@@ -450,6 +492,65 @@ mod tests {
             "2.1.3-SNAPSHOT"
         );
         assert_eq!(base_version_of("1.0-SNAPSHOT"), "1.0-SNAPSHOT");
+    }
+
+    #[test]
+    fn a_version_with_multi_byte_characters_does_not_panic() {
+        // These came off a POM someone published. Slicing at a fixed byte offset
+        // from the end used to land inside a character and abort the resolve.
+        for version in [
+            "1.0.0-Ünïcödé-1",
+            "1.0-日本語版-1",
+            "日aaaaaaaaaaaaa-1",
+            "\u{1f600}aaaaaaaaaaaa-1",
+            "é-20240115.103000-7",
+        ] {
+            let _ = is_snapshot_version(version);
+            let _ = base_version_of(version);
+        }
+        // And the accented prefix is still recognised correctly.
+        assert!(is_snapshot_version("é-20240115.103000-7"));
+        assert_eq!(base_version_of("é-20240115.103000-7"), "é-SNAPSHOT");
+    }
+
+    #[test]
+    fn only_a_dash_may_precede_the_timestamp() {
+        // Maven's regex prefix group is `(.*-)?`. Accepting `.` here would turn
+        // an ordinary release into a snapshot and send jv looking for it under a
+        // `-SNAPSHOT` directory that does not exist.
+        assert!(!is_snapshot_version("1.0.20240115.103000-7"));
+        assert!(!is_snapshot_version("1.0_20240115.103000-7"));
+        assert_eq!(
+            base_version_of("1.0.20240115.103000-7"),
+            "1.0.20240115.103000-7"
+        );
+        assert!(is_snapshot_version("1.0-20240115.103000-7"));
+    }
+
+    #[test]
+    fn a_bare_timestamp_has_a_bare_snapshot_base() {
+        // The prefix group is optional, so the whole version can be a timestamp.
+        assert!(is_snapshot_version("20240115.103000-7"));
+        assert_eq!(base_version_of("20240115.103000-7"), "SNAPSHOT");
+    }
+
+    #[test]
+    fn the_snapshot_suffix_does_not_require_a_dash() {
+        // Maven's test is `endsWith("SNAPSHOT")`.
+        assert!(is_snapshot_version("1.0SNAPSHOT"));
+        assert!(is_snapshot_version("SNAPSHOT"));
+        assert!(!is_snapshot_version("1.0-snapshot"));
+    }
+
+    #[test]
+    fn a_range_is_not_rewritten() {
+        // A range is not a version and has no base version; upstream checks this
+        // before the pattern, and without it the rewrite produces nonsense.
+        assert_eq!(base_version_of("[1.0,2.0)"), "[1.0,2.0)");
+        assert_eq!(
+            base_version_of("[1.0-20240115.103000-7]"),
+            "[1.0-20240115.103000-7]"
+        );
         assert_eq!(base_version_of("1.0"), "1.0");
         // Not a timestamp: too few digits.
         assert_eq!(

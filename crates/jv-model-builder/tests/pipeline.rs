@@ -787,6 +787,61 @@ fn the_super_poms_plugin_management_is_available() {
 }
 
 #[test]
+fn lifecycle_bindings_stay_out_unless_asked_for() {
+    // Resolving dependencies never reads <build><plugins>, so the callers that
+    // only resolve must not start paying for a plugin list.
+    let built = build(
+        r#"<project><groupId>g</groupId><artifactId>a</artifactId><version>1.0</version></project>"#,
+        &[],
+    );
+    assert!(
+        built
+            .model
+            .build
+            .as_ref()
+            .is_none_or(|build| build.plugins.is_empty())
+    );
+}
+
+#[test]
+fn lifecycle_bindings_are_injected_after_plugin_management() {
+    // The pin is only reachable by the lifecycle merge: pluginManagement
+    // injection ran while <plugins> was still empty.
+    let mut source = MapModelSource::new();
+    source.insert(
+        "g",
+        "parent",
+        "1.0",
+        r#"<project>
+             <groupId>g</groupId><artifactId>parent</artifactId><version>1.0</version>
+             <build><pluginManagement><plugins>
+               <plugin><artifactId>maven-surefire-plugin</artifactId><version>3.5.0</version></plugin>
+             </plugins></pluginManagement></build>
+           </project>"#,
+    );
+    let child = parse_pom(
+        r#"<project>
+             <parent><groupId>g</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+             <artifactId>a</artifactId>
+           </project>"#,
+    )
+    .expect("child parses")
+    .model;
+    let built = ModelBuilder::new(&source, BuildContext::empty())
+        .with_lifecycle_bindings(true)
+        .build(SourcedModel::new(child, "test/pom.xml"))
+        .expect("build succeeds");
+
+    let plugins = &built.model.build.as_ref().expect("a build section").plugins;
+    let surefire = plugins
+        .iter()
+        .find(|plugin| plugin.artifact_id.as_deref() == Some("maven-surefire-plugin"))
+        .expect("surefire is bound to the jar lifecycle");
+    assert_eq!(surefire.version.as_deref(), Some("3.5.0"));
+    assert_eq!(surefire.executions[0].phase.as_deref(), Some("test"));
+}
+
+#[test]
 fn scope_and_optional_survive_the_pipeline_intact() {
     let built = build(
         r#"<project>
@@ -806,4 +861,247 @@ fn scope_and_optional_survive_the_pipeline_intact() {
     assert!(dependency.is_optional());
     assert_eq!(dependency.exclusions.len(), 1);
     assert!(dependency.exclusions[0].matches("e", "anything"));
+}
+
+// ---------------------------------------------------------------- activation
+//
+// Every case below was checked against a real Maven 3.9.9 before being written
+// down. These are the activators whose rules are surprising enough that reading
+// the source got them wrong at least once.
+
+/// The property that nothing declares and everything can activate on.
+#[test]
+fn packaging_activates_a_profile_without_anyone_declaring_it() {
+    // `getProfileActivationContext` seeds `packaging` into the user properties.
+    // Without it this activator can never fire, which is how it read before —
+    // silently, since an activator that never matches looks exactly like one
+    // whose condition is false.
+    let built = build_with(
+        r#"<project>
+             <groupId>g</groupId><artifactId>a</artifactId><version>1</version>
+             <packaging>war</packaging>
+             <profiles><profile><id>wars</id>
+               <activation><property><name>packaging</name><value>war</value></property></activation>
+               <properties><marker>yes</marker></properties>
+             </profile></profiles>
+           </project>"#,
+        &[],
+        BuildContext::empty(),
+    );
+    assert_eq!(built.active_profiles, ["wars"]);
+    assert_eq!(
+        built.model.properties.get("marker").map(String::as_str),
+        Some("yes")
+    );
+}
+
+#[test]
+fn an_explicit_packaging_property_beats_the_seeded_one() {
+    // `computeIfAbsent`, so `-Dpackaging=...` wins.
+    let mut context = BuildContext::empty();
+    context
+        .user_properties
+        .insert("packaging".to_owned(), "jar".to_owned());
+    let built = build_with(
+        r#"<project>
+             <groupId>g</groupId><artifactId>a</artifactId><version>1</version>
+             <packaging>war</packaging>
+             <profiles><profile><id>wars</id>
+               <activation><property><name>packaging</name><value>war</value></property></activation>
+             </profile></profiles>
+           </project>"#,
+        &[],
+        context,
+    );
+    assert!(built.active_profiles.is_empty());
+}
+
+#[test]
+fn an_activation_value_reads_the_poms_property_before_the_command_lines() {
+    // Verified: with `<flavour>frompom</flavour>` in the POM and
+    // `-Dflavour=fromcli -Dmarker=fromcli`, Maven leaves this profile inactive,
+    // because it interpolates the *value* against the POM's properties first.
+    // That is the reverse of interpolation proper, where `-D` wins.
+    let mut context = BuildContext::empty();
+    context
+        .user_properties
+        .insert("flavour".to_owned(), "fromcli".to_owned());
+    context
+        .user_properties
+        .insert("marker".to_owned(), "fromcli".to_owned());
+
+    let pom = r#"<project>
+         <groupId>g</groupId><artifactId>a</artifactId><version>1</version>
+         <properties><flavour>frompom</flavour></properties>
+         <profiles><profile><id>p</id>
+           <activation><property><name>marker</name><value>${flavour}</value></property></activation>
+         </profile></profiles>
+       </project>"#;
+    assert!(build_with(pom, &[], context).active_profiles.is_empty());
+
+    // And it activates when the command line names what the POM says.
+    let mut context = BuildContext::empty();
+    context
+        .user_properties
+        .insert("flavour".to_owned(), "fromcli".to_owned());
+    context
+        .user_properties
+        .insert("marker".to_owned(), "frompom".to_owned());
+    assert_eq!(build_with(pom, &[], context).active_profiles, ["p"]);
+}
+
+// ------------------------------------------------- duplicates and basedir
+
+#[test]
+fn a_duplicated_managed_key_resolves_to_the_last_when_management_is_inherited() {
+    // Checked against 3.9.9 both ways, because the rule is conditional and
+    // reads like a bug either way you find it. Maven's generated merger seeds
+    // its list with `mergeAll(target, sourceDominant=true)` — which collapses
+    // the target's duplicates last-wins — but only when there is a source list
+    // to merge, i.e. only when something was inherited.
+    let built = build_with(
+        r#"<project>
+             <parent><groupId>g</groupId><artifactId>parent</artifactId><version>1</version></parent>
+             <artifactId>child</artifactId>
+             <dependencyManagement><dependencies>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId><version>FIRST</version></dependency>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId><version>SECOND</version></dependency>
+             </dependencies></dependencyManagement>
+             <dependencies>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId></dependency>
+             </dependencies>
+           </project>"#,
+        &[(
+            "g",
+            "parent",
+            "1",
+            r#"<project><groupId>g</groupId><artifactId>parent</artifactId><version>1</version>
+                 <dependencyManagement><dependencies>
+                   <dependency><groupId>other</groupId><artifactId>other</artifactId><version>9</version></dependency>
+                 </dependencies></dependencyManagement>
+               </project>"#,
+        )],
+        BuildContext::empty(),
+    );
+    assert_eq!(
+        built.model.dependencies[0].version.as_deref(),
+        Some("SECOND")
+    );
+}
+
+#[test]
+fn a_duplicated_managed_key_resolves_to_the_first_when_nothing_is_inherited() {
+    // The other half of the same rule: with no parent management the merge never
+    // runs, the duplicates are never collapsed, and injection finds the first.
+    let built = build_with(
+        r#"<project>
+             <groupId>g</groupId><artifactId>solo</artifactId><version>1</version>
+             <dependencyManagement><dependencies>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId><version>FIRST</version></dependency>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId><version>SECOND</version></dependency>
+             </dependencies></dependencyManagement>
+             <dependencies>
+               <dependency><groupId>d</groupId><artifactId>d</artifactId></dependency>
+             </dependencies>
+           </project>"#,
+        &[],
+        BuildContext::empty(),
+    );
+    assert_eq!(
+        built.model.dependencies[0].version.as_deref(),
+        Some("FIRST")
+    );
+}
+
+#[test]
+fn a_parents_file_activation_looks_beside_the_child() {
+    // `<file><exists>` in a *parent* resolves against the directory of the POM
+    // being built, not the parent's own — Maven sets `projectDirectory` once,
+    // from the request's POM file. Checked against 3.9.9: a marker beside the
+    // parent leaves the profile inactive when the child is built.
+    let workspace = tempfile::tempdir().expect("a temp dir");
+    let child_dir = workspace.path().join("child");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    std::fs::write(workspace.path().join("marker.txt"), b"beside the parent").unwrap();
+
+    let parent = r#"<project><groupId>g</groupId><artifactId>parent</artifactId><version>1</version>
+         <profiles><profile><id>has-marker</id>
+           <activation><file><exists>marker.txt</exists></file></activation>
+         </profile></profiles></project>"#;
+    let child = r#"<project>
+         <parent><groupId>g</groupId><artifactId>parent</artifactId><version>1</version></parent>
+         <artifactId>child</artifactId></project>"#;
+
+    // Registered *at a path*, so it is found through `<relativePath>` and
+    // carries a basedir of its own — which is exactly the case the two rules
+    // differ on. A parent looked up by coordinates has no directory, so the old
+    // code fell back to the child's and looked right.
+    let mut source = MapModelSource::new();
+    source.insert_at_path(workspace.path().join("pom.xml"), parent);
+    let model = parse_pom(child).expect("child parses").model;
+    let built = ModelBuilder::new(&source, BuildContext::empty())
+        .build(SourcedModel::new(model, "child/pom.xml").with_basedir(&child_dir))
+        .expect("build succeeds");
+    assert!(
+        built.active_profiles.is_empty(),
+        "the marker beside the parent should not activate while building the child"
+    );
+
+    // And it does activate once the marker is beside the child.
+    std::fs::write(child_dir.join("marker.txt"), b"beside the child").unwrap();
+    let model = parse_pom(child).expect("child parses").model;
+    let built = ModelBuilder::new(&source, BuildContext::empty())
+        .build(SourcedModel::new(model, "child/pom.xml").with_basedir(&child_dir))
+        .expect("build succeeds");
+    assert_eq!(built.active_profiles, ["has-marker"]);
+}
+
+#[test]
+fn derived_build_paths_and_system_properties_resolve_like_mavens() {
+    // All four checked against a real Maven 3.9.9 in one POM. These are the
+    // values a POM *derives* — the fields themselves were already right, which
+    // is why the gap went unnoticed.
+    let workspace = tempfile::tempdir().expect("a temp dir");
+    let pom = r#"<project>
+         <groupId>g</groupId><artifactId>i</artifactId><version>1</version>
+         <build><directory>tgt</directory></build>
+         <properties>
+           <derived.dir>${project.build.directory}/foo</derived.dir>
+           <derived.uri>${project.baseUri}</derived.uri>
+           <derived.separator>${file.separator}</derived.separator>
+         </properties>
+       </project>"#;
+    let model = parse_pom(pom).expect("parses").model;
+    let built = ModelBuilder::new(&MapModelSource::new(), BuildContext::from_environment())
+        .build(SourcedModel::new(model, "test").with_basedir(workspace.path()))
+        .expect("build succeeds");
+
+    let derived = |key: &str| built.model.properties.get(key).cloned().unwrap_or_default();
+
+    // `alignToBaseDirectory` runs over the resolved value, so an expression
+    // reading `<directory>tgt</directory>` gets a real path — jv used to hand
+    // back the fragment `tgt/foo`.
+    let expected_dir = workspace.path().join("tgt").join("foo");
+    assert_eq!(derived("derived.dir"), expected_dir.to_string_lossy());
+    // And the field itself is absolute in the effective model, which Maven's
+    // own `help:effective-pom` confirms — path translation aligns it in phase 2.
+    assert_eq!(
+        built
+            .model
+            .build
+            .as_ref()
+            .and_then(|b| b.directory.as_deref()),
+        Some(workspace.path().join("tgt").to_string_lossy().as_ref())
+    );
+
+    // A directory URI ends in a slash.
+    assert!(
+        derived("derived.uri").ends_with('/'),
+        "got {:?}",
+        derived("derived.uri")
+    );
+
+    // A JVM system property jv has no JVM for, but the process knows anyway.
+    // Leaving it literal put a `${...}` where Maven puts a separator.
+    assert_eq!(derived("derived.separator"), std::path::MAIN_SEPARATOR_STR);
 }

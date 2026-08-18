@@ -4,6 +4,8 @@
 //! `DefaultDependencyManagementInjector`, `DefaultPluginManagementInjector` and
 //! `DefaultModelNormalizer`.
 
+use std::collections::{HashMap, HashSet};
+
 use jv_model::{Dependency, ManagementKey, Model, Plugin, Scope};
 
 use crate::merge::merge_plugin;
@@ -55,7 +57,10 @@ pub fn extract_bom_imports(
 /// manages — locally or by inheritance — wins over every BOM, and between two
 /// BOMs managing the same key the first-declared one wins.
 pub fn merge_imported_management(model: &mut Model, imported: &[Vec<Dependency>]) {
-    let mut seen: Vec<ManagementKey> = model
+    // A set, not a list. A Spring Boot project's effective management runs to
+    // over a thousand entries across nested BOMs, and a linear `contains` over
+    // owned keys made this quadratic in that number.
+    let mut seen: HashSet<ManagementKey> = model
         .dependency_management
         .iter()
         .map(Dependency::management_key)
@@ -64,10 +69,9 @@ pub fn merge_imported_management(model: &mut Model, imported: &[Vec<Dependency>]
     for bom in imported {
         for entry in bom {
             let key = entry.management_key();
-            if seen.contains(&key) {
+            if !seen.insert(key) {
                 continue;
             }
-            seen.push(key);
             model.dependency_management.push(entry.clone());
         }
     }
@@ -83,12 +87,22 @@ pub fn inject_dependency_management(model: &mut Model) {
     if model.dependency_management.is_empty() {
         return;
     }
-    let managed = model.dependency_management.clone();
+    // Indexed once rather than scanned per dependency, and by index rather than
+    // by clone: `dependency_management` is the big list here, and cloning it
+    // wholesale to satisfy the borrow checker copied a thousand entries on every
+    // model build.
+    let mut at: HashMap<ManagementKey, usize> =
+        HashMap::with_capacity(model.dependency_management.len());
+    for (index, entry) in model.dependency_management.iter().enumerate() {
+        // First rule wins, matching the scan this replaces.
+        at.entry(entry.management_key()).or_insert(index);
+    }
+
+    let managed = std::mem::take(&mut model.dependency_management);
     for dependency in &mut model.dependencies {
-        let key = dependency.management_key();
-        let Some(entry) = managed
-            .iter()
-            .find(|candidate| candidate.management_key() == key)
+        let Some(entry) = at
+            .get(&dependency.management_key())
+            .map(|index| &managed[*index])
         else {
             continue;
         };
@@ -106,6 +120,7 @@ pub fn inject_dependency_management(model: &mut Model) {
             dependency.exclusions = entry.exclusions.clone();
         }
     }
+    model.dependency_management = managed;
 }
 
 /// Applies `<pluginManagement>` to the declared plugins.
@@ -184,7 +199,12 @@ pub fn inject_default_values(model: &mut Model) {
         }
     }
     if let Some(build) = &mut model.build {
-        for plugin in build.plugins.iter_mut().chain(&mut build.plugin_management) {
+        // `<build><plugins>` only. `injectDefaultValues` walks the model's
+        // dependencies and the *build* plugins' dependencies, and leaves
+        // `<pluginManagement>` alone — checked against 3.9.9, whose effective POM
+        // shows a scope beside a build plugin's dependency and none beside the
+        // same dependency under pluginManagement.
+        for plugin in &mut build.plugins {
             for dependency in &mut plugin.dependencies {
                 if dependency.scope.is_none() {
                     dependency.scope = Some(Scope::Compile);
@@ -431,6 +451,30 @@ mod tests {
         assert_eq!(plugins.len(), 2);
         assert_eq!(plugins[0].artifact_id.as_deref(), Some("p"));
         assert_eq!(plugins[0].version.as_deref(), Some("2.0"));
+    }
+
+    #[test]
+    fn plugin_management_dependencies_keep_no_default_scope() {
+        // Maven's `injectDefaultValues` walks `model.dependencies` and
+        // `build.plugins[*].dependencies`, and stops there. Its effective POM
+        // shows `<scope>compile</scope>` beside a build plugin's dependency and
+        // nothing beside the same dependency under `<pluginManagement>`.
+        let mut model = model_of(
+            r#"<project><build>
+                 <pluginManagement><plugins><plugin><artifactId>managed</artifactId>
+                   <dependencies><dependency><groupId>d</groupId>
+                     <artifactId>a</artifactId></dependency></dependencies>
+                 </plugin></plugins></pluginManagement>
+                 <plugins><plugin><artifactId>built</artifactId>
+                   <dependencies><dependency><groupId>d</groupId>
+                     <artifactId>b</artifactId></dependency></dependencies>
+                 </plugin></plugins>
+               </build></project>"#,
+        );
+        inject_default_values(&mut model);
+        let build = model.build.as_ref().expect("a build section");
+        assert_eq!(build.plugins[0].dependencies[0].scope, Some(Scope::Compile));
+        assert_eq!(build.plugin_management[0].dependencies[0].scope, None);
     }
 
     #[test]
