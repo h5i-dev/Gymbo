@@ -12,7 +12,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use jv_repo::Credentials;
+use jv_repo::{Credentials, ProxySelector};
 
 /// A transport-level failure. Absence is not one of these.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
@@ -49,16 +49,37 @@ impl HttpTransport {
     /// cold resolve is dominated by many small POM and metadata requests to one
     /// host rather than by a few large ones.
     pub fn new() -> Result<Self, TransportError> {
-        let client = reqwest::Client::builder()
+        Self::with_proxies(ProxySelector::default())
+    }
+
+    /// The same client, routing through the `settings.xml` `<proxies>`.
+    ///
+    /// Selection is per URL rather than per client because Maven's is: which
+    /// proxy applies depends on the repository's protocol *and* on that proxy's
+    /// own `<nonProxyHosts>`, so one client cannot be bound to one proxy.
+    ///
+    /// With no active proxy configured the builder is left alone, which keeps
+    /// reqwest's own `HTTPS_PROXY` / `NO_PROXY` handling. A configured proxy
+    /// takes precedence over the environment, as Maven's does.
+    pub fn with_proxies(selector: ProxySelector) -> Result<Self, TransportError> {
+        let mut builder = reqwest::Client::builder()
             .user_agent(concat!("jv/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(120))
-            .pool_max_idle_per_host(64)
-            .build()
-            .map_err(|error| TransportError::Request {
-                url: "<client>".to_owned(),
-                reason: error.to_string(),
-            })?;
+            .pool_max_idle_per_host(64);
+
+        if !selector.is_empty() {
+            builder = builder.proxy(reqwest::Proxy::custom(move |url| {
+                selector
+                    .select(url.as_str())
+                    .and_then(|endpoint| reqwest::Url::parse(&endpoint.url).ok())
+            }));
+        }
+
+        let client = builder.build().map_err(|error| TransportError::Request {
+            url: "<client>".to_owned(),
+            reason: error.to_string(),
+        })?;
         Ok(Self { client })
     }
 }
