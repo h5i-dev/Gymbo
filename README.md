@@ -203,8 +203,9 @@ then the action can only be used from a branch ref.
 - **`<proxies>` in `settings.xml` is parsed but not yet applied.** Set
   `HTTPS_PROXY`/`NO_PROXY` in the environment, which jv does honour. Mirrors,
   `<servers>` credentials, and profiles work.
-- **No JDK management, and no daemon.** The first lands in v0.2. The second is
-  deliberate: a single-shot process fast enough to make a daemon pointless.
+- **No JDK management, and no daemon.** SDKMAN, mise and jenv already do the
+  first well, and jv has no angle they lack. The second is deliberate: a
+  single-shot process fast enough to make a daemon pointless.
 
 ---
 
@@ -250,8 +251,8 @@ instead, and the tests say which of the two they are.
 | `jv-driver` sync | `jv sync` — populate `~/.m2` so `mvn -o` works | ✅ |
 | `jv-exec` | `jvx` — run a tool from its coordinates | ✅ |
 
-Next: `jv add`, a lockfile, then JDK management. [`ROADMAP.md`](ROADMAP.md)
-holds the architecture and the milestones;
+Next: private-repository and `.mvn/` compatibility, then `jv add` and a
+lockfile. [`ROADMAP.md`](ROADMAP.md) holds the architecture and the milestones;
 [`docs/development.md`](docs/development.md) explains how to run the tests.
 
 ---
