@@ -25,6 +25,16 @@ mvn="${JV_MVN:-mvn}"
 # Pinned: the goal's cost depends on the plugin, so a floating version would
 # make two runs of this script incomparable.
 versions_plugin="org.codehaus.mojo:versions-maven-plugin:2.16.2"
+# The plugin checks `<dependencyManagement>` as well as `<dependencies>` by
+# default, and `jv outdated` reports only what a POM declares. Left alone, the
+# plugin looks up roughly three times as many artifacts on commons-io — 19
+# managed entries inherited from the Apache parent chain against 10 declared —
+# and the ratio then measures a difference in scope rather than in speed.
+#
+# jv arguably *should* report managed entries too, since bumping one is
+# actionable. Until it does, the comparison is equalised here rather than
+# quietly banked.
+same_question=(-DprocessDependencyManagement=false)
 
 project_directory=""
 rounds=5
@@ -45,7 +55,29 @@ project_directory="$(cd "$project_directory" && pwd)"
 workspace="$(mktemp -d)"
 trap 'rm -rf "$workspace"' EXIT
 settings="$workspace/settings.xml"
-echo '<settings/>' > "$settings"
+# $JV_MIRROR points both arms at a mirror of Central.
+#
+# Not a thumb on the scale: a mirror is configured in `settings.xml`, so Maven
+# and jv both honour it and both arms talk to the same host. It exists because
+# Central rate-limits, and a benchmark that can only run when Central is in a
+# good mood is a benchmark that never runs. Google's GCS mirror is the usual
+# choice and is what the corpus cache already contains entries from.
+if [[ -n "${JV_MIRROR:-}" ]]; then
+    cat > "$settings" <<XML
+<settings>
+  <mirrors>
+    <mirror>
+      <id>benchmark-mirror</id>
+      <mirrorOf>central</mirrorOf>
+      <url>${JV_MIRROR}</url>
+    </mirror>
+  </mirrors>
+</settings>
+XML
+    echo "mirror:  ${JV_MIRROR}"
+else
+    echo '<settings/>' > "$settings"
+fi
 
 elapsed() {
     python3 - "$@" <<'PY'
@@ -78,7 +110,7 @@ mkdir -p "$maven_repository" "$jv_cache"
 
 (cd "$project_directory" && "$mvn" -B -q -s "$settings" \
     "-Dmaven.repo.local=$maven_repository" \
-    "$versions_plugin:display-dependency-updates" >/dev/null 2>&1) || true
+    "${same_question[@]}" "$versions_plugin:display-dependency-updates" >/dev/null 2>&1) || true
 "$jv" outdated -f "$project_directory/pom.xml" -s "$settings" \
     --cache-dir "$jv_cache" >/dev/null 2>&1 || true
 
@@ -93,7 +125,7 @@ maven_times=(); jv_times=(); discarded=0
 for round in $(seq "$rounds"); do
     read -r ms rc <<< "$(elapsed "$project_directory" \
         "$mvn" -B -q -s "$settings" "-Dmaven.repo.local=$maven_repository" \
-        "$versions_plugin:display-dependency-updates")"
+        "${same_question[@]}" "$versions_plugin:display-dependency-updates")"
     maven_ms="$ms"; maven_rc="$rc"
 
     read -r ms rc <<< "$(elapsed "$project_directory" \
@@ -131,8 +163,8 @@ echo "raw mvn: ${maven_times[*]}"
 echo "raw jv:  ${jv_times[*]}"
 echo
 cat <<'NOTE'
-Both arms were warm and online. `jv outdated` reports only declared
-dependencies; check that the plugin was asked the same question before quoting
-the ratio — `display-dependency-updates` also reports declared dependencies, but
-`display-plugin-updates` is a separate goal and jv folds that into --plugins.
+Both arms were warm and online, and both were asked about declared
+dependencies only: the plugin's `<dependencyManagement>` pass is turned off,
+because jv does not report managed entries and leaving it on would measure a
+difference in scope rather than in speed.
 NOTE

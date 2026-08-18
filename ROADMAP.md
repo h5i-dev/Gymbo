@@ -342,6 +342,38 @@ wherever an upstream component can be isolated cheaply.
 
 Every store versioned with a `CACHE_FORMAT_VERSION` marker from day one.
 
+### 3.6.1 Where jv is actually fast, measured
+
+Not resolution, and not builds. `jv sync` versus a plain `mvn verify` from
+nothing is **0.92x** — jv is slower. Warm it is 0.84x. Those numbers are in
+`scripts/benchmark-build.sh` and they are not going to improve much, because a
+build is dominated by compilation and jv does not compile.
+
+What jv avoids is Maven's fixed cost. Every `mvn` invocation pays roughly a
+second before it does anything: JVM start is only 157ms of that, the rest is
+classworlds, the Plexus container and plugin loading. For any operation whose
+real work is small, that fixed cost *is* the operation.
+
+    mvn -o -N validate, empty POM        ~990ms   <- Maven's floor, any goal
+    jv tree, whole graph                   16ms
+
+    versions:display-dependency-updates  1637ms
+    jv outdated                            47ms      34.8x
+
+    mvn exec:java (google-java-format)   1129ms
+    jvx           (same tool)             139ms       8.1x
+    bare java -cp, classpath known         93ms
+
+The `outdated` comparison is equalised: the plugin's `<dependencyManagement>`
+pass is turned off, because jv does not report managed entries. Leaving it on
+gave 42.4x, which measured a difference in scope as much as speed.
+
+One number there is worth more than the ratios. Turning off that pass removed
+19 of the plugin's 29 lookups and saved **16ms** of 1653ms. The lookups cost
+about a millisecond each; everything else is the host. That is the whole
+argument for this project in one measurement — and it is also why replacing
+Maven's *resolver* was abandoned (§3.13): resolution is 3.5% of a warm build.
+
 ### 3.7 `jvx` execution model (`jv-exec`)
 
 **Measured, and this is where the speed story actually is.** The profiler
