@@ -10,7 +10,11 @@ authors.workspace = true
 
 [dependencies]
 jv-version = { workspace = true }
+aes = { workspace = true }
+base64 = { workspace = true }
+cbc = { workspace = true }
 quick-xml = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

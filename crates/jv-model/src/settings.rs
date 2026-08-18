@@ -76,8 +76,10 @@ impl Proxy {
 pub struct Server {
     pub id: Option<String>,
     pub username: Option<String>,
-    /// May be encrypted as `{...}`, which requires `settings-security.xml`. jv
-    /// does not decrypt yet and reports such a password rather than sending it.
+    /// May be encrypted as `{...}`, which requires `settings-security.xml`.
+    /// [`crate::security`] decrypts it at the point settings are loaded, so
+    /// this is normally plaintext by the time anything reads it; a value that
+    /// stays encrypted is withheld rather than sent.
     pub password: Option<String>,
     pub private_key: Option<String>,
     pub passphrase: Option<String>,

@@ -51,6 +51,7 @@ mod metadata;
 mod model;
 mod parse;
 mod scope;
+pub mod security;
 mod settings;
 mod types;
 
