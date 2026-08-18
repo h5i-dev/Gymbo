@@ -153,10 +153,11 @@ impl Build {
 /// A `<plugin>`.
 ///
 /// Only what is needed to resolve the plugin and its dependencies is modelled.
-/// `<configuration>` is skipped entirely — jv never writes POMs, so opaque
-/// configuration has no consumer — but `<executions>` are kept, because plugin
-/// inheritance consults them: a parent plugin marked `<inherited>false</inherited>`
-/// is still inherited when it declares executions.
+/// `<executions>` are kept because plugin inheritance consults them: a parent
+/// plugin marked `<inherited>false</inherited>` is still inherited when it
+/// declares executions. `<configuration>` is not kept as configuration — jv
+/// never writes POMs and never runs a plugin — but it is scanned on the way
+/// past for coordinates, which is what `configuration_artifacts` holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plugin {
     pub group_id: Option<String>,
@@ -168,6 +169,27 @@ pub struct Plugin {
     pub inherited: Option<bool>,
     pub dependencies: Vec<Dependency>,
     pub executions: Vec<PluginExecution>,
+    /// Coordinates named anywhere inside `<configuration>`, at any depth.
+    ///
+    /// A plugin resolves these itself when it runs, and they appear in no
+    /// `<dependencies>` block, so nothing else in a POM reveals them. They are
+    /// the single largest reason a repository `jv sync` populated cannot build
+    /// offline: `maven-compiler-plugin`'s `<annotationProcessorPaths>`,
+    /// `animal-sniffer`'s `<signature>`, `maven-remote-resources`'
+    /// `<resourceBundles>` — ten of twenty-six corpus projects failed on this
+    /// one shape.
+    ///
+    /// This is a list of things to *download*, not a model of what the build
+    /// uses. That is why it is a flat union rather than merged element by
+    /// element the way Maven merges configuration: fetching an artifact the
+    /// effective configuration turns out not to want costs a download, while
+    /// missing one breaks `mvn -o`.
+    ///
+    /// Only coordinates that identify themselves are found — a `<groupId>` and
+    /// `<artifactId>` pair, or a `g:a:v` string. A plugin that names a default
+    /// it resolves from its own code, as `spotless` does with
+    /// `<palantirJavaFormat/>`, cannot be seen here by any amount of reading.
+    pub configuration_artifacts: Vec<Dependency>,
 }
 
 /// A `<execution>` within a plugin.

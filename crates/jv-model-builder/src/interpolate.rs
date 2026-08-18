@@ -430,7 +430,11 @@ pub fn interpolate_model(
             ] {
                 interpolator.interpolate_in_place(slot, problems);
             }
-            for dependency in &mut plugin.dependencies {
+            for dependency in plugin
+                .dependencies
+                .iter_mut()
+                .chain(&mut plugin.configuration_artifacts)
+            {
                 interpolate_dependency(dependency, &interpolator, problems);
             }
         }

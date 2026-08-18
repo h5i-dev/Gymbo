@@ -479,6 +479,20 @@ pub(crate) fn merge_plugin(target: &mut Plugin, source: &Plugin, source_dominant
         &source.dependencies,
         source_dominant,
     );
+    // A union, not a merge, and deliberately not `merge_dependencies`.
+    //
+    // Maven merges `<configuration>` element by element, so a child that
+    // redeclares `<annotationProcessorPaths>` replaces the parent's rather than
+    // adding to it. This list cannot reproduce that: it is flattened, so the
+    // structure that would say which element replaced which is gone. Keeping
+    // both sides means jv may download a processor the effective configuration
+    // turns out not to use, which costs a download; dropping the parent's would
+    // mean `mvn -o` cannot find one it does use, which costs the build.
+    for dependency in &source.configuration_artifacts {
+        if !target.configuration_artifacts.contains(dependency) {
+            target.configuration_artifacts.push(dependency.clone());
+        }
+    }
     merge_executions(target, source, source_dominant);
 }
 

@@ -707,6 +707,46 @@ impl RepositorySource {
         <Self as DescriptorSource>::versions(self, group_id, artifact_id)
     }
 
+    /// The version Maven would choose for a plugin declared without one.
+    ///
+    /// A `<plugin>` with no `<version>` is legal, and Maven resolves one at
+    /// build time from the artifact's `maven-metadata.xml`: `<release>` if the
+    /// file has one, otherwise `<latest>`, otherwise the greatest version
+    /// listed. jv used to warn and sync nothing, which left `mvn -o` to fail
+    /// with "Error resolving version for plugin" — three corpus projects died
+    /// that way, on `maven-javadoc-plugin`, `maven-install-plugin` and
+    /// `javancss-maven-plugin`.
+    ///
+    /// Reading the metadata also records it, so the same file is placed into the
+    /// local repository and Maven reaches this answer for itself rather than
+    /// taking jv's word for it. That matters: if the two ever disagree, Maven
+    /// wins, and it can only win if the file is there.
+    pub fn plugin_version(
+        &self,
+        group_id: &str,
+        artifact_id: &str,
+    ) -> Result<Option<String>, DriverError> {
+        let location = MetadataLocation::Artifact {
+            group_id,
+            artifact_id,
+        };
+        let metadata = self.metadata_recording(&location.path(), "", true)?;
+
+        let mut release: Option<String> = None;
+        let mut latest: Option<String> = None;
+        let mut greatest: Option<String> = None;
+        for entry in &metadata {
+            if let Some(versioning) = &entry.versioning {
+                take_greater(&mut release, versioning.release.as_deref());
+                take_greater(&mut latest, versioning.latest.as_deref());
+            }
+            for version in entry.versions() {
+                take_greater(&mut greatest, Some(version));
+            }
+        }
+        Ok(release.or(latest).or(greatest))
+    }
+
     /// Fetches and records the version list for every coordinate any POM jv
     /// read names with a *range*.
     ///
@@ -1213,4 +1253,19 @@ fn descriptor_key(artifact: &Artifact) -> String {
         artifact.extension,
         artifact.classifier
     )
+}
+
+/// Keeps whichever of two versions is greater, for merging metadata across
+/// repositories that each know a different newest.
+fn take_greater(slot: &mut Option<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let better = match slot.as_deref() {
+        Some(held) => Version::parse(candidate) > Version::parse(held),
+        None => true,
+    };
+    if better {
+        *slot = Some(candidate.to_owned());
+    }
 }

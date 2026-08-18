@@ -448,16 +448,16 @@ pub fn sync(
 
         if request.plugins {
             for (plugin, origin) in project_plugins(project) {
-                let Some(artifact) = plugin_artifact(&plugin) else {
-                    // A plugin with no version is one whose version Maven would
-                    // resolve from metadata at build time; jv cannot pick it
-                    // without guessing, so it says so rather than guessing.
-                    report.warnings.push(format!(
-                        "{}: plugin {}:{} declares no version and was not synced",
-                        project.path.display(),
-                        plugin.group_id_or_default(),
-                        plugin.artifact_id.as_deref().unwrap_or("[unknown]")
-                    ));
+                // A plugin with no version is one whose version Maven resolves
+                // from `maven-metadata.xml` at build time. jv used to warn and
+                // sync nothing, on the grounds that picking one would be
+                // guessing — but the result was that `mvn -o` could not resolve
+                // it either, because the metadata it would have read was not
+                // there. Reading that file settles the version *and* records it
+                // for placement, so Maven reaches its own answer offline.
+                let Some(artifact) = plugin_artifact(&plugin).or_else(|| {
+                    versionless_plugin(session, &plugin, project, &mut report.warnings)
+                }) else {
                     continue;
                 };
                 wanted.push(&reactor, artifact.clone());
@@ -1106,10 +1106,92 @@ fn plugin_artifact(plugin: &Plugin) -> Option<Artifact> {
     ))
 }
 
-/// Everything a plugin needs to run: its own dependency tree, plus any
-/// `<dependencies>` the POM added to it.
+/// Resolves a `<plugin>` that declares no version, the way Maven would.
 ///
-/// Resolved at runtime scope, which is what a plugin classloader gets.
+/// Returns `None` only when the metadata cannot be read or lists nothing, and
+/// says so — the failure is worth a warning either way, because `mvn -o` will
+/// stop on this plugin with "Error resolving version for plugin", an error that
+/// names neither the metadata file nor why it is absent.
+fn versionless_plugin(
+    session: &Session,
+    plugin: &Plugin,
+    project: &Project,
+    warnings: &mut Vec<String>,
+) -> Option<Artifact> {
+    let group_id = plugin.group_id_or_default();
+    let artifact_id = plugin.artifact_id.as_deref()?;
+    match session.source().plugin_version(group_id, artifact_id) {
+        Ok(Some(version)) => Some(Artifact::new(group_id, artifact_id, version)),
+        Ok(None) => {
+            warnings.push(format!(
+                "{}: plugin {group_id}:{artifact_id} declares no version and its metadata \
+                 lists none, so it was not synced; `mvn -o` will fail when it runs this plugin",
+                project.path.display()
+            ));
+            None
+        }
+        Err(error) => {
+            warnings.push(format!(
+                "{}: plugin {group_id}:{artifact_id} declares no version and its metadata \
+                 could not be read ({error}), so it was not synced; `mvn -o` will fail when \
+                 it runs this plugin",
+                project.path.display()
+            ));
+            None
+        }
+    }
+}
+
+/// The artifacts a plugin's `<configuration>` named, as coordinates to fetch.
+///
+/// A version is required to fetch anything, and configuration is the one place
+/// a coordinate can appear without management behind it to supply one. Maven
+/// would resolve such an entry from metadata when the plugin runs; jv says so
+/// rather than guessing, for the same reason it does with a versionless plugin.
+fn configuration_artifacts(plugin: &Plugin, warnings: &mut Vec<String>) -> Vec<Artifact> {
+    let mut found = Vec::new();
+    for dependency in &plugin.configuration_artifacts {
+        let Some(version) = dependency.version.as_deref().filter(|v| !v.is_empty()) else {
+            warnings.push(format!(
+                "{}:{} configures {}:{} with no version, so it was not synced; `mvn -o` will \
+                 fail when it runs this plugin",
+                plugin.group_id_or_default(),
+                plugin.artifact_id.as_deref().unwrap_or("[unknown]"),
+                dependency.group_id,
+                dependency.artifact_id
+            ));
+            continue;
+        };
+        let artifact = Artifact {
+            group_id: dependency.group_id.clone(),
+            artifact_id: dependency.artifact_id.clone(),
+            version: version.to_owned(),
+            classifier: dependency.classifier.clone().unwrap_or_default(),
+            extension: dependency
+                .type_
+                .clone()
+                .filter(|extension| !extension.is_empty())
+                .unwrap_or_else(|| "jar".to_owned()),
+        };
+        // A property no profile defined. Fetching `${foo}` literally would ask
+        // a repository for a path that cannot exist and then report it as a
+        // missing artifact, which reads as jv's fault rather than the POM's.
+        if has_unresolved_expression(&artifact) {
+            warnings.push(format!(
+                "{}:{} configures {}:{} at version {version}, which is an unresolved \
+                 expression, so it was not synced",
+                plugin.group_id_or_default(),
+                plugin.artifact_id.as_deref().unwrap_or("[unknown]"),
+                dependency.group_id,
+                dependency.artifact_id
+            ));
+            continue;
+        }
+        found.push(artifact);
+    }
+    found
+}
+
 /// A plugin's resolved dependency closure, and what resolving it had to say.
 #[derive(Debug, Default)]
 struct PluginClosure {
@@ -1134,10 +1216,18 @@ fn closure_key(artifact: &Artifact, plugin: &Plugin) -> ClosureKey {
         artifact.group_id.clone(),
         artifact.artifact_id.clone(),
         artifact.version.clone(),
-        // A structural fingerprint of the block, which is cheaper to write than
-        // a hand-rolled hash and does not have to be stable across versions:
-        // nothing outside this run reads it.
-        format!("{:?}", plugin.dependencies),
+        // A structural fingerprint of both blocks that can change what these
+        // coordinates resolve to, which is cheaper to write than a hand-rolled
+        // hash and does not have to be stable across versions: nothing outside
+        // this run reads it. `configuration_artifacts` belongs here for the same
+        // reason `dependencies` does — two declarations of one plugin version
+        // that configure different annotation processors are different
+        // questions, and keying on coordinates alone would hand the second the
+        // first one's answer.
+        format!(
+            "{:?}|{:?}",
+            plugin.dependencies, plugin.configuration_artifacts
+        ),
     )
 }
 
@@ -1196,7 +1286,15 @@ fn plugin_closures(
             let dependencies =
                 plugin_dependencies(session, &artifact, &plugin, &mut warnings, &mut clean)?;
             let mut extras = Vec::new();
-            for extra in runtime_selected(&artifact) {
+            // What the plugin picks for itself at run time, and what its
+            // `<configuration>` names. Both are artifacts no `<dependencies>`
+            // block mentions, and both are resolved with their own closure —
+            // an annotation processor drags its dependencies onto the compiler's
+            // path exactly as a dependency would.
+            for extra in runtime_selected(&artifact)
+                .into_iter()
+                .chain(configuration_artifacts(&plugin, &mut warnings))
+            {
                 let dependencies = plugin_dependencies(
                     session,
                     &extra,
@@ -1231,6 +1329,10 @@ fn memo_key(key: &ClosureKey) -> String {
     format!("{group_id}:{artifact_id}:{version}|{dependencies}")
 }
 
+/// Everything a plugin needs to run: its own dependency tree, plus any
+/// `<dependencies>` the POM added to it.
+///
+/// Resolved at runtime scope, which is what a plugin classloader gets.
 fn plugin_dependencies(
     session: &Session,
     artifact: &Artifact,
@@ -1430,6 +1532,73 @@ mod tests {
             path: PathBuf::from("pom.xml"),
             modules: Vec::new(),
         }
+    }
+
+    #[test]
+    fn configuration_coordinates_become_artifacts() {
+        let mut compiler = plugin(None, "maven-compiler-plugin", Some("3.13.0"));
+        compiler.configuration_artifacts = vec![Dependency {
+            group_id: "com.google.errorprone".to_owned(),
+            artifact_id: "error_prone_core".to_owned(),
+            version: Some("2.25.0".to_owned()),
+            ..Dependency::default()
+        }];
+        let mut warnings = Vec::new();
+        let found = configuration_artifacts(&compiler, &mut warnings);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].artifact_id, "error_prone_core");
+        assert_eq!(found[0].extension, "jar");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn a_configured_coordinate_without_a_version_is_reported_not_guessed() {
+        // `maven-site-plugin`'s `<reportPlugins>` names plugins with no version
+        // at all. Downloading nothing and saying so beats inventing one.
+        let mut site = plugin(None, "maven-site-plugin", Some("3.12.1"));
+        site.configuration_artifacts = vec![Dependency {
+            group_id: "org.apache.maven.plugins".to_owned(),
+            artifact_id: "maven-javadoc-plugin".to_owned(),
+            version: None,
+            ..Dependency::default()
+        }];
+        let mut warnings = Vec::new();
+        assert!(configuration_artifacts(&site, &mut warnings).is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("no version"), "{}", warnings[0]);
+    }
+
+    #[test]
+    fn a_property_no_profile_defined_is_not_fetched_literally() {
+        // Asking a repository for `${foo}` produces a path that cannot exist,
+        // and then a missing-artifact report that reads as jv's fault.
+        let mut compiler = plugin(None, "maven-compiler-plugin", Some("3.13.0"));
+        compiler.configuration_artifacts = vec![Dependency {
+            group_id: "com.example".to_owned(),
+            artifact_id: "thing".to_owned(),
+            version: Some("${undefined.version}".to_owned()),
+            ..Dependency::default()
+        }];
+        let mut warnings = Vec::new();
+        assert!(configuration_artifacts(&compiler, &mut warnings).is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unresolved"), "{}", warnings[0]);
+    }
+
+    #[test]
+    fn a_configured_type_becomes_the_extension() {
+        let mut plugin = plugin(None, "some-plugin", Some("1.0"));
+        plugin.configuration_artifacts = vec![Dependency {
+            group_id: "com.example".to_owned(),
+            artifact_id: "thing".to_owned(),
+            version: Some("1.0".to_owned()),
+            type_: Some("zip".to_owned()),
+            classifier: Some("resources".to_owned()),
+            ..Dependency::default()
+        }];
+        let found = configuration_artifacts(&plugin, &mut Vec::new());
+        assert_eq!(found[0].extension, "zip");
+        assert_eq!(found[0].classifier, "resources");
     }
 
     #[test]
