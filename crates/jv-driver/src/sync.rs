@@ -986,15 +986,7 @@ fn project_plugins(project: &Project) -> Vec<(Plugin, PluginOrigin)> {
         }
     };
 
-    // `<reporting>` first, matching `ResolverUtil.getProjectPlugins`, and
-    // counted as declared: `mvn site` runs these, so a repository without them
-    // and their closures cannot build a site offline. Fourteen of the
-    // twenty-six corpus projects declare some.
-    for plugin in &project.model.reporting_plugins {
-        push_unique(plugin, PluginOrigin::Declared);
-    }
-
-    // Then declared, so a plugin that is both declared and managed is treated
+    // Declared first, so a plugin that is both declared and managed is treated
     // as declared.
     if let Some(build) = &project.model.build {
         for plugin in &build.plugins {
@@ -1003,6 +995,23 @@ fn project_plugins(project: &Project) -> Vec<(Plugin, PluginOrigin)> {
         for plugin in &build.plugin_management {
             push_unique(plugin, PluginOrigin::Managed);
         }
+    }
+
+    // `<reporting>` last, and only for plugins nothing else declared.
+    //
+    // These were tried first, on the reading that `ResolverUtil` lists them
+    // first. That broke commons-io's offline build: `push_unique` keeps the
+    // first declaration of a coordinate, a reporting entry usually carries no
+    // version and no `<extensions>`, and the build entry carries both — so the
+    // build's `maven-site-plugin` was displaced by the report's, its closure
+    // came out different, and `wagon-ssh` was never fetched. `mvn -o` then
+    // failed in `attach-descriptor` on a build that had worked the day before.
+    //
+    // Order here decides only which declaration wins a tie, and the one the
+    // build uses has to win. A report plugin nothing else mentions is still
+    // added, which is the point of reading `<reporting>` at all.
+    for plugin in &project.model.reporting_plugins {
+        push_unique(plugin, PluginOrigin::Declared);
     }
     plugins
 }
@@ -1645,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn reporting_plugins_come_first_and_count_as_declared() {
+    fn reporting_plugins_are_synced_and_count_as_declared() {
         // `mvn site` runs these, so a repository without them and their
         // closures cannot build a site offline.
         let mut project = project_with(Build {
@@ -1655,23 +1664,28 @@ mod tests {
         project.model.reporting_plugins = vec![plugin(None, "maven-javadoc-plugin", Some("3.6.3"))];
 
         let plugins = project_plugins(&project);
-        assert_eq!(
-            plugins[0].0.artifact_id.as_deref(),
-            Some("maven-javadoc-plugin")
-        );
-        assert_eq!(plugins[0].1, PluginOrigin::Declared);
+        let javadoc = plugins
+            .iter()
+            .find(|(held, _)| held.artifact_id.as_deref() == Some("maven-javadoc-plugin"))
+            .expect("the report plugin");
+        assert_eq!(javadoc.1, PluginOrigin::Declared);
     }
 
     #[test]
-    fn a_plugin_declared_for_both_build_and_reporting_is_listed_once() {
+    fn a_build_declaration_beats_a_report_declaration_of_the_same_plugin() {
+        // The regression this ordering exists to prevent. A report entry
+        // usually carries no version and no `<extensions>`; the build entry
+        // carries both, and its closure is the one the build needs. Letting the
+        // report win cost commons-io its offline build.
         let mut project = project_with(Build {
-            plugins: vec![plugin(None, "maven-javadoc-plugin", Some("3.6.3"))],
+            plugins: vec![plugin(None, "maven-site-plugin", Some("3.12.1"))],
             ..Build::default()
         });
-        project.model.reporting_plugins = vec![plugin(None, "maven-javadoc-plugin", Some("3.6.3"))];
+        project.model.reporting_plugins = vec![plugin(None, "maven-site-plugin", None)];
 
         let plugins = project_plugins(&project);
         assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].0.version.as_deref(), Some("3.12.1"));
     }
 
     #[test]
