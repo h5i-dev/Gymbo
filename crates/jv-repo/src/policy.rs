@@ -43,17 +43,31 @@ impl UpdatePolicy {
     ///
     /// # Examples
     ///
+    /// Both instants are given, and the example pins them rather than reading
+    /// the clock: `daily` compares UTC *days*, so "an hour ago" is on the
+    /// previous day for one hour out of every twenty-four, and an example built
+    /// on `SystemTime::now()` fails during exactly that hour.
+    ///
     /// ```
-    /// use std::time::{Duration, SystemTime};
+    /// use std::time::{Duration, SystemTime, UNIX_EPOCH};
     /// use jv_repo::UpdatePolicy;
     ///
-    /// let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
-    /// assert!(!UpdatePolicy::Daily.is_stale(an_hour_ago, SystemTime::now()));
-    /// assert!(UpdatePolicy::Always.is_stale(an_hour_ago, SystemTime::now()));
-    /// assert!(!UpdatePolicy::Never.is_stale(an_hour_ago, SystemTime::now()));
+    /// // Midday, and an hour before it, on the same UTC day.
+    /// let noon = UNIX_EPOCH + Duration::from_secs(1_705_320_000);
+    /// let an_hour_before = noon - Duration::from_secs(3600);
     ///
-    /// let a_week_ago = SystemTime::now() - Duration::from_secs(7 * 86_400);
-    /// assert!(UpdatePolicy::Daily.is_stale(a_week_ago, SystemTime::now()));
+    /// assert!(!UpdatePolicy::Daily.is_stale(an_hour_before, noon));
+    /// assert!(UpdatePolicy::Always.is_stale(an_hour_before, noon));
+    /// assert!(!UpdatePolicy::Never.is_stale(an_hour_before, noon));
+    ///
+    /// let a_week_before = noon - Duration::from_secs(7 * 86_400);
+    /// assert!(UpdatePolicy::Daily.is_stale(a_week_before, noon));
+    ///
+    /// // And the case the clock-reading version tripped over: an hour ago can
+    /// // be yesterday, which `daily` treats as stale however recent it is.
+    /// let just_after_midnight = UNIX_EPOCH + Duration::from_secs(1_705_276_800 + 600);
+    /// let before_midnight = just_after_midnight - Duration::from_secs(3600);
+    /// assert!(UpdatePolicy::Daily.is_stale(before_midnight, just_after_midnight));
     /// ```
     pub fn is_stale(&self, last_checked: SystemTime, now: SystemTime) -> bool {
         match self {

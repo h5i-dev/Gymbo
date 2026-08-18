@@ -324,8 +324,12 @@ impl<'a> Interpolator<'a> {
             "build.sourceDirectory" => {
                 self.aligned(model.build.as_ref()?.source_directory.as_deref())
             }
-            "build.testSourceDirectory" => model.build.as_ref()?.test_source_directory.clone(),
-            "build.scriptSourceDirectory" => model.build.as_ref()?.script_source_directory.clone(),
+            "build.testSourceDirectory" => {
+                self.aligned(model.build.as_ref()?.test_source_directory.as_deref())
+            }
+            "build.scriptSourceDirectory" => {
+                self.aligned(model.build.as_ref()?.script_source_directory.as_deref())
+            }
             "build.finalName" => model.build.as_ref()?.final_name.clone(),
             "build.defaultGoal" => model.build.as_ref()?.default_goal.clone(),
             "distributionManagement.status" => {

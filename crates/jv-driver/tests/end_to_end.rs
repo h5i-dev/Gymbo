@@ -548,3 +548,114 @@ fn a_sibling_module_resolves_from_the_working_tree() {
         "com.example:app:jar:1.0\n\\- com.example:lib:jar:1.0:compile\n"
     );
 }
+
+#[test]
+fn a_working_tree_module_beats_a_published_one_of_the_same_coordinates() {
+    // The POM crawler runs on background threads and writes into the same memo
+    // the resolver reads. It knows nothing about the reactor, so when the memo
+    // was consulted *before* the reactor a published sibling could win a race
+    // and be resolved in place of the module being built.
+    //
+    // Tested as an invariant rather than as a race: the memo is populated from
+    // the repository first, deliberately, so the ordering decides the answer
+    // every time. Reproducing the race itself would give a test that passes
+    // when it should fail.
+    let workspace = tempfile::tempdir().unwrap();
+    let repository_dir = workspace.path().join("repo");
+    std::fs::create_dir_all(&repository_dir).unwrap();
+    let repository = FakeRepository::new(&repository_dir);
+
+    // A *published* com.example:lib:1.0 that pulls in something the working
+    // tree's version does not.
+    repository.pom(
+        "com.example",
+        "lib",
+        "1.0",
+        &format!(
+            "<dependencies>{}</dependencies>",
+            dependency("org.test", "published", "1.0")
+        ),
+    );
+    repository.pom("org.test", "published", "1.0", "");
+    repository.pom("org.test", "fromsource", "1.0", "");
+
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(project.join("lib")).unwrap();
+    std::fs::create_dir_all(project.join("app")).unwrap();
+    std::fs::write(
+        project.join("pom.xml"),
+        "<project><modelVersion>4.0.0</modelVersion>\
+           <groupId>com.example</groupId><artifactId>root</artifactId><version>1.0</version>\
+           <packaging>pom</packaging>\
+           <modules><module>lib</module><module>app</module></modules></project>",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("lib/pom.xml"),
+        format!(
+            "<project><modelVersion>4.0.0</modelVersion>\
+               <parent><groupId>com.example</groupId><artifactId>root</artifactId>\
+                 <version>1.0</version></parent>\
+               <artifactId>lib</artifactId>\
+               <dependencies>{}</dependencies></project>",
+            dependency("org.test", "fromsource", "1.0")
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("app/pom.xml"),
+        format!(
+            "<project><modelVersion>4.0.0</modelVersion>\
+               <parent><groupId>com.example</groupId><artifactId>root</artifactId>\
+                 <version>1.0</version></parent>\
+               <artifactId>app</artifactId>\
+               <dependencies>{}</dependencies></project>",
+            dependency("com.example", "lib", "1.0")
+        ),
+    )
+    .unwrap();
+
+    let settings = workspace.path().join("settings.xml");
+    std::fs::write(&settings, "<settings/>").unwrap();
+    let config = Config {
+        cache: Some(workspace.path().join("jv-cache")),
+        user_settings: Some(settings),
+        repositories: Some(vec![repository.as_repository()]),
+        ..Config::new().without_local_repository()
+    };
+    let session = Session::new(&config).expect("a session");
+
+    // Stand in for the crawler having got there first, deterministically.
+    session
+        .source()
+        .effective_model(&jv_model::Artifact::new("com.example", "lib", "1.0"))
+        .expect("the published lib")
+        .expect("it exists");
+
+    let root = session
+        .project_at(&project.join("pom.xml"))
+        .expect("a project");
+    let app = root
+        .modules
+        .iter()
+        .find(|module| module.model.artifact_id.as_deref() == Some("app"))
+        .expect("the app module");
+
+    let tree = render(
+        &session
+            .resolve_project(app, Verbosity::None)
+            .expect("a resolution")
+            .collected
+            .graph,
+        Format::Text,
+        Options::default(),
+    );
+    assert!(
+        tree.contains("org.test:fromsource"),
+        "the working tree's lib was not used:\n{tree}"
+    );
+    assert!(
+        !tree.contains("org.test:published"),
+        "the published lib won over the one being built:\n{tree}"
+    );
+}

@@ -149,6 +149,15 @@ impl Prefetcher {
 
     /// Claims one unit of budget for a coordinate not yet seen.
     fn claim(&self, artifact: &Artifact) -> bool {
+        // A snapshot's real file name comes from a metadata round trip, which
+        // the crawler does not do. Fetching `a-1.0-SNAPSHOT.pom` looks like it
+        // works — `~/.m2` serves exactly that name, because Maven installs
+        // snapshots untimestamped — and then memoizes a locally installed build
+        // in place of the deployed one, silently resolving its dependencies
+        // instead.
+        if jv_model::is_snapshot_version(&artifact.version) {
+            return false;
+        }
         // A version that still holds a `${...}` cannot be addressed: the walker
         // does no interpolation, and guessing would fetch a 404 per node.
         if artifact.version.is_empty() || artifact.version.contains('$') {

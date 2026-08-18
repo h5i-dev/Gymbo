@@ -155,10 +155,11 @@ impl Fetcher {
         artifact: &Artifact,
     ) -> Result<Fetched, FetchError> {
         let path = artifact_path(artifact);
-        for repository in repositories
+        let usable: Vec<&Repository> = repositories
             .iter()
             .filter(|repository| repository.accepts(&artifact.version))
-        {
+            .collect();
+        for repository in &usable {
             let url = join_url(&repository.url, &path);
             let is_mutable = jv_model::is_snapshot_version(&artifact.version);
             if self.is_fresh(&url, repository.policy_for(&artifact.version), is_mutable)? {
@@ -171,7 +172,12 @@ impl Fetcher {
                 });
             }
         }
-        if let Some(local) = &self.local_repository {
+        // Guarded exactly as `fetch`'s local-repository step is, and for the same
+        // reason: with every repository blocked by a mirror, or a snapshot
+        // against a release-only repository, `~/.m2` would otherwise satisfy a
+        // request the configuration says jv may not make — and `jv sync` would
+        // then copy that artifact into the local repository.
+        if let (Some(local), false) = (&self.local_repository, usable.is_empty()) {
             let candidate = local.join(&path);
             if candidate.is_file() {
                 return Ok(Fetched {

@@ -38,6 +38,11 @@ use crate::manifest;
 /// classes. Nothing else is accepted, which costs nothing: no launchable tool
 /// has ever had a different one.
 fn validated(name: &str, endpoint: &str) -> Result<String, ExecError> {
+    // `java` accepts `com/example/Main` and normalises it before loading, and
+    // some hand-written and older-tool manifests are spelled that way. Doing the
+    // same normalisation is what stops the check refusing a name the JDK would
+    // have run.
+    let name = &name.replace('/', ".");
     let plausible = !name.is_empty()
         && !name.starts_with(['-', '@'])
         && name.split('.').all(|segment| {
@@ -48,7 +53,7 @@ fn validated(name: &str, endpoint: &str) -> Result<String, ExecError> {
                     .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
         });
     if plausible {
-        return Ok(name.to_owned());
+        return Ok(name.clone());
     }
     Err(ExecError::UnusableMainClass {
         endpoint: endpoint.to_owned(),
@@ -127,7 +132,6 @@ mod tests {
             "com..Main",
             "com.example.9Main",
             "com.example.Main extra",
-            "com/example/Main",
             "-",
         ] {
             assert!(
@@ -151,6 +155,17 @@ mod tests {
         ] {
             assert_eq!(validated(name, "g:a:1").ok().as_deref(), Some(name));
         }
+    }
+
+    #[test]
+    fn a_slash_separated_class_name_is_normalised_rather_than_refused() {
+        // `java com/example/Main` works — the launcher converts the separators
+        // before loading — and some hand-written manifests are spelled that way.
+        // Refusing it would reject a name the JDK would have run.
+        assert_eq!(
+            validated("com/example/Main", "g:a:1").ok().as_deref(),
+            Some("com.example.Main")
+        );
     }
 
     /// Writes a jar holding exactly the manifest given, or none at all.

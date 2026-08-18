@@ -352,13 +352,21 @@ impl RepositorySource {
     /// times over was the largest cost of a warm resolve after JVM startup.
     fn cached_pom(&self, artifact: &Artifact) -> Result<Option<Arc<Model>>, DriverError> {
         let key = coordinates(artifact);
-        if let Some(cached) = self.poms.lock().expect("poms").get(&key) {
-            return Ok(cached.clone());
+
+        // The reactor is consulted *before* the memo, not after. The crawler
+        // writes into that memo from background threads and knows nothing about
+        // the working tree, so with the checks the other way round a published
+        // sibling module could beat the one being built — decided by whichever
+        // won a race, which made it appear only on projects with enough
+        // dependencies to give the crawler a head start.
+        let from_reactor = self.reactor.lock().expect("reactor").get(&key).cloned();
+        if from_reactor.is_none() {
+            if let Some(cached) = self.poms.lock().expect("poms").get(&key) {
+                return Ok(cached.clone());
+            }
         }
 
-        // The working tree wins over any repository, which is what makes a
-        // multi-module build resolve its own modules.
-        let text = match self.reactor.lock().expect("reactor").get(&key).cloned() {
+        let text = match from_reactor {
             Some(text) => Some(text),
             None => {
                 let pom_artifact = Artifact {

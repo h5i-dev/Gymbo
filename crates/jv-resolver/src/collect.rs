@@ -557,8 +557,10 @@ fn process_at(
         // Getting this order wrong does not merely lose the sharing: it changes
         // which nodes the skipper decides to skip.
         //
-        // Sharing is by *identity*, not by copy. The list keeps filling in as the
-        // walk proceeds, and both ends read the same one — see
+        // Both ends get one child-list *identity*, which is what conflict
+        // resolution keys on. The list itself is copied at link time rather than
+        // shared the way upstream's mutable `List` is; that is only safe because
+        // linking happens after the walk, when the owner's list is final. See
         // `Graph::share_children`.
         let pooled = PoolKey {
             artifact: descriptor.artifact.clone(),
