@@ -490,14 +490,54 @@ memo does no work.
 The lockfile itself is still worth building for the reasons it was always worth
 building; it no longer has to carry the performance argument alone.
 
-What is left in a warm sync is placement — which is what §3.12 is for.
+**Then the reactor, which was the next thing along.** With closures remembered,
+a large reactor's warm sync is its own modules: 706ms of dropwizard's 774ms
+across 38 modules, where one module costs 151ms. Resolving them in parallel gave
+almost nothing at first — 1.23x, with CPU at 207% of one core on a ten-core
+machine and scaling that stopped dead at two threads. The modules were
+serialising on the caches they share: `poms`, `descriptors`, `versions`,
+`repositories` and the reactor map were each behind a `Mutex`, so on a warm run,
+where every lookup is a hit, readers were queueing behind readers. Behind an
+`RwLock` they are not:
+
+    dropwizard, 38 modules, warm            threads  1     2     4    10
+    Mutex                                            735   603   602   606
+    RwLock                                           737   486   384   390
+
+    warm sync, alternated, medians, trees byte-identical
+    dropwizard      (38 mod)   766ms -> 352ms   2.18x
+    logging-log4j2  (37 mod)   566ms -> 368ms   1.54x
+    maven-surefire  (15 mod)   185ms -> 155ms   1.19x
+    byte-buddy      (15 mod)   142ms -> 136ms   1.04x
+    commons-io       (1 mod)    89ms ->  89ms   1.00x
+
+Scaling still flattens after four threads and CPU sits at 366%, so contention
+remains — `unreachable`, `snapshots` and `range_metadata` are still `Mutex`, and
+the resolves block on one shared runtime. Worth another look if large reactors
+matter more later.
+
+**What is *not* left is placement.** The premise of §3.12 below was that
+materialising into `~/.m2` is a step Maven does not pay. It is, but it is
+already free: with a populated local repository, skipping placement entirely
+(`--cache-only`) is not measurably faster than doing it, because placement is
+stats that find the file already there.
+
+    with a populated local repository    full   no-place
+    commons-io                           48ms       55ms
+    dropwizard                          724ms      796ms
+    byte-buddy                          105ms      107ms
+
+So §3.12 is still worth doing, for the reason that survives measurement — one CI
+cache instead of two — and not for speed.
 
 ### 3.12 Store the artifacts where Maven reads them (v0.2)
 
 jv keeps a URL-keyed store and then materialises it into `~/.m2` so Maven can
 read it. Maven's cache *is* the repository it reads, so on a warm run Maven has
-no prepare step at all and jv has one. That is a structural disadvantage no
-amount of optimisation removes.
+no prepare step at all and jv has one.
+
+The gain is **disk and CI cache, not time** — see the measurement above before
+picking this up expecting a speed result.
 
 It is a remapping rather than a rewrite. The store path is already the
 repository base followed by the Maven layout path:

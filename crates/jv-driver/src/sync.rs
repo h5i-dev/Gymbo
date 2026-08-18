@@ -396,10 +396,40 @@ pub fn sync(
         }
     }
 
-    for project in projects {
+    // Every module's dependency graph, resolved before the loop that orders
+    // them.
+    //
+    // A reactor resolves one module after another, and with plugin closures now
+    // remembered that is what a warm sync of a large one is: 706ms of
+    // dropwizard's 774ms across 38 modules, where a single module costs 151ms.
+    // The modules do not depend on each other's resolves — a dependency on a
+    // sibling is answered from the reactor map, which is built before any of
+    // this — so they are resolved together.
+    //
+    // Same shape as the plugin closures above, and the same reason for keeping
+    // the loop below sequential: artifact order decides what
+    // `_remote.repositories` and the snapshot metadata come out as.
+    let resolutions = {
+        use rayon::prelude::*;
+
+        let resolved: Vec<Result<crate::session::Resolution, DriverError>> = projects
+            .par_iter()
+            .map(|project| session.resolve_project(project, Verbosity::None))
+            .collect();
+        // Unwrapped in project order rather than by `collect`ing into a
+        // `Result`, so that a reactor with two broken modules always reports the
+        // same one — whichever comes first in the build, not whichever thread
+        // happened to finish first.
+        let mut resolutions = Vec::with_capacity(resolved.len());
+        for outcome in resolved {
+            resolutions.push(outcome?);
+        }
+        resolutions
+    };
+
+    for (project, resolution) in projects.iter().zip(&resolutions) {
         // Test scope, because a build runs tests: it is the widest composition
         // and anything narrower leaves `mvn -o test` unable to start.
-        let resolution = session.resolve_project(project, Verbosity::None)?;
         for (id, _depth) in resolution.collected.graph.preorder() {
             let node = resolution.collected.graph.node(id);
             if node.omitted_for.is_some() {

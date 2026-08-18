@@ -34,7 +34,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use jv_cache::{Fetcher, Origin};
 use jv_model::{
@@ -123,17 +123,17 @@ pub struct RepositorySource {
     settings: Arc<Settings>,
     context: BuildContext,
     types: Arc<TypeRegistry>,
-    repositories: Arc<Mutex<Repositories>>,
+    repositories: Arc<RwLock<Repositories>>,
     /// POMs parsed once, by `g:a:v`. `None` records a coordinate no repository
     /// has, so an absence is not re-requested either.
     ///
     /// Shared with the crawler, which fills it in from background threads — see
     /// `prefetch.rs`.
-    poms: Arc<Mutex<HashMap<String, Option<Arc<Model>>>>>,
+    poms: Arc<RwLock<HashMap<String, Option<Arc<Model>>>>>,
     /// Built descriptors by `g:a:v`, which is the expensive half.
-    descriptors: Arc<Mutex<HashMap<String, Descriptor>>>,
+    descriptors: Arc<RwLock<HashMap<String, Descriptor>>>,
     /// Version lists by `g:a`, for ranges.
-    versions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    versions: Arc<RwLock<HashMap<String, Vec<String>>>>,
     /// Repositories that could not be reached, so they are asked once.
     ///
     /// A dead repository named in a transitive POM — `maven.java.net` is the
@@ -160,7 +160,7 @@ pub struct RepositorySource {
     /// repository, so a dependency on a sibling module in a multi-module build
     /// resolves against the working tree rather than against a repository that
     /// has never heard of it.
-    reactor: Arc<Mutex<HashMap<String, String>>>,
+    reactor: Arc<RwLock<HashMap<String, String>>>,
     /// Warnings gathered along the way, to show once at the end.
     warnings: Arc<Mutex<Vec<String>>>,
     /// Crawls POMs ahead of collection. See `prefetch.rs`.
@@ -211,7 +211,7 @@ impl RepositorySource {
             warnings: Arc::clone(&sink.warnings),
             fetcher,
             runtime,
-            repositories: Arc::new(Mutex::new(Repositories {
+            repositories: Arc::new(RwLock::new(Repositories {
                 ordered: resolve_repositories(declared, &settings),
             })),
             settings,
@@ -254,7 +254,7 @@ impl RepositorySource {
             ..self
         };
         if update.is_some() {
-            let mut repositories = source.repositories.lock().expect("repositories");
+            let mut repositories = source.repositories.write().expect("repositories");
             let existing = std::mem::take(&mut repositories.ordered);
             repositories.ordered = existing
                 .into_iter()
@@ -307,7 +307,7 @@ impl RepositorySource {
 
     pub fn repositories(&self) -> Vec<Repository> {
         self.repositories
-            .lock()
+            .read()
             .expect("repositories")
             .ordered
             .clone()
@@ -349,7 +349,7 @@ impl RepositorySource {
             resolved.push(self.apply_forced_update(repository));
         }
         self.repositories
-            .lock()
+            .write()
             .expect("repositories")
             .extend(resolved);
     }
@@ -390,7 +390,7 @@ impl RepositorySource {
         pom: String,
     ) {
         self.reactor
-            .lock()
+            .write()
             .expect("reactor")
             .insert(format!("{group_id}:{artifact_id}:{version}"), pom);
     }
@@ -455,9 +455,9 @@ impl RepositorySource {
         // sibling module could beat the one being built — decided by whichever
         // won a race, which made it appear only on projects with enough
         // dependencies to give the crawler a head start.
-        let from_reactor = self.reactor.lock().expect("reactor").get(&key).cloned();
+        let from_reactor = self.reactor.read().expect("reactor").get(&key).cloned();
         if from_reactor.is_none() {
-            if let Some(cached) = self.poms.lock().expect("poms").get(&key) {
+            if let Some(cached) = self.poms.read().expect("poms").get(&key) {
                 return Ok(cached.clone());
             }
         }
@@ -494,7 +494,7 @@ impl RepositorySource {
             None => None,
         };
 
-        self.poms.lock().expect("poms").insert(key, parsed.clone());
+        self.poms.write().expect("poms").insert(key, parsed.clone());
         Ok(parsed)
     }
 
@@ -711,7 +711,7 @@ impl RepositorySource {
     /// requests only for coordinates jv genuinely never looked up.
     pub fn fetch_ranged_metadata(&self) {
         let ranged: BTreeSet<(String, String)> = {
-            let poms = self.poms.lock().expect("poms");
+            let poms = self.poms.read().expect("poms");
             poms.values()
                 .flatten()
                 .flat_map(|model| {
@@ -753,7 +753,7 @@ impl RepositorySource {
 
     pub fn read_poms(&self) -> Vec<Artifact> {
         self.poms
-            .lock()
+            .read()
             .expect("poms")
             .iter()
             .filter(|(_, parsed)| parsed.is_some())
@@ -873,7 +873,7 @@ impl ModelSource for RepositorySource {
 impl DescriptorSource for RepositorySource {
     fn descriptor(&self, artifact: &Artifact) -> Result<Descriptor, String> {
         let key = descriptor_key(artifact);
-        if let Some(cached) = self.descriptors.lock().expect("descriptors").get(&key) {
+        if let Some(cached) = self.descriptors.read().expect("descriptors").get(&key) {
             return Ok(cached.clone());
         }
 
@@ -881,7 +881,7 @@ impl DescriptorSource for RepositorySource {
             .read_descriptor(artifact, &mut Vec::new())
             .map_err(|error| error.to_string())?;
         self.descriptors
-            .lock()
+            .write()
             .expect("descriptors")
             .insert(key, descriptor.clone());
         self.prefetch_children(&descriptor.dependencies);
@@ -890,7 +890,7 @@ impl DescriptorSource for RepositorySource {
 
     fn versions(&self, group_id: &str, artifact_id: &str) -> Result<Vec<String>, String> {
         let key = format!("{group_id}:{artifact_id}");
-        if let Some(cached) = self.versions.lock().expect("versions").get(&key) {
+        if let Some(cached) = self.versions.read().expect("versions").get(&key) {
             return Ok(cached.clone());
         }
 
@@ -917,7 +917,7 @@ impl DescriptorSource for RepositorySource {
         versions.sort_by(|left, right| Version::parse(left).cmp(&Version::parse(right)));
 
         self.versions
-            .lock()
+            .write()
             .expect("versions")
             .insert(key, versions.clone());
         Ok(versions)
