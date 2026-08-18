@@ -344,6 +344,29 @@ Every store versioned with a `CACHE_FORMAT_VERSION` marker from day one.
 
 ### 3.7 `jvx` execution model (`jv-exec`)
 
+**Measured, and this is where the speed story actually is.** The profiler
+(§3.13) showed a warm Maven build spends 3.5% of its time resolving and 65%
+executing mojos, which killed the idea of replacing Maven's resolver. But that
+same build carries ~1s of JVM startup and Maven bootstrap — classworlds, the
+Plexus container, extension loading — which a build amortises over real work and
+a *tool run* does not. Running one formatter over one file is almost entirely
+that overhead.
+
+    google-java-format --version, warm, medians of 5-7
+
+    bare `java -cp` with the classpath already known      93ms
+    jvx                                                  139ms   (+51ms)
+    mvn exec:java                                       1129ms   (+1036ms)
+                                                        -> 8.1x
+
+jvx lands within 51ms of the floor: that is what resolving the tool, building
+the classpath and launching costs when Maven is not in the way. Maven's tax on
+the same work is twenty times larger.
+
+`mvn -v` alone is 157ms, so this is not a JVM story — it is a Maven story. The
+JVM is not what makes running a Java tool slow; the build system wrapped around
+it is.
+
 Endpoint syntax ported from jgo (`src/jgo/parse/_endpoint.py`), the cleanest
 prior art:
 

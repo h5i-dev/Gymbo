@@ -29,6 +29,26 @@ pub enum Command {
     Exec(ExecArgs),
     /// Download everything the build needs, so `mvn -o` works afterwards.
     Sync(SyncArgs),
+    /// Report where a Maven build spends its time.
+    Profile(ProfileArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ProfileArgs {
+    /// The `EventSpy` jar to load.
+    ///
+    /// Defaults to `jv-profiler.jar` beside the `jv` executable, then to a
+    /// build tree's `java/jv-profiler/target/`. `JV_PROFILER_JAR` overrides
+    /// both.
+    #[arg(long, value_name = "JAR")]
+    pub profiler_jar: Option<PathBuf>,
+
+    /// The command to measure, after `--`. Defaults to `mvn test`.
+    ///
+    /// Anything is accepted rather than only `mvn`, because the wrappers people
+    /// actually run — `./mvnw`, `mvnd` — take the same property.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Args, Debug)]

@@ -2,6 +2,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use jv_driver::{Config, Project, Session, SyncRequest};
@@ -10,7 +11,7 @@ use jv_resolver::{Graph, Verbosity};
 use jv_tree::{Format, Options, render};
 use owo_colors::OwoColorize;
 
-use crate::args::{CommonArgs, ResolveArgs, SyncArgs, TreeArgs};
+use crate::args::{CommonArgs, ProfileArgs, ResolveArgs, SyncArgs, TreeArgs};
 
 /// Builds the driver config the flags describe.
 pub(crate) fn config(common: &CommonArgs) -> Config {
@@ -394,6 +395,75 @@ fn also(arguments: &[String]) -> anyhow::Result<Vec<Artifact>> {
         found.push(artifact);
     }
     Ok(found)
+}
+
+/// Runs a build under the `EventSpy` that reports where its time went.
+///
+/// Maven loads an extension named by `maven.ext.class.path` before the build
+/// starts, so this is a pass-through: the command runs exactly as the user
+/// wrote it, with one property added, and its exit code is forwarded. Anything
+/// jv printed would otherwise be indistinguishable from the build's own output,
+/// so the report comes from the spy itself, at the end.
+pub fn profile(args: &ProfileArgs) -> Result<ExitCode> {
+    let jar = profiler_jar(args.profiler_jar.clone())?;
+
+    let mut command = args.command.clone();
+    if command.is_empty() {
+        // The command people are trying to understand, nine times in ten.
+        command = vec!["mvn".to_owned(), "test".to_owned()];
+    }
+    let (program, rest) = command.split_first().expect("a non-empty command");
+
+    let mut child = std::process::Command::new(program);
+    child.arg(format!("-Dmaven.ext.class.path={}", jar.display()));
+    child.args(rest);
+
+    let status = child
+        .status()
+        .with_context(|| format!("cannot run {program}"))?;
+    Ok(ExitCode::from(
+        u8::try_from(status.code().unwrap_or(1)).unwrap_or(1),
+    ))
+}
+
+/// Finds the `EventSpy` jar.
+///
+/// Beside the executable first, because that is where an installed jv keeps it,
+/// then in a build tree, so `cargo run` works without an install step.
+fn profiler_jar(given: Option<PathBuf>) -> Result<PathBuf> {
+    const JAR: &str = "jv-profiler.jar";
+
+    let mut tried = Vec::new();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(given) = given {
+        candidates.push(given);
+    } else if let Some(from_environment) = std::env::var_os("JV_PROFILER_JAR") {
+        candidates.push(PathBuf::from(from_environment));
+    } else {
+        if let Ok(executable) = std::env::current_exe()
+            && let Some(directory) = executable.parent()
+        {
+            candidates.push(directory.join(JAR));
+            // A cargo build tree: target/{debug,release}/jv, with the jar built
+            // by java/jv-profiler/build.sh.
+            if let Some(root) = directory.parent().and_then(Path::parent) {
+                candidates.push(root.join("java/jv-profiler/target").join(JAR));
+            }
+        }
+        candidates.push(PathBuf::from("java/jv-profiler/target").join(JAR));
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        tried.push(candidate.display().to_string());
+    }
+    bail!(
+        "cannot find {JAR}; build it with java/jv-profiler/build.sh, or point \
+         --profiler-jar or $JV_PROFILER_JAR at it. Looked in:\n  {}",
+        tried.join("\n  ")
+    )
 }
 
 #[cfg(test)]
