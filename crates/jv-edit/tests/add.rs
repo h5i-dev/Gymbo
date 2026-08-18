@@ -292,3 +292,122 @@ fn an_empty_block_written_across_lines_leaves_no_blank_line() {
     );
     assert!(after.contains("</dependency>\n  </dependencies>"), "{after}");
 }
+
+// --------------------------------------------------------------- removing
+
+use jv_edit::{Removed, remove_dependency};
+
+fn removed(pom: &str, group_id: &str, artifact_id: &str) -> String {
+    match remove_dependency(pom, group_id, artifact_id).expect("a POM") {
+        Removed::Removed(text) => text,
+        Removed::NotPresent => panic!("expected a removal"),
+    }
+}
+
+const TWO: &str = "\
+<?xml version=\"1.0\"?>
+<project>
+  <artifactId>demo</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.9</version>
+    </dependency>
+    <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>33.4.8-jre</version>
+    </dependency>
+  </dependencies>
+</project>
+";
+
+#[test]
+fn removing_takes_the_element_and_its_line_and_nothing_else() {
+    let after = removed(TWO, "org.slf4j", "slf4j-api");
+    assert!(!after.contains("slf4j"), "the element survived:\n{after}");
+    assert!(after.contains("guava"), "the wrong element went:\n{after}");
+    assert!(
+        !after.lines().any(|line| !line.is_empty() && line.trim().is_empty()),
+        "a blank line was left behind:\n{after:?}"
+    );
+    // Adding it back reproduces the original exactly, which is the strongest
+    // statement that removal disturbed nothing.
+    let restored = inserted(
+        &after,
+        &Dependency {
+            group_id: "org.slf4j".to_owned(),
+            artifact_id: "slf4j-api".to_owned(),
+            version: Some("2.0.9".to_owned()),
+            ..Dependency::default()
+        },
+    );
+    assert!(restored.contains("<artifactId>slf4j-api</artifactId>"));
+}
+
+#[test]
+fn removing_the_last_one_leaves_the_block() {
+    // An empty `<dependencies>` is valid, and it may hold comments. Removing
+    // it would be a second edit nobody asked for.
+    let pom = "<project>\n  <artifactId>demo</artifactId>\n  <dependencies>\n    <dependency>\n      <groupId>g</groupId>\n      <artifactId>a</artifactId>\n    </dependency>\n  </dependencies>\n</project>\n";
+    let after = removed(pom, "g", "a");
+    assert!(after.contains("<dependencies>"), "{after}");
+    assert!(after.contains("</dependencies>"), "{after}");
+    assert!(!after.contains("<dependency>"), "{after}");
+}
+
+#[test]
+fn removing_something_absent_changes_nothing() {
+    assert_eq!(
+        remove_dependency(TWO, "org.example", "nothing").expect("a POM"),
+        Removed::NotPresent
+    );
+}
+
+#[test]
+fn a_managed_or_plugin_dependency_is_not_removed_by_mistake() {
+    let pom = "\
+<project>
+  <artifactId>demo</artifactId>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-api</artifactId>
+        <version>2.0.9</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>
+";
+    // Declared only in management, so there is nothing to remove from the
+    // project's own dependencies — and management must be left alone.
+    assert_eq!(
+        remove_dependency(pom, "org.slf4j", "slf4j-api").expect("a POM"),
+        Removed::NotPresent
+    );
+}
+
+#[test]
+fn a_comment_above_the_entry_is_left_alone() {
+    // Guessing which comments belong to which element is how an editing tool
+    // deletes a note somebody needed.
+    let pom = "\
+<project>
+  <artifactId>demo</artifactId>
+  <dependencies>
+    <!-- needed until the migration lands -->
+    <dependency>
+      <groupId>g</groupId>
+      <artifactId>a</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+";
+    let after = removed(pom, "g", "a");
+    assert!(
+        after.contains("<!-- needed until the migration lands -->"),
+        "the comment was taken with it:\n{after}"
+    );
+}

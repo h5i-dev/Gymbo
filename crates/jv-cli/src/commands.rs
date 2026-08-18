@@ -11,7 +11,9 @@ use jv_resolver::{Graph, Verbosity};
 use jv_tree::{Format, Options, render};
 use owo_colors::OwoColorize;
 
-use crate::args::{AddArgs, CommonArgs, ProfileArgs, ResolveArgs, SyncArgs, TreeArgs};
+use crate::args::{
+    AddArgs, CommonArgs, ProfileArgs, RemoveArgs, ResolveArgs, SyncArgs, TreeArgs,
+};
 
 /// Builds the driver config the flags describe.
 pub(crate) fn config(common: &CommonArgs) -> Config {
@@ -478,23 +480,7 @@ pub fn add(args: &AddArgs) -> Result<()> {
     let config = config(&args.common);
     let session = Session::new(&config)?;
     let root = project(&session, args.file.as_deref())?;
-    let target = match &args.module {
-        Some(module) => root
-            .reactor()
-            .into_iter()
-            .find(|project| project.model.artifact_id.as_deref() == Some(module.as_str()))
-            .with_context(|| {
-                format!(
-                    "no module named {module}; this build has: {}",
-                    root.reactor()
-                        .iter()
-                        .filter_map(|project| project.model.artifact_id.as_deref())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?,
-        None => &root,
-    };
+    let target = pick_module(&root, args.module.as_deref())?;
 
     let version = match given_version {
         Some(version) => Some(version),
@@ -598,6 +584,63 @@ fn newest_release(session: &Session, group_id: &str, artifact_id: &str) -> Resul
             format!(
                 "{group_id}:{artifact_id} has no released version in any configured repository; \
                  give one explicitly as {group_id}:{artifact_id}:VERSION"
+            )
+        })
+}
+
+
+/// Removes a dependency from a POM.
+///
+/// No repository is consulted: what to remove is fully determined by the
+/// coordinates and the file, so this works offline and instantly. A version in
+/// the argument is accepted and ignored, so a line copied from `jv add` works
+/// rather than failing on an argument that reads as correct.
+pub fn remove(args: &RemoveArgs) -> Result<()> {
+    let (group_id, artifact_id, _) = split_coordinates(&args.coordinates)?;
+
+    let config = config(&args.common);
+    let session = Session::new(&config)?;
+    let root = project(&session, args.file.as_deref())?;
+    let target = pick_module(&root, args.module.as_deref())?;
+
+    let before = std::fs::read_to_string(&target.path)
+        .with_context(|| format!("cannot read {}", target.path.display()))?;
+    match jv_edit::remove_dependency(&before, &group_id, &artifact_id)? {
+        jv_edit::Removed::NotPresent => {
+            println!(
+                "{group_id}:{artifact_id} is not a dependency of {}; nothing to do",
+                target.path.display()
+            );
+        }
+        jv_edit::Removed::Removed(after) if args.dry_run => print!("{after}"),
+        jv_edit::Removed::Removed(after) => {
+            std::fs::write(&target.path, &after)
+                .with_context(|| format!("cannot write {}", target.path.display()))?;
+            println!(
+                "removed {group_id}:{artifact_id} from {}",
+                target.path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The module to edit, or the root when none was named.
+fn pick_module<'a>(root: &'a Project, module: Option<&str>) -> Result<&'a Project> {
+    let Some(module) = module else {
+        return Ok(root);
+    };
+    root.reactor()
+        .into_iter()
+        .find(|project| project.model.artifact_id.as_deref() == Some(module))
+        .with_context(|| {
+            format!(
+                "no module named {module}; this build has: {}",
+                root.reactor()
+                    .iter()
+                    .filter_map(|project| project.model.artifact_id.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })
 }

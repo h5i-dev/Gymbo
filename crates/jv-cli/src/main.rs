@@ -30,6 +30,7 @@ fn main() -> ExitCode {
         Command::Sync(args) => commands::sync(args).map(|()| ExitCode::SUCCESS),
         Command::Profile(args) => commands::profile(args),
         Command::Add(args) => commands::add(args).map(|()| ExitCode::SUCCESS),
+        Command::Remove(args) => commands::remove(args).map(|()| ExitCode::SUCCESS),
     };
 
     match result {

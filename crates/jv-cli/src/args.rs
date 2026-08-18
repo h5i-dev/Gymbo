@@ -33,6 +33,32 @@ pub enum Command {
     Profile(ProfileArgs),
     /// Add a dependency to a POM.
     Add(AddArgs),
+    /// Remove a dependency from a POM.
+    Remove(RemoveArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct RemoveArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// The dependency, as `group:artifact`. A version is accepted and ignored,
+    /// so a line copied from `jv add` works.
+    #[arg(value_name = "COORDINATES")]
+    pub coordinates: String,
+
+    /// The pom.xml to edit. Defaults to the nearest one at or above the working
+    /// directory.
+    #[arg(short = 'f', long = "file", value_name = "POM")]
+    pub file: Option<PathBuf>,
+
+    /// Remove from this module of a multi-module build, by artifact id.
+    #[arg(short = 'm', long, value_name = "MODULE")]
+    pub module: Option<String>,
+
+    /// Print the edited POM instead of writing it.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]

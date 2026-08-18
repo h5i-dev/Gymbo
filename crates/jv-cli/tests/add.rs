@@ -207,3 +207,74 @@ fn a_scope_and_a_classifier_are_written_in_mavens_order() {
         "written out of Maven's order:\n{tail}"
     );
 }
+
+// ---------------------------------------------------------------- removing
+
+impl Project {
+    fn remove(&self, arguments: &[&str]) -> (bool, String) {
+        let output = Command::new(jv_binary())
+            .arg("remove")
+            .args(arguments)
+            .arg("--offline")
+            .arg("-f")
+            .arg(&self.pom)
+            .output()
+            .expect("jv should run");
+        (
+            output.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    }
+}
+
+#[test]
+fn removing_takes_the_dependency_and_leaves_the_file_alone() {
+    let project = Project::with(PLAIN);
+    let (ok, said) = project.remove(&["org.slf4j:slf4j-api"]);
+    assert!(ok, "{said}");
+
+    let text = project.text();
+    assert!(!text.contains("slf4j"), "{text}");
+    assert!(
+        text.contains("<!-- a comment nobody wants reformatted -->"),
+        "the comment was lost:\n{text}"
+    );
+    assert!(text.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+    assert!(
+        !text.lines().any(|line| !line.is_empty() && line.trim().is_empty()),
+        "a blank line was left behind:\n{text:?}"
+    );
+}
+
+#[test]
+fn a_version_in_the_argument_is_tolerated() {
+    // So a line copied from `jv add` works rather than failing on an argument
+    // that reads as perfectly correct.
+    let project = Project::with(PLAIN);
+    let (ok, said) = project.remove(&["org.slf4j:slf4j-api:2.0.9"]);
+    assert!(ok, "{said}");
+    assert!(!project.text().contains("slf4j"), "{}", project.text());
+}
+
+#[test]
+fn removing_something_absent_says_so_and_succeeds() {
+    let project = Project::with(PLAIN);
+    let before = project.text();
+    let (ok, said) = project.remove(&["org.example:absent"]);
+    assert!(ok, "removing what is not there is not an error: {said}");
+    assert!(said.contains("not a dependency"), "{said}");
+    assert_eq!(project.text(), before);
+}
+
+#[test]
+fn remove_dry_run_does_not_write() {
+    let project = Project::with(PLAIN);
+    let before = project.text();
+    let (ok, said) = project.remove(&["org.slf4j:slf4j-api", "--dry-run"]);
+    assert!(ok, "{said}");
+    assert_eq!(project.text(), before, "--dry-run wrote to the file");
+}

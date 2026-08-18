@@ -131,6 +131,63 @@ pub fn add_dependency(pom: &str, dependency: &Dependency) -> Result<Added, EditE
     }))
 }
 
+
+/// What removing a dependency did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Removed {
+    /// The POM no longer contains it; here is its new text.
+    Removed(String),
+    /// Nothing declared these coordinates, so nothing changed.
+    NotPresent,
+}
+
+/// Removes a dependency from `<project><dependencies>`.
+///
+/// The element and the line it sits on go; nothing else does. In particular a
+/// comment above the entry is left alone, even though it very likely described
+/// it. Guessing which comments belong to which element is how an editing tool
+/// deletes a note somebody needed, and a stray comment is a much cheaper
+/// mistake than a lost one — `jv` says what it removed, and the reviewer can
+/// see the comment in the same diff.
+///
+/// An emptied `<dependencies>` is left in place rather than removed, for the
+/// same reason: it may contain comments, and an empty one is valid.
+pub fn remove_dependency(
+    pom: &str,
+    group_id: &str,
+    artifact_id: &str,
+) -> Result<Removed, EditError> {
+    let layout = scan(pom)?;
+    let Some(entry) = layout
+        .dependencies
+        .iter()
+        .find(|held| held.group_id == group_id && held.artifact_id == artifact_id)
+    else {
+        return Ok(Removed::NotPresent);
+    };
+
+    // Take the whole line when the element has it to itself, so removing an
+    // entry does not leave the indentation that used to precede it.
+    let line_begins = line_start(pom, entry.start);
+    let start = if pom[line_begins..entry.start].trim().is_empty() {
+        line_begins
+    } else {
+        entry.start
+    };
+
+    let mut end = entry.end;
+    let rest = &pom[end..];
+    let line_ends = rest.find('\n').map_or(rest.len(), |index| index + 1);
+    if rest[..line_ends].trim().is_empty() {
+        end += line_ends;
+    }
+
+    let mut out = String::with_capacity(pom.len());
+    out.push_str(&pom[..start]);
+    out.push_str(&pom[end..]);
+    Ok(Removed::Removed(out))
+}
+
 /// Renders one `<dependency>` element.
 fn render(dependency: &Dependency, indent: &str, unit: &str, newline: &str) -> String {
     let inner = format!("{indent}{unit}");
@@ -186,6 +243,10 @@ struct Existing {
     artifact_id: String,
     version: Option<String>,
     line: usize,
+    /// Byte offset of `<dependency>`.
+    start: usize,
+    /// Byte offset just past `</dependency>`.
+    end: usize,
 }
 
 /// Where the project's `<dependencies>` sits in the text.
@@ -281,6 +342,8 @@ fn scan(pom: &str) -> Result<Layout, EditError> {
                         artifact_id: String::new(),
                         version: None,
                         line: line_of(pom, before),
+                        start: before,
+                        end: before,
                     });
                     if layout.child_indent.is_none() {
                         layout.child_indent = Some(leading_whitespace(pom, before));
@@ -307,7 +370,8 @@ fn scan(pom: &str) -> Result<Layout, EditError> {
                             _ => {}
                         }
                     } else if path == ["project", "dependencies"] && closed == "dependency" {
-                        if let Some(entry) = current.take() {
+                        if let Some(mut entry) = current.take() {
+                            entry.end = after;
                             layout.dependencies.push(entry);
                         }
                         // A child closed, so the block is not empty, and the
