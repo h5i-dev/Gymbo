@@ -14,8 +14,6 @@ jv-model = { workspace = true }
 jv-model-builder = { workspace = true }
 jv-repo = { workspace = true }
 rayon = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 quick-xml = { workspace = true }
 jv-resolver = { workspace = true }
 jv-version = { workspace = true }

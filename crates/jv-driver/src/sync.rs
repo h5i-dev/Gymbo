@@ -95,7 +95,6 @@ use jv_model::{Artifact, Dependency, Plugin, Scope, is_snapshot_version};
 use jv_resolver::{CollectRequest, Verbosity};
 
 use crate::error::DriverError;
-use crate::plugin_memo::{PluginMemo, Remembered};
 use crate::project::Project;
 use crate::session::Session;
 use crate::snapshot::LocalSnapshot;
@@ -220,29 +219,6 @@ pub fn sync(
     // execution time.
     let mut selects_reports = false;
 
-    // The repository set the plugin memo is keyed on, read before the crawler
-    // below is pointed at anything.
-    //
-    // Repositories accumulate: a dependency's POM can declare one, and the
-    // crawler registers those from background tasks. Reading the list after
-    // that has started would fingerprint a set that depends on how far the
-    // crawl happened to get, which varies between runs — and a key that varies
-    // between runs is a memo that never hits, silently and without ever being
-    // wrong enough to notice. Read here it is the settings, the super POM's
-    // Central and whatever the projects themselves declared, all of which are
-    // fixed before this function is called.
-    let memo = PluginMemo::new(
-        session.source().cache_root(),
-        &session
-            .source()
-            .repositories()
-            .iter()
-            .map(|repository| repository.url.clone())
-            .collect::<Vec<_>>(),
-        session.source().forced_update(),
-        session.source().is_offline(),
-    );
-
     // Point the POM crawler at every plugin before anything is resolved.
     //
     // The crawler is otherwise seeded only from dependencies, so plugin POM
@@ -284,7 +260,7 @@ pub fn sync(
     // nothing but a transitive dependency's POM mentions. No corpus project
     // does that, but "no corpus project does" is not "cannot happen".
     let closures = if request.plugins && request.plugin_dependencies {
-        plugin_closures(session, projects, request, &memo)?
+        plugin_closures(session, projects, request)?
     } else {
         HashMap::new()
     };
@@ -1247,6 +1223,27 @@ struct PluginClosure {
 /// The coordinates alone are not enough: `<plugin><dependencies>` adds to or
 /// replaces what the plugin declares, which is how a project pins a JDBC driver
 /// or a compiler, so two plugins at the same version can resolve differently.
+///
+/// # Why this is not a cache key
+///
+/// Closures were briefly remembered between runs on disk, keyed by this, which
+/// took a warm sync from 213ms to 99ms. It also silently dropped 40% of the
+/// repository: commons-io placed 6,060 artifacts on the run that wrote the memo
+/// and 3,664 on the run that read it.
+///
+/// Resolving a closure is not a pure computation whose answer is the only thing
+/// that matters. Reading a POM is what puts it in the set `read_poms` returns,
+/// and that set is what gets placed — so the parent chains of everything in a
+/// plugin's closure land in the local repository only because somebody parsed
+/// them. Skip the resolve and the artifacts still arrive, because the memo names
+/// them; their POMs do not, because nothing read them, and `mvn -o` then fails
+/// on a POM it cannot find.
+///
+/// A memo could be made correct by recording the POMs too, but per-closure
+/// attribution is the hard part: closures resolve in parallel into one shared
+/// set, so a before-and-after diff belongs to whichever ones happened to
+/// overlap. Deduplicating within a run is safe and is kept — a plugin forty
+/// modules declare is resolved once, and that once still reads its POMs.
 type ClosureKey = (String, String, String, String);
 
 fn closure_key(artifact: &Artifact, plugin: &Plugin) -> ClosureKey {
@@ -1279,7 +1276,6 @@ fn plugin_closures(
     session: &Session,
     projects: &[&Project],
     request: &SyncRequest,
-    memo: &PluginMemo,
 ) -> Result<HashMap<ClosureKey, PluginClosure>, DriverError> {
     use rayon::prelude::*;
 
@@ -1305,20 +1301,6 @@ fn plugin_closures(
 
     work.into_par_iter()
         .map(|(key, artifact, plugin)| {
-            // A remembered closure skips the resolve entirely, which is the
-            // whole point: the resolve is the cost. It carries no warnings
-            // because only a clean resolve is ever written down.
-            if let Some(remembered) = memo.get(&memo_key(&key)) {
-                return Ok((
-                    key,
-                    PluginClosure {
-                        dependencies: remembered.dependencies,
-                        extras: remembered.extras,
-                        warnings: Vec::new(),
-                    },
-                ));
-            }
-
             let mut warnings = Vec::new();
             let mut clean = true;
             let dependencies =
@@ -1343,29 +1325,21 @@ fn plugin_closures(
                 extras.push((extra, dependencies));
             }
 
-            let closure = PluginClosure {
-                dependencies,
-                extras,
-                warnings,
-            };
-            memo.put(
-                &memo_key(&key),
-                &Remembered {
-                    dependencies: closure.dependencies.clone(),
-                    extras: closure.extras.clone(),
+            // Deliberately not remembered between runs. See the note on
+            // `ClosureKey`.
+            let _ = clean;
+            Ok((
+                key,
+                PluginClosure {
+                    dependencies,
+                    extras,
+                    warnings,
                 },
-                clean && closure.warnings.is_empty(),
-            );
-            Ok((key, closure))
+            ))
         })
         .collect()
 }
 
-/// The key in the form the memo takes, which is a string rather than a tuple.
-fn memo_key(key: &ClosureKey) -> String {
-    let (group_id, artifact_id, version, dependencies) = key;
-    format!("{group_id}:{artifact_id}:{version}|{dependencies}")
-}
 
 /// Everything a plugin needs to run: its own dependency tree, plus any
 /// `<dependencies>` the POM added to it.
