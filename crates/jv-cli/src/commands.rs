@@ -654,7 +654,29 @@ struct Candidate {
     group_id: String,
     artifact_id: String,
     version: String,
-    is_plugin: bool,
+    kind: Kind,
+}
+
+/// Where a version was declared, which decides whether the reader can act on it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// `<dependencies>` in this project.
+    Dependency,
+    /// `<dependencyManagement>` in this project — including a BOM import, where
+    /// bumping the import is usually the whole upgrade.
+    Managed,
+    /// `<build><plugins>` or `<pluginManagement>`.
+    Plugin,
+}
+
+impl Kind {
+    fn marker(self) -> &'static str {
+        match self {
+            Kind::Dependency => "",
+            Kind::Managed => " (managed)",
+            Kind::Plugin => " (plugin)",
+        }
+    }
 }
 
 /// What asking about one candidate produced.
@@ -725,10 +747,49 @@ pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
                     group_id: dependency.group_id.clone(),
                     artifact_id: dependency.artifact_id.clone(),
                     version: version.to_owned(),
-                    is_plugin: false,
+                    kind: Kind::Dependency,
                 });
             }
         }
+        // Managed versions this POM declares itself.
+        //
+        // Read from the raw POM to decide *which* to report, and from the
+        // effective model to learn what version they resolved to. An effective
+        // model carries everything the parent chain manages — nineteen entries
+        // from the Apache parent on commons-io — and none of those are
+        // something this project can bump. What it declares itself is, and a
+        // `<scope>import</scope>` BOM is the most actionable entry of all,
+        // since bumping the import usually *is* the upgrade.
+        for (group_id, artifact_id, declared_version) in declared_management(target) {
+            // The effective model first, because it has properties resolved.
+            // Then the raw version, because an imported BOM does *not* survive
+            // into the effective model — model building expands it into the
+            // entries it contributes and the import itself is gone. Skipping it
+            // would drop the one entry most worth reporting: for a project that
+            // gets its versions from a BOM, bumping the import is the upgrade.
+            let Some(version) = target
+                .model
+                .dependency_management
+                .iter()
+                .find(|effective| {
+                    effective.group_id == group_id && effective.artifact_id == artifact_id
+                })
+                .and_then(|effective| effective.version.clone())
+                .or(declared_version)
+                .filter(|version| !version.is_empty() && !version.contains("${"))
+            else {
+                continue;
+            };
+            if seen.insert((group_id.clone(), artifact_id.clone())) {
+                wanted.push(Candidate {
+                    group_id,
+                    artifact_id,
+                    version,
+                    kind: Kind::Managed,
+                });
+            }
+        }
+
         if args.plugins
             && let Some(build) = &target.model.build
         {
@@ -746,7 +807,7 @@ pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
                         group_id,
                         artifact_id: artifact_id.to_owned(),
                         version: version.to_owned(),
-                        is_plugin: true,
+                        kind: Kind::Plugin,
                     });
                 }
             }
@@ -846,7 +907,7 @@ pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
                 Bump::Minor => bump.label().yellow().to_string(),
                 Bump::Patch => bump.label().green().to_string(),
             };
-            let marker = if candidate.is_plugin { " (plugin)" } else { "" };
+            let marker = candidate.kind.marker();
             println!(
                 "{coordinates:width$}  {:>14} -> {newest:<14} {how}{marker}",
                 candidate.version
@@ -879,6 +940,31 @@ pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+
+/// The `<dependencyManagement>` entries a POM declares itself.
+///
+/// The effective model cannot answer this: by the time it exists, everything a
+/// parent manages looks exactly like something this project manages, and only
+/// one of those is a version the reader can change here. So the raw file is
+/// read again — cheaply, and only to learn which coordinates are local.
+///
+/// A POM that cannot be re-read contributes nothing rather than failing the
+/// command: this is an enrichment, not the answer.
+fn declared_management(project: &Project) -> Vec<(String, String, Option<String>)> {
+    let Ok(text) = std::fs::read_to_string(&project.path) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = jv_model::parse_pom(&text) else {
+        return Vec::new();
+    };
+    parsed
+        .model
+        .dependency_management
+        .into_iter()
+        .map(|managed| (managed.group_id, managed.artifact_id, managed.version))
+        .collect()
 }
 
 /// Whether a version looks like a preview rather than a release.
