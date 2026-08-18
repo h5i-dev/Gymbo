@@ -536,8 +536,29 @@ jv keeps a URL-keyed store and then materialises it into `~/.m2` so Maven can
 read it. Maven's cache *is* the repository it reads, so on a warm run Maven has
 no prepare step at all and jv has one.
 
-The gain is **disk and CI cache, not time** — see the measurement above before
-picking this up expecting a speed result.
+**Measured, and there is no gain. Do not pick this up without re-measuring.**
+Every benefit claimed for it evaporated when checked:
+
+- *Speed.* Placement is already free. With a populated local repository,
+  skipping it entirely (`--cache-only`) is not measurably faster than doing it,
+  because placement is stats that find the file already there — commons-io 48ms
+  vs 55ms, dropwizard 724ms vs 796ms, byte-buddy 105ms vs 107ms.
+- *Local disk.* jv places by hardlink, so the "second tree" shares inodes with
+  the first. A placed jar reports 33 links and the same inode as its store copy,
+  and `du` over the store and the repository together reports 2.4G — the same as
+  the store alone.
+- *CI cache.* There is no second tree to drop. A runner caches jv's store and
+  materialises from it; measured on commons-io that store is 328MB against the
+  386MB `~/.m2` Maven caches, so jv already restores less than Maven does.
+
+What remains is the architectural argument — one layout instead of two, and jv
+no longer representing a state Maven cannot. That is real but it is not worth
+what it costs: the change lands on the negative cache, the download locks, the
+atomic writes and multi-repository semantics all at once. In particular, keying
+content by GAV would collapse two repositories' URLs onto one path, and the
+`.error` sidecar that records a 404 from one repository would then suppress
+lookups against the other — a correctness bug in exchange for no measured
+benefit.
 
 It is a remapping rather than a rewrite. The store path is already the
 repository base followed by the Maven layout path:
