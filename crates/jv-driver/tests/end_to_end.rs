@@ -659,3 +659,89 @@ fn a_working_tree_module_beats_a_published_one_of_the_same_coordinates() {
         "the published lib won over the one being built:\n{tree}"
     );
 }
+
+/// A classified sibling is a separate artifact, all the way through the driver.
+///
+/// The resolver was always right about this; the driver's descriptor cache was
+/// keyed `group:artifact:version`, so `g:a:1:data` hit the entry cached for
+/// `g:a:1` and came back describing the plain artifact. The collector built its
+/// node from that, and conflict resolution dropped the classified one as a
+/// duplicate — which is why `xmlresolver:jar:data` went missing from
+/// spring-petclinic's checkstyle classpath and `mvn -o` could not run it.
+///
+/// A resolver-level test cannot catch this: it needs the cache that only the
+/// driver has.
+#[test]
+fn a_classified_sibling_survives_the_descriptor_cache() {
+    let workspace = tempfile::tempdir().expect("a temp dir");
+    let repository = workspace.path().join("repository");
+    let directory = repository.join("g").join("a").join("1");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("a-1.pom"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>g</groupId><artifactId>a</artifactId><version>1</version>
+</project>"#,
+    )
+    .unwrap();
+    std::fs::write(directory.join("a-1.jar"), b"plain").unwrap();
+    std::fs::write(directory.join("a-1-data.jar"), b"data").unwrap();
+
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("pom.xml"),
+        format!(
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId><artifactId>root</artifactId><version>1.0</version>
+  <repositories><repository><id>local</id><url>file://{}</url></repository></repositories>
+  <dependencies>
+    <dependency><groupId>g</groupId><artifactId>a</artifactId><version>1</version></dependency>
+    <dependency><groupId>g</groupId><artifactId>a</artifactId><version>1</version><classifier>data</classifier></dependency>
+  </dependencies>
+</project>"#,
+            repository.display()
+        ),
+    )
+    .unwrap();
+    let settings = workspace.path().join("settings.xml");
+    std::fs::write(&settings, "<settings/>").unwrap();
+
+    let config = Config {
+        user_settings: Some(settings),
+        cache: Some(workspace.path().join("cache")),
+        ignore_local_repository: true,
+        ..Config::default()
+    };
+    let session = Session::new(&config).expect("a session");
+    let loaded = session
+        .project_at(&project.join("pom.xml"))
+        .expect("the project loads");
+    let resolution = session
+        .resolve_project(&loaded, Verbosity::None)
+        .expect("resolution");
+
+    let mut classifiers: Vec<String> = Vec::new();
+    let graph = &resolution.collected.graph;
+    graph.walk(|id, _depth| {
+        if id == graph.root() {
+            return;
+        }
+        let node = graph.node(id);
+        if node.omitted_for.is_some() {
+            return;
+        }
+        if let Some(artifact) = &node.artifact {
+            classifiers.push(artifact.classifier.clone());
+        }
+    });
+    classifiers.sort();
+
+    assert_eq!(
+        classifiers,
+        ["", "data"],
+        "a classifier selects a different file, so both must survive"
+    );
+}

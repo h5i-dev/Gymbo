@@ -640,7 +640,7 @@ impl ModelSource for RepositorySource {
 
 impl DescriptorSource for RepositorySource {
     fn descriptor(&self, artifact: &Artifact) -> Result<Descriptor, String> {
-        let key = coordinates(artifact);
+        let key = descriptor_key(artifact);
         if let Some(cached) = self.descriptors.lock().expect("descriptors").get(&key) {
             return Ok(cached.clone());
         }
@@ -940,5 +940,31 @@ fn coordinates(artifact: &Artifact) -> String {
     format!(
         "{}:{}:{}",
         artifact.group_id, artifact.artifact_id, artifact.version
+    )
+}
+
+/// The descriptor cache key, which must separate classified siblings.
+///
+/// One POM serves every classified file of a version — a classifier selects a
+/// *file*, not a different module — so `coordinates` is the right key for the
+/// parsed model. It is the wrong key for the descriptor, because a
+/// `Descriptor` also carries the artifact's own identity: keyed without the
+/// classifier, `g:a:1:data` hit the entry cached for `g:a:1` and came back
+/// describing the *plain* artifact. The collector then built its node and its
+/// pool key from that, so the classified dependency became a second copy of the
+/// plain one and conflict resolution dropped it as a duplicate.
+///
+/// That is how `org.xmlresolver:xmlresolver:jar:data` vanished from
+/// spring-petclinic's checkstyle classpath and left `mvn -o` unable to run it.
+/// The model itself is memoised separately, so re-reading a descriptor for a
+/// classified sibling costs a little assembly and no network.
+fn descriptor_key(artifact: &Artifact) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        artifact.group_id,
+        artifact.artifact_id,
+        artifact.version,
+        artifact.extension,
+        artifact.classifier
     )
 }
