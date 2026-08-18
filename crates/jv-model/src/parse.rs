@@ -18,8 +18,8 @@ use quick_xml::name::QName;
 use crate::coordinates::{Dependency, Exclusion};
 use crate::model::{
     Activation, ActivationFile, ActivationOs, ActivationProperty, Build, DistributionManagement,
-    Extension, Model, Parent, Plugin, PluginExecution, Profile, Relocation, Repository,
-    RepositoryPolicy,
+    Extension, Model, Parent, Plugin, PluginExecution, Prerequisites, Profile, Relocation,
+    Repository, RepositoryPolicy,
 };
 use crate::scope::Scope;
 
@@ -287,6 +287,10 @@ impl<'i> XmlParser<'i> {
             b"description" => parser.text_into(&mut model.description),
             b"url" => parser.text_into(&mut model.url),
             b"inceptionYear" => parser.text_into(&mut model.inception_year),
+            b"prerequisites" => {
+                model.prerequisites = Some(parser.parse_prerequisites()?);
+                Ok(true)
+            }
             b"properties" => {
                 parser.parse_properties(&mut model.properties)?;
                 Ok(true)
@@ -716,6 +720,15 @@ impl<'i> XmlParser<'i> {
             _ => Ok(false),
         })?;
         Ok(management)
+    }
+
+    fn parse_prerequisites(&mut self) -> Result<Prerequisites, ParseError> {
+        let mut prerequisites = Prerequisites::default();
+        self.children("prerequisites", |parser, name| match name {
+            b"maven" => parser.text_into(&mut prerequisites.maven),
+            _ => Ok(false),
+        })?;
+        Ok(prerequisites)
     }
 
     fn parse_relocation(&mut self) -> Result<Relocation, ParseError> {

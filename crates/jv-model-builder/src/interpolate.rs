@@ -306,6 +306,11 @@ impl<'a> Interpolator<'a> {
             "description" => model.description.clone(),
             "url" => model.url.clone(),
             "inceptionYear" => model.inception_year.clone(),
+            // The Apache parent chain interpolates this into plugin versions.
+            // Without it the expression survives into a coordinate, and the
+            // first thing that notices is a request for a URL containing the
+            // mangled remains of `${...}`.
+            "prerequisites.maven" => model.prerequisites.as_ref()?.maven.clone(),
             "parent.groupId" => model.parent.as_ref()?.group_id.clone(),
             "parent.artifactId" => model.parent.as_ref()?.artifact_id.clone(),
             "parent.version" => model.parent.as_ref()?.version.clone(),

@@ -31,17 +31,22 @@
 //! lockstep with the plugin; a provider that does not exist for some version
 //! simply 404s and is skipped, which is already how a missing artifact behaves.
 //!
-//! # Known gap: snapshots
+//! # Snapshots
 //!
-//! A snapshot downloaded from a repository lives in Maven's local repository
-//! under its *timestamped* file name, and Maven finds it through a
-//! `maven-metadata-<repositoryId>.xml` beside it. jv places the file correctly
-//! but does not yet write that metadata, and cannot write it safely in general:
-//! the id in the file name is the *effective* repository id, which is the
-//! mirror's when the user has one, and there is no unconditional fallback the
-//! way `_remote.repositories` has one. So `jv sync` warns on a snapshot rather
-//! than writing metadata that would be right only sometimes. Recorded in
-//! `docs/spec/local-repository.md` and `ROADMAP.md`.
+//! A snapshot cannot simply be placed. In a repository its file name carries a
+//! deployment timestamp, and Maven only learns which timestamp is current by
+//! reading `maven-metadata-<repositoryId>.xml` beside it — where that id is the
+//! *effective* repository id, the mirror's when the user has a mirror. jv
+//! cannot know how the next `mvn` invocation will be configured, and metadata
+//! under the wrong id is worse than none: the artifact is present and still
+//! unresolvable.
+//!
+//! So jv writes the layout `mvn install` produces instead, which carries no
+//! repository id at all — the file under its base `-SNAPSHOT` name plus a
+//! `maven-metadata-local.xml` declaring `<localCopy>true</localCopy>`. Maven
+//! accepts that from any configuration because it is the shape Maven writes
+//! itself, and it is honest: jv put the file there, so it is locally installed
+//! whatever it was downloaded from. See [`crate::snapshot`].
 //!
 //! # Why the artifacts are hardlinked
 //!
@@ -148,6 +153,21 @@ pub fn sync(
     // Whether any plugin in the build resolves a test provider at run time.
     let mut selects_providers = false;
 
+    // Point the POM crawler at every plugin before anything is resolved.
+    //
+    // The crawler is otherwise seeded only from dependencies, so plugin POM
+    // chains were fetched cold — and because plugin dependencies are resolved
+    // one plugin at a time, those chains went out sequentially. Seeding them
+    // here overlaps the whole set with the dependency resolve that follows.
+    if request.plugins {
+        let plugins: Vec<Artifact> = projects
+            .iter()
+            .flat_map(|project| project_plugins(project))
+            .filter_map(|plugin| plugin_artifact(&plugin))
+            .collect();
+        session.source().prefetch_artifacts(plugins);
+    }
+
     // Toolchains: not downloadable, but checkable. A missing one fails the
     // build long after the sync reported success, with an error that does not
     // mention this file.
@@ -168,6 +188,43 @@ pub fn sync(
                     project.path.display(),
                     requirement.describe()
                 ));
+            }
+        }
+    }
+
+    // `<build><extensions>` — build extensions declared by the project rather
+    // than in `.mvn/extensions.xml`. Maven loads these before the build, so
+    // `mvn -o` fails without them; `os-maven-plugin` is the common one and it
+    // is how the gson corpus entry failed.
+    for project in projects {
+        for extension in project
+            .model
+            .build
+            .iter()
+            .flat_map(|build| &build.extensions)
+        {
+            let (Some(artifact_id), Some(version)) = (
+                extension.artifact_id.as_deref(),
+                extension.version.as_deref(),
+            ) else {
+                report.warnings.push(format!(
+                    "{}: build extension {}:{} declares no version and was not synced",
+                    project.path.display(),
+                    extension.group_id.as_deref().unwrap_or("[unknown]"),
+                    extension.artifact_id.as_deref().unwrap_or("[unknown]")
+                ));
+                continue;
+            };
+            let artifact = Artifact::new(
+                extension.group_id.as_deref().unwrap_or_default(),
+                artifact_id,
+                version,
+            );
+            wanted.push(&reactor, artifact.clone());
+            if let Ok(dependencies) = plugin_dependencies(session, &artifact, &Plugin::default()) {
+                for dependency in dependencies {
+                    wanted.push(&reactor, dependency);
+                }
             }
         }
     }
@@ -281,16 +338,53 @@ pub fn sync(
     // What has already been dealt with, so the POM sweep below does not redo it.
     let mut placed: BTreeSet<Artifact> = BTreeSet::new();
 
-    for artifact in std::mem::take(&mut wanted.ordered) {
-        // The POM travels with the jar: Maven reads it on every resolve, and a
-        // local repository holding jars without POMs is one `mvn -o` rejects.
-        let pom = Artifact {
-            classifier: String::new(),
-            extension: "pom".to_owned(),
-            ..artifact.clone()
-        };
-        for candidate in [pom, artifact] {
-            match session.source().materialize(&candidate)? {
+    // Every file to fetch, POMs included, gathered before anything is
+    // downloaded so the whole set can go out concurrently. Fetching one at a
+    // time made a cold sync pay one sequential round trip per artifact, which
+    // was most of its wall clock.
+    //
+    // The POM travels with the jar: Maven reads it on every resolve, and a
+    // local repository holding jars without POMs is one `mvn -o` rejects.
+    let candidates: Vec<Artifact> = std::mem::take(&mut wanted.ordered)
+        .into_iter()
+        .flat_map(|artifact| {
+            let pom = Artifact {
+                classifier: String::new(),
+                extension: "pom".to_owned(),
+                ..artifact.clone()
+            };
+            [pom, artifact]
+        })
+        .collect();
+
+    // An expression that survived interpolation must never become a request.
+    //
+    // `${project.prerequisites.maven}` in the Apache parent chain used to reach
+    // this point intact; the path builder then neutralised the `${}` — correctly,
+    // since a coordinate must not be able to escape the repository root — and jv
+    // asked a repository for `…/__project.prerequisites.maven_/…`. The failure
+    // that surfaced was a network error about a nonsense URL, which says nothing
+    // about the actual problem. Reporting the expression is both more useful and
+    // strictly safer.
+    let (candidates, unresolved): (Vec<Artifact>, Vec<Artifact>) = candidates
+        .into_iter()
+        .partition(|artifact| !has_unresolved_expression(artifact));
+    for artifact in unresolved {
+        report.warnings.push(format!(
+            "{}:{}:{} still contains an unresolved expression and was not fetched; \
+             the property it names is not defined anywhere jv could see",
+            artifact.group_id, artifact.artifact_id, artifact.version
+        ));
+    }
+
+    let found_all = session.source().materialize_all(&candidates)?;
+
+    // The placement half stays sequential and in order: it is filesystem work
+    // rather than network work, and the tracking file and snapshot metadata
+    // both depend on the order artifacts are seen in.
+    for (candidate, found) in candidates.into_iter().zip(found_all) {
+        {
+            match found {
                 Some(found) => {
                     if let Some(local) = &request.local_repository {
                         // The *resolved* path: a snapshot lives in its
@@ -347,11 +441,19 @@ pub fn sync(
     // artifacts themselves: Maven walks each one's parents and imported BOMs
     // when it re-reads them, and a missing grandparent POM fails a build whose
     // jars are all present. jv already fetched them; they just have to travel.
-    for pom in session.source().read_poms() {
-        if placed.contains(&pom) {
-            continue;
-        }
-        let Some(found) = session.source().materialize(&pom)? else {
+    // Concurrently, for the same reason as the artifacts above: this set is
+    // every POM jv read, which on a deep parent chain is larger than the
+    // artifact set and was being walked one blocking request at a time.
+    let remaining: Vec<Artifact> = session
+        .source()
+        .read_poms()
+        .into_iter()
+        .filter(|pom| !placed.contains(pom))
+        .collect();
+    let found_poms = session.source().materialize_all(&remaining)?;
+
+    for (pom, found) in remaining.into_iter().zip(found_poms) {
+        let Some(found) = found else {
             continue;
         };
         if let Some(local) = &request.local_repository {
@@ -440,6 +542,21 @@ impl Wanted {
             self.ordered.push(artifact);
         }
     }
+}
+
+/// Whether any coordinate field still holds a `${...}`.
+///
+/// Cheap, and it runs once per artifact rather than per request.
+fn has_unresolved_expression(artifact: &Artifact) -> bool {
+    [
+        &artifact.group_id,
+        &artifact.artifact_id,
+        &artifact.version,
+        &artifact.classifier,
+        &artifact.extension,
+    ]
+    .iter()
+    .any(|field| field.contains("${"))
 }
 
 /// The plugins a project uses, in the order `ResolverUtil.getProjectPlugins`

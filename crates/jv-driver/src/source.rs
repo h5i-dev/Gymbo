@@ -49,6 +49,13 @@ use jv_version::Version;
 
 use crate::error::DriverError;
 
+/// How many artifact downloads `materialize_all` keeps in flight.
+///
+/// The same bound the POM crawler uses. Beyond this a single host stops going
+/// faster and starts refusing connections, and the wall clock of a cold sync is
+/// already dominated by the slowest few artifacts rather than by the count.
+const MATERIALIZE_IN_FLIGHT: usize = 32;
+
 /// The extension a POM is stored under, which is what every descriptor read
 /// actually asks the repository for.
 const POM: &str = "pom";
@@ -566,6 +573,28 @@ impl RepositorySource {
     pub fn prefetch_from(&self, dependencies: &[Dependency]) {
         self.prefetch_children(dependencies);
     }
+
+    /// Points the crawler at artifacts already known by coordinate.
+    ///
+    /// `jv sync` needs this for plugins. The crawler was only ever seeded from
+    /// *dependencies*, so every plugin's POM chain was fetched cold — and since
+    /// plugin dependencies are resolved one plugin at a time, those chains went
+    /// out one after another. A project with twenty plugins paid twenty
+    /// sequential POM walks before the first jar was requested.
+    ///
+    /// Seeding them all up front turns that into one concurrent crawl that
+    /// overlaps the dependency resolve which is happening anyway.
+    pub fn prefetch_artifacts(&self, artifacts: impl IntoIterator<Item = Artifact>) {
+        let repositories = self.repositories();
+        self.prefetcher.seed(
+            &repositories,
+            artifacts.into_iter().map(|artifact| Artifact {
+                classifier: String::new(),
+                extension: POM.to_owned(),
+                ..artifact
+            }),
+        );
+    }
 }
 
 impl ModelSource for RepositorySource {
@@ -722,6 +751,80 @@ impl RepositorySource {
             ..artifact.clone()
         };
         Ok(artifact_path(&resolved))
+    }
+
+    /// Downloads many artifacts at once.
+    ///
+    /// `jv sync` used to call [`Self::materialize`] in a loop, and each call
+    /// blocks on its own request — so a cold sync of four hundred artifacts
+    /// paid four hundred sequential round trips, which was almost all of its
+    /// wall clock. Resolution had long since been made concurrent; the
+    /// download half had not.
+    ///
+    /// Results come back in the order asked for, so the caller's ordering,
+    /// tracking-file writes and snapshot bookkeeping are unaffected — only the
+    /// waiting is shared. Concurrency is bounded for the same reason the POM
+    /// crawler bounds it: a few hundred simultaneous connections to one host
+    /// is not faster, and is rude.
+    pub fn materialize_all(
+        &self,
+        artifacts: &[Artifact],
+    ) -> Result<Vec<Option<Materialized>>, DriverError> {
+        if artifacts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Snapshot version resolution reads metadata and memoises it, and doing
+        // it inside the concurrent block would have every task racing for the
+        // same lock on the same key. It is cheap and usually a cache hit.
+        let resolved: Vec<Artifact> = artifacts
+            .iter()
+            .map(|artifact| {
+                Ok(Artifact {
+                    version: self.resolved_version(artifact)?,
+                    ..artifact.clone()
+                })
+            })
+            .collect::<Result<_, DriverError>>()?;
+
+        let repositories = self.repositories();
+        let permits = Arc::new(tokio::sync::Semaphore::new(MATERIALIZE_IN_FLIGHT));
+        let fetched = self
+            .runtime
+            .block_on(futures_util::future::join_all(resolved.iter().map(
+                |artifact| {
+                    let permits = Arc::clone(&permits);
+                    let repositories = &repositories;
+                    async move {
+                        let _permit = permits
+                            .acquire()
+                            .await
+                            .expect("the semaphore is not closed");
+                        self.fetcher.locate(repositories, artifact).await
+                    }
+                },
+            )));
+
+        let mut materialized = Vec::with_capacity(fetched.len());
+        for outcome in fetched {
+            match outcome {
+                Ok(found) => {
+                    for warning in &found.warnings {
+                        self.warn(warning.clone());
+                    }
+                    materialized.push(Some(Materialized {
+                        origin: found.origin,
+                        path: found.path,
+                        repository: found.repository,
+                    }));
+                }
+                // A 404 is the ordinary answer for an artifact a repository
+                // does not carry; the caller reports it as missing.
+                Err(jv_cache::FetchError::NotFound { .. }) => materialized.push(None),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(materialized)
     }
 
     /// Downloads an artifact's own file.

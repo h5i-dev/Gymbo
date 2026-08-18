@@ -42,6 +42,11 @@ pub struct Model {
     pub description: Option<String>,
     pub url: Option<String>,
     pub inception_year: Option<String>,
+    /// `<prerequisites>`. Only `<maven>` matters, and only because POMs
+    /// interpolate `${project.prerequisites.maven}` into plugin versions — the
+    /// Apache parent chain does exactly that, and without it the expression
+    /// survives into a coordinate and produces a nonsense request.
+    pub prerequisites: Option<Prerequisites>,
     pub properties: Properties,
     pub dependencies: Vec<Dependency>,
     pub dependency_management: Vec<Dependency>,
@@ -132,8 +137,9 @@ pub struct Build {
     pub default_goal: Option<String>,
     pub plugins: Vec<Plugin>,
     pub plugin_management: Vec<Plugin>,
-    /// Build extensions. jv does not load these yet; `jv sync` reports them as a
-    /// known gap rather than silently omitting them.
+    /// Build extensions. jv cannot *load* one — that needs Maven's container —
+    /// but `jv sync` fetches them, because Maven loads them before the build
+    /// and `mvn -o` fails outright when one is absent.
     pub extensions: Vec<Extension>,
 }
 
@@ -329,6 +335,12 @@ pub struct DistributionManagement {
     pub relocation: Option<Relocation>,
     /// A free-text status such as `deployed`; never affects resolution.
     pub status: Option<String>,
+}
+
+/// `<prerequisites>`: the minimum Maven a build declares it needs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Prerequisites {
+    pub maven: Option<String>,
 }
 
 /// A `<relocation>`: any absent field keeps the original coordinate.
