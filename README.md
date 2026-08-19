@@ -150,7 +150,7 @@ the [FAQ](#will-jv-make-my-builds-faster).
 ## What jv does not do
 
 - **It does not build.** No compile, test, package. The pairing is
-  `jv sync && mvn -o verify`, not a replacement for `mvn`.
+  `jv sync && mvn -o verify`.
 - **Gradle projects are out of scope** for v0.x. A Gradle-built *dependency*
   resolves fine, since its POM is what Maven reads too.
 - **No JDK management, and no daemon.** SDKMAN and mise do the first well. The
