@@ -1,6 +1,6 @@
 <h1 align="center">jv</h1>
 
-<p align="center"><strong>Maven's dependency resolution, in a single Rust binary.</strong></p>
+<p align="center"><strong>The Maven commands you run all day, without the JVM.</strong></p>
 
 <p align="center">
   <a href="https://github.com/h5i-dev/jv/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/h5i-dev/jv/actions/workflows/ci.yml/badge.svg"></a>
@@ -8,258 +8,158 @@
   <a href="https://github.com/h5i-dev/jv/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/h5i-dev/jv?style=social"></a>
 </p>
 
-**jv** answers the dependency questions Maven answers (which versions win, what
-the classpath is, what to download) without starting a JVM. It reads your
-`pom.xml` and your `~/.m2/settings.xml`, resolves with Maven 3.9's exact rules,
-and shares Maven's local repository.
+Every `mvn` invocation costs about a second before it does anything you asked
+for: JVM start, then classworlds, the Plexus container, and plugin loading. For
+a build that is noise. For asking which version won, or running one formatter
+over one file, it is the whole cost.
 
-<table align="center">
-<tr>
-<td>⚡ Milliseconds, not seconds</td>
-<td>🎯 Byte-identical to <code>mvn dependency:tree</code></td>
-</tr>
-<tr>
-<td>🤝 Shares <code>~/.m2</code>, reads your <code>settings.xml</code></td>
-<td>📦 One static binary, no JVM</td>
-</tr>
-</table>
+**jv** answers those questions in a single Rust binary, using Maven 3.9's exact
+rules. It reads your `pom.xml` and your `settings.xml`, and shares `~/.m2`.
 
 ```bash
 jv tree                       # the dependency tree, byte-identical to Maven's
-jv resolve --classpath        # a classpath you can paste into java -cp
-jv sync && mvn -o verify      # jv downloads, Maven builds, no network
-jvx com.google.googlejavaformat:google-java-format -- --version
+jv outdated                   # what has a newer version
+jv add org.slf4j:slf4j-api    # picks the version, or omits it if a BOM manages one
+jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
 ```
 
 **A jv project is just your Maven project.** No new manifest, no lockfile, no
-migration, no changes to your POM. jv reads what Maven already reads, and writes
-where Maven already looks — so nothing it does is visible to a teammate who
-keeps using `mvn`.
+POM changes. jv reads what Maven reads and writes where Maven looks, so nothing
+it does is visible to a teammate who keeps using `mvn`.
 
-> **Status: early development.** `jv tree`, `jv resolve`, `jv sync` and `jvx`
-> all work and are verified against real Maven on every commit. No release is
-> tagged yet, so for now you build it yourself.
-
----
+> **Status: early development.** Everything below works and is verified against
+> real Maven on every commit. No release is tagged yet, so you build it
+> yourself.
 
 ## Speed
 
-|  | jv | `mvn dependency:tree` | |
+commons-io, warm caches, medians of five alternated rounds, both tools required
+to exit zero. 10-core WSL2, Maven 3.9.9.
+
+| | Maven | jv | |
 |---|---|---|---|
-| Warm | **26 ms** | 1,778 ms | 69× |
-| Cold | **0.75 s** | 11.3 s | 15× |
+| dependency tree | `dependency:tree` 1,646 ms | `jv tree` 20 ms | **82×** |
+| outdated check | `versions:display-dependency-updates` 1,637 ms | `jv outdated` 47 ms | **35×** |
+| run a tool | `exec:java` 1,129 ms | `jvx` 139 ms | **8×** |
+| build a project | `mvn verify` 53.8 s | `jv sync && mvn -o verify` 58.7 s | **0.92×** |
 
-Median of five warm runs on one project (Jackson, HttpClient 5, Guava, JUnit 5;
-23 nodes), 10-core aarch64 Linux, Maven 3.9.9. Both tools start from an empty
-cache for the cold row. `scripts/benchmark.sh` produces this table, and refuses
-to report a time unless the two tools' output matches first: a benchmark
-against wrong output measures nothing. Cold timings are network-bound and will
-differ on your machine; the warm row is the one that reflects the tool.
+One mechanism explains every row, including the last. The ratio is just how much
+real work the command does on top of Maven's fixed second. A dependency tree does
+almost none, so 82×. `exec:java` starts a JVM and runs a tool, so 8×. A build
+compiles, and jv does not compile, so jv loses.
 
-Both figures come from the same idea: jv crawls POMs ahead of the resolver
-instead of fetching them one round trip at a time, and the crawler hands over
-what it parsed rather than parsing everything twice. A 104-node Spring Boot
-project went from 22.4 s to 3.5 s cold and 150 ms to 59 ms warm that way. The
-warm figure also stopped including a JVM boot, which jv used to pay on every
-run to read one line out of it.
+Measured directly: turning off the versions plugin's `<dependencyManagement>`
+pass removed 19 of its 29 metadata lookups and saved 16 ms out of 1,653. The
+lookups cost about a millisecond each. The rest is the host.
 
----
+**Do not adopt `jv sync` for speed.** Its value is that `mvn -o` works
+afterwards, not that it is quicker. See below.
 
 ## Install
 
-No release is tagged yet, so build from source:
-
 ```bash
 git clone https://github.com/h5i-dev/jv && cd jv
-cargo build --release       # binaries land in target/release/{jv,jvx}
+cargo build --release        # target/release/{jv,jvx}
 ```
 
-Once v0.1.0 ships, this is the install:
+## What it replaces
+
+| You run today | With jv |
+|---|---|
+| `mvn dependency:tree` | `jv tree`, byte-identical, in all five output formats |
+| `mvn dependency:tree -Dverbose` | `jv tree --verbose`, why each version won |
+| `mvn dependency:list` | `jv resolve` |
+| `mvn dependency:build-classpath` | `jv resolve --classpath` |
+| `mvn versions:display-dependency-updates` | `jv outdated` |
+| `mvn dependency:go-offline` | `jv sync` |
+| *(nothing: you edit XML by hand)* | `jv add`, `jv remove` |
+| *(nothing)* | `jv profile -- mvn test` |
+
+Add `--recursive` for every module of a multi-module build. Maven's flags carry
+over with Maven's spelling: `-o`, `-U`, `-s`, `-P`, `-D`, `-f`.
+
+### Editing a POM
+
+`jv add` and `jv remove` never reformat the file. They rewrite the byte range of
+one element and copy everything else through unchanged, so comments,
+indentation, line endings and the XML declaration survive.
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/h5i-dev/jv/main/scripts/install.sh | sh
+jv add com.google.guava:guava            # resolves the newest release
+jv add com.fasterxml.jackson.core:jackson-databind   # BOM manages it: no <version> written
+jv add org.junit.jupiter:junit-jupiter --test
+jv remove com.google.guava:guava
 ```
 
-The script picks the build for your platform, verifies it against the SHA-256
-published beside the release, and installs to `~/.local/bin`. Set
-`JV_INSTALL_DIR` to install elsewhere, or `JV_VERSION=vX.Y.Z` to pin a version.
-Until then it has nothing to fetch and will tell you so rather than guess.
+Writing a version for a dependency a BOM already manages would pin what the
+project deliberately left managed, so jv checks the effective model first and
+says what it decided.
 
-jv needs a JDK on `PATH` or at `JAVA_HOME` only to run tools with `jvx`, and to
-decide which `<jdk>` profile activators match. Resolution itself needs no JVM.
-v0.x targets Linux and macOS; on Windows, use WSL2.
+### Running tools
 
----
-
-## Adopting it
-
-You do not have to adopt jv all at once, and you never have to give up Maven.
-Three steps, in increasing order of commitment. Each is useful on its own.
-
-### 1. Replace the commands you use to *look* at dependencies
-
-These only read. They cannot change what your build produces, so there is
-nothing to weigh up.
-
-| What you run today | With jv | |
-|---|---|---|
-| `mvn dependency:tree` | `jv tree` | byte-identical, in all five output formats |
-| `mvn dependency:tree -DoutputType=dot` | `jv tree -t dot` | also `json`, `tgf`, `graphml` |
-| `mvn dependency:tree -Dverbose` | `jv tree --verbose` | why each version won, and which lost |
-| `mvn dependency:list` | `jv resolve` | the resolved set, one line each |
-| `mvn dependency:build-classpath` | `jv resolve --classpath` | |
-| `mvn dependency:go-offline` | `jv sync` | see step 2 |
-| *(any of the above)*, whole reactor | add `--recursive` | every module of a multi-module build |
-
-Familiar flags carry over with the spelling Maven gives them: `-o` for offline,
-`-U` to force updates, `-s` for a settings file, `-P` for profiles, `-D` for
-properties, `-f` for a POM somewhere else.
-
-```console
-$ jv tree --verbose
-com.example:demo:jar:1.0
-+- com.fasterxml.jackson.core:jackson-databind:jar:2.17.1:compile
-|  +- com.fasterxml.jackson.core:jackson-annotations:jar:2.17.1:compile
-|  \- (com.fasterxml.jackson.core:jackson-core:jar:2.17.1:compile - omitted for conflict with 2.15.0)
-\- com.fasterxml.jackson.core:jackson-core:jar:2.15.0:compile
-```
-
-### 2. Take the download out of your build
-
-`jv sync` populates Maven's local repository with everything the build needs:
-dependencies, plugins, and the plugins the lifecycle binds for your packaging,
-which appear in no POM anywhere. Maven then builds with no network at all:
+`jvx` runs any published JVM tool from its coordinates, on the `uvx` model.
 
 ```bash
-jv sync --recursive     # or just `jv sync` for a single module
-mvn -o verify           # compiles, tests, packages, with no network
-```
-
-This is the change to make in CI. Dependency download is the slow,
-network-bound part of a Maven build; `mvn -o` afterwards does no network
-I/O, so the build cannot fail because Central had a bad minute. Your POM, your
-plugins, and your build output are untouched. Maven still does all the
-building.
-
-`jv sync` writes into `~/.m2/repository`, the same place `mvn` does. Use
-`--local-repository DIR` to point somewhere else, or `--cache-only` to fill
-jv's own cache and leave Maven's repository alone.
-
-### 3. Run tools without installing them
-
-`jvx` runs any published JVM tool straight from its coordinates, on the `uvx`
-model. No install step, no wrapper script, no `<plugin>` block added to a POM
-just to run something once.
-
-```bash
-jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
 jvx org.junit.platform:junit-platform-console-standalone:1.10.2 -- --help
-jvx org.jacoco:org.jacoco.cli:0.8.12:nodeps -- report --help
-```
-
-The endpoint is `group:artifact[:version[:classifier]][@mainClass]`. Omit the
-version and jv resolves the latest release; everything after `--` goes to the
-tool untouched. The two optional fields reach tools whose jar does not
-advertise itself. Use a `:classifier` when the runnable artifact sits beside the
-default one, and `@mainClass` when the manifest names no `Main-Class`:
-
-```bash
 jvx com.puppycrawl.tools:checkstyle:10.17.0@com.puppycrawl.tools.checkstyle.Main -- --version
 ```
 
-When jv cannot tell which class to run, it says so and names what it tried,
-rather than guessing.
+The endpoint is `group:artifact[:version[:classifier]][@mainClass]`. Omit the
+version for the latest release. When jv cannot tell which class to run, it says
+so and names what it tried.
 
-### In GitHub Actions
+### Offline builds
 
-The two steps above, as one action:
+`jv sync` populates `~/.m2` with everything a build needs, including the
+lifecycle plugins that appear in no POM, so Maven then builds with no network:
 
-```yaml
-- uses: h5i-dev/jv@v1
-  with:
-    sync: true
-- run: mvn -o verify
+```bash
+jv sync --recursive && mvn -o verify
 ```
 
-It installs jv, verifies the archive's checksum, caches jv's store keyed by your
-POMs, and runs `jv sync --recursive`. Keying on the POMs means a dependency
-change invalidates the cache and nothing else does. See
-[`action.yml`](action.yml). The `v1` tag appears with the first release; until
-then the action can only be used from a branch ref.
-
----
+This is a correctness tool, not a speed one. It exists so a build cannot fail
+because Central had a bad minute, and because `mvn dependency:go-offline`
+produces a repository that often cannot build at all.
 
 ## What jv does not do
 
-- **`mvn -o site` is not supported yet.** `verify`, `install` and `deploy` work
-  against a synced repository; `site` needs report plugins that appear in no
-  POM, which jv does not yet fetch. `docs/spec/` and `jv-driver`'s sync module
-  record what that would take.
-- **It does not build anything.** No compile, test, package, or deploy. jv is
-  not a build tool: it resolves and downloads, then gets out of Maven's way.
-  The pairing is `jv sync && mvn -o verify`, not a replacement for `mvn`.
-- **It follows Maven 3.9, not Maven 4.** The two differ in ways that change
-  resolved versions. `docs/spec/` records both, and says which one jv follows
-  wherever they diverge.
-- **Gradle projects are out of scope** for v0.x: no `build.gradle`, no Gradle
-  Module Metadata. A Gradle-built *dependency* resolves fine; its POM is what
-  Maven reads too.
-- **`<proxies>` in `settings.xml` is parsed but not yet applied.** Set
-  `HTTPS_PROXY`/`NO_PROXY` in the environment, which jv does honour. Mirrors,
-  `<servers>` credentials, and profiles work.
-- **No JDK management, and no daemon.** SDKMAN, mise and jenv already do the
-  first well, and jv has no angle they lack. The second is deliberate: a
-  single-shot process fast enough to make a daemon pointless.
-
----
+- **It does not build.** No compile, test, package. The pairing is
+  `jv sync && mvn -o verify`, not a replacement for `mvn`.
+- **`jv sync` is not faster than Maven at getting a project built** (0.92× cold,
+  and worse warm). Adopt it for offline builds, not for the clock.
+- **Some projects still will not build offline.** On the default corpus tier, 4
+  of 8 do. The rest hit limits `dependency:go-offline` also hits, such as
+  spotless resolving a formatter whose version is a constant inside its own jar.
+  `jv sync --also g:a:v` is the escape hatch.
+- **It follows Maven 3.9, not Maven 4.** `docs/spec/` records both and says
+  which jv follows wherever they diverge.
+- **Gradle projects are out of scope** for v0.x. A Gradle-built *dependency*
+  resolves fine, since its POM is what Maven reads too.
+- **No JDK management, and no daemon.** SDKMAN and mise do the first well. The
+  second is deliberate: a process this fast makes a daemon pointless.
 
 ## Correctness
 
-Compatibility *is* the product, so jv is measured against Maven rather than
-against its own expectations:
+Compatibility is the product, so jv is measured against Maven rather than
+against its own expectations.
 
-- `jv tree` matches `mvn dependency:tree` byte for byte on every fixture in the
-  differential harness, each chosen for a resolution behaviour (nearest-wins,
-  managed transitives, BOM imports, exclusions, the scope matrix, optional
-  dependencies, conflict ordering) in all five output formats, and again under
-  `-Dverbose`, which keeps the losers and annotates the survivors.
-- And on real projects nobody wrote for jv's benefit: `scripts/ring3.sh` diffs
-  every module of spring-petclinic, dropwizard, jackson-databind, commons-lang
-  and maven-dependency-plugin at pinned commits. 46 modules, 0 differing.
-- `jv sync && mvn -o verify` builds offline, tests and all, against a repository
-  jv populated and nothing else.
-- `jvx` launches eleven real published tools, and refuses the nine libraries
-  among them with a message naming why.
-- Version ordering agrees with maven-resolver's own `GenericVersion`, compiled
-  from source and driven as an oracle, across 50,862 generated inputs.
-- Effective POMs match `mvn help:effective-pom` from Maven 3.9.9 exactly.
-- The POM parser reads every POM in the Maven, maven-resolver and
-  maven-dependency-plugin repositories.
+- `jv tree` matches `mvn dependency:tree` byte for byte across the differential
+  harness, in all five output formats and again under `-Dverbose`.
+- `scripts/ring3.sh` diffs every module of spring-petclinic, dropwizard,
+  jackson-databind, commons-lang and maven-dependency-plugin at pinned commits.
+  46 modules, 0 differing.
+- `scripts/corpus.sh` syncs real projects and builds them offline, running
+  `dependency:go-offline` as a control to attribute any failure, and `-b OLD_JV`
+  to catch a regression the control would excuse.
+- Version ordering agrees with maven-resolver's own `GenericVersion`, driven as
+  an oracle across 50,862 generated inputs.
+- Effective POMs match `mvn help:effective-pom` from 3.9.9 exactly.
 
-Where jv has no Maven command to compare against (`jv resolve`'s line format,
-`jvx`'s endpoint syntax), it is tested against transcribed upstream corpora
-instead, and the tests say which of the two they are.
+## More
 
----
-
-## Progress
-
-| Crate | | |
-|---|---|---|
-| `jv-version` | Version ordering, ranges, constraints | ✅ |
-| `jv-model` | POM, `settings.xml`, `maven-metadata.xml` | ✅ |
-| `jv-model-builder` | Effective POMs: inheritance, profiles, interpolation, BOM imports | ✅ |
-| `jv-resolver` | Dependency collection, nearest-wins conflict resolution | ✅ |
-| `jv-repo`, `jv-cache` | Repositories, downloads, integrity, caching | ✅ |
-| `jv-tree`, `jv-driver`, `jv-cli` | `jv tree`, `jv resolve` | ✅ |
-| `jv-driver` sync | `jv sync` — populate `~/.m2` so `mvn -o` works | ✅ |
-| `jv-exec` | `jvx` — run a tool from its coordinates | ✅ |
-
-Next: private-repository and `.mvn/` compatibility, then `jv add` and a
-lockfile. [`ROADMAP.md`](ROADMAP.md) holds the architecture and the milestones;
+[`ROADMAP.md`](ROADMAP.md) holds the architecture, the milestones, and the
+measurements that closed several directions off.
 [`docs/development.md`](docs/development.md) explains how to run the tests.
-
----
 
 ## License
 
