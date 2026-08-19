@@ -33,11 +33,6 @@ $ jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
   including the lifecycle plugins that appear in no POM.
 - [Profiles Maven itself](#profiling-a-build): `jv profile -- mvn test`
   shows where a build's time actually goes.
-- Verified against real Maven on every commit: differential tests across 46
-  real-world modules, 50,862 version-ordering inputs against maven-resolver's
-  own oracle, effective POMs matching `mvn help:effective-pom` exactly.
-- Maven's flags carry over with Maven's spelling: `-o`, `-U`, `-s`, `-P`,
-  `-D`, `-f`, and `--recursive` for every module of a multi-module build.
 
 > **Status: early development.** Everything documented here works today. No
 > release is tagged yet, so you build it yourself.
