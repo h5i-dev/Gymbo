@@ -19,9 +19,6 @@ $ jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
 
 - [8–338× faster](#speed) than the `mvn` equivalents of the commands it
   replaces.
-- A single native binary to replace the everyday goals of
-  `maven-dependency-plugin` and `versions-maven-plugin`: no JVM start, no
-  plugin loading.
 - **A jv project is just your Maven project.** No new manifest, no lockfile,
   no POM changes: jv reads `pom.xml` and `settings.xml`, shares `~/.m2`, and
   is invisible to a teammate who keeps using `mvn`.
