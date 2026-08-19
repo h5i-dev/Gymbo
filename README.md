@@ -17,10 +17,10 @@ $ jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
 
 ## Highlights
 
-- [8–338× faster](#speed) than the `mvn` equivalents of the commands it
-  replaces.
 - **Fully compatible with Maven project.** No new manifest, no lockfile,
   no POM changes.
+- [8–338× faster](#speed) than the `mvn` equivalents of the commands it
+  replaces.
 - [Inspects dependencies](#inspecting-dependencies): `jv tree` is
   byte-identical to `mvn dependency:tree`, in all five output formats.
 - [Edits your POM](#editing-a-pom): `jv add` resolves the newest release
