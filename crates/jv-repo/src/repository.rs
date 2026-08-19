@@ -97,6 +97,28 @@ impl Repository {
     pub fn is_local(&self) -> bool {
         self.url.starts_with("file:") || self.url.starts_with('/')
     }
+
+    /// Whether jv can speak this URL's scheme at all.
+    ///
+    /// Maven reaches repositories through wagons, and a build extension can add
+    /// one for any scheme it likes. jetty's parent declares
+    /// `mavengem:https://rubygems.org`, served by a wagon jv does not have and
+    /// cannot load — it is a JVM component, not a protocol jv could implement.
+    ///
+    /// Such a repository has to be skipped rather than attempted. Attempting it
+    /// produced `builder error for url (mavengem:...)` and failed the whole
+    /// sync, so a repository jv merely cannot *use* took down artifacts every
+    /// other repository could serve.
+    pub fn is_supported(&self) -> bool {
+        let url = self.url.to_ascii_lowercase();
+        self.is_local()
+            || url.starts_with("http://")
+            || url.starts_with("https://")
+            // Maven's WebDAV spellings resolve to plain HTTP underneath.
+            || url.starts_with("dav:")
+            || url.starts_with("dav+http")
+            || url.starts_with("davs:")
+    }
 }
 
 /// Whether a URL's host is this machine.
@@ -292,6 +314,28 @@ mod tests {
 
     fn settings(xml: &str) -> Settings {
         parse_settings(xml).expect("settings parse")
+    }
+
+    #[test]
+    fn a_scheme_jv_has_no_client_for_is_unsupported() {
+        // jetty's parent declares this; Maven reaches it through a wagon from a
+        // build extension, which jv does not load. Attempting it failed the
+        // whole sync.
+        assert!(!Repository::new("gems", "mavengem:https://rubygems.org").is_supported());
+        assert!(!Repository::new("scp", "scp://build.example/repo").is_supported());
+    }
+
+    #[test]
+    fn the_schemes_jv_can_speak_are_supported() {
+        for url in [
+            "https://repo.maven.apache.org/maven2",
+            "http://internal.example/repo",
+            "file:///opt/repo",
+            "dav:https://dav.example/repo",
+            "davs://dav.example/repo",
+        ] {
+            assert!(Repository::new("r", url).is_supported(), "{url}");
+        }
     }
 
     #[test]

@@ -32,8 +32,9 @@
 //! can serve a sibling subtree that Maven would not have offered it to. Recorded
 //! in `ROADMAP.md` rather than hidden here.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::Path;
+use std::sync::{Arc, Mutex, RwLock};
 
 use jv_cache::{Fetcher, Origin};
 use jv_model::{
@@ -48,6 +49,38 @@ use jv_resolver::{Descriptor, DescriptorSource};
 use jv_version::Version;
 
 use crate::error::DriverError;
+
+/// How many artifact downloads `materialize_all` keeps in flight.
+///
+/// A cold sync is latency-bound rather than bandwidth-bound: measured on
+/// spring-petclinic, 3,175 requests of which 95% are under 64 KB and together
+/// only 11.5% of the bytes, against a 137 ms time to first byte. That argues
+/// for more concurrency.
+///
+/// It is capped at 32 anyway, because the other end gets a say. Pushing harder
+/// earned HTTP 429s from Maven Central, and a throttled sync is slower than a
+/// polite one *and* fails: before this was understood, a 429 while reading a
+/// parent POM failed the whole resolve. Maven's own resolver defaults to five
+/// connections; 32 is already well past that.
+///
+/// `JV_IN_FLIGHT` overrides it, because the right value depends on the
+/// network — a nearby mirror with no rate limit will take far more than a
+/// shared runner talking to Central.
+const MATERIALIZE_IN_FLIGHT: usize = 32;
+
+/// The bound, overridable with `JV_IN_FLIGHT`.
+///
+/// A knob rather than a constant because the right value depends on the
+/// network: a cold sync is latency-bound on many small POMs, so a high-latency
+/// link wants more in flight, while a nearby mirror wants fewer. It also makes
+/// the value measurable, which is how the default was chosen.
+fn in_flight() -> usize {
+    std::env::var("JV_IN_FLIGHT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(MATERIALIZE_IN_FLIGHT)
+}
 
 /// The extension a POM is stored under, which is what every descriptor read
 /// actually asks the repository for.
@@ -76,6 +109,9 @@ impl Repositories {
     }
 }
 
+/// Fetched `maven-metadata.xml`, keyed by (repository path, repository id).
+type RangeMetadata = HashMap<(String, String), Vec<u8>>;
+
 /// Reads POMs from repositories and from disk.
 ///
 /// Cloneable and shareable: the caches are behind `Arc`, so a prefetch task and
@@ -87,24 +123,44 @@ pub struct RepositorySource {
     settings: Arc<Settings>,
     context: BuildContext,
     types: Arc<TypeRegistry>,
-    repositories: Arc<Mutex<Repositories>>,
+    repositories: Arc<RwLock<Repositories>>,
     /// POMs parsed once, by `g:a:v`. `None` records a coordinate no repository
     /// has, so an absence is not re-requested either.
     ///
     /// Shared with the crawler, which fills it in from background threads — see
     /// `prefetch.rs`.
-    poms: Arc<Mutex<HashMap<String, Option<Arc<Model>>>>>,
+    poms: Arc<RwLock<HashMap<String, Option<Arc<Model>>>>>,
     /// Built descriptors by `g:a:v`, which is the expensive half.
-    descriptors: Arc<Mutex<HashMap<String, Descriptor>>>,
+    descriptors: Arc<RwLock<HashMap<String, Descriptor>>>,
     /// Version lists by `g:a`, for ranges.
-    versions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    versions: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Repositories that could not be reached, so they are asked once.
+    ///
+    /// A dead repository named in a transitive POM — `maven.java.net` is the
+    /// classic — costs a full connection timeout on *every* lookup that
+    /// consults it, and version-range resolution consults every repository in
+    /// scope for every ranged artifact. Ignoring the failure without recording
+    /// it turned one dead host into minutes of waiting.
+    unreachable: Arc<Mutex<HashSet<String>>>,
+    /// Artifact-level `maven-metadata.xml` as fetched, by (path, repository id).
+    ///
+    /// Kept so `jv sync` can place it. Maven re-resolves a version range at
+    /// build time and reads this file to do it, so a repository holding the
+    /// jar a range selected but not the metadata behind it fails offline with
+    /// "No versions available … within specified range" — which names neither
+    /// the file nor the reason.
+    ///
+    /// Only the artifact-level file is recorded. Version-level metadata is the
+    /// snapshot case, and `LocalSnapshot` already writes the
+    /// `maven-metadata-local.xml` that Maven accepts from any configuration.
+    range_metadata: Arc<Mutex<RangeMetadata>>,
     /// Resolved timestamped versions by `g:a:baseVersion`.
     snapshots: Arc<Mutex<HashMap<String, String>>>,
     /// POMs of projects loaded from disk, by `g:a:v`. Consulted before any
     /// repository, so a dependency on a sibling module in a multi-module build
     /// resolves against the working tree rather than against a repository that
     /// has never heard of it.
-    reactor: Arc<Mutex<HashMap<String, String>>>,
+    reactor: Arc<RwLock<HashMap<String, String>>>,
     /// Warnings gathered along the way, to show once at the end.
     warnings: Arc<Mutex<Vec<String>>>,
     /// Crawls POMs ahead of collection. See `prefetch.rs`.
@@ -155,7 +211,7 @@ impl RepositorySource {
             warnings: Arc::clone(&sink.warnings),
             fetcher,
             runtime,
-            repositories: Arc::new(Mutex::new(Repositories {
+            repositories: Arc::new(RwLock::new(Repositories {
                 ordered: resolve_repositories(declared, &settings),
             })),
             settings,
@@ -163,6 +219,8 @@ impl RepositorySource {
             types: Arc::new(TypeRegistry::default()),
             descriptors: Arc::default(),
             versions: Arc::default(),
+            range_metadata: Arc::default(),
+            unreachable: Arc::default(),
             snapshots: Arc::default(),
             reactor: Arc::default(),
             forced_update: None,
@@ -196,7 +254,7 @@ impl RepositorySource {
             ..self
         };
         if update.is_some() {
-            let mut repositories = source.repositories.lock().expect("repositories");
+            let mut repositories = source.repositories.write().expect("repositories");
             let existing = std::mem::take(&mut repositories.ordered);
             repositories.ordered = existing
                 .into_iter()
@@ -232,9 +290,24 @@ impl RepositorySource {
     }
 
     /// The repositories currently known, in the order they are consulted.
+    /// Where jv's own cache lives, for callers that keep something alongside it.
+    pub fn cache_root(&self) -> &Path {
+        self.fetcher.store().root()
+    }
+
+    /// Whether repositories will be contacted at all.
+    pub fn is_offline(&self) -> bool {
+        self.fetcher.is_offline()
+    }
+
+    /// The update policy forced over every repository, as `-U` does.
+    pub fn forced_update(&self) -> Option<jv_repo::UpdatePolicy> {
+        self.forced_update
+    }
+
     pub fn repositories(&self) -> Vec<Repository> {
         self.repositories
-            .lock()
+            .read()
             .expect("repositories")
             .ordered
             .clone()
@@ -249,6 +322,20 @@ impl RepositorySource {
     fn add_with_trust(&self, declared: &[Repository], trust: Trust) {
         let mut resolved = Vec::new();
         for repository in resolve_with_trust(declared, &self.settings, trust) {
+            // A scheme jv has no client for. Maven reaches these through wagons
+            // supplied by build extensions, which jv does not load — jetty's
+            // parent declares `mavengem:https://rubygems.org`. Skipped with a
+            // warning rather than attempted: attempting it failed the whole
+            // sync, so a repository jv merely cannot use took down artifacts
+            // every other repository could serve.
+            if !repository.is_supported() {
+                self.warn(format!(
+                    "{} ({}) uses a scheme jv has no client for and was skipped; \
+                     Maven reaches it through a build extension, which jv does not load",
+                    repository.id, repository.url
+                ));
+                continue;
+            }
             if repository.is_insecure() && !self.allow_insecure_http {
                 // Blocked rather than dropped, so the repository still appears in
                 // `jv tree`'s reasoning and the message says what to do.
@@ -262,14 +349,23 @@ impl RepositorySource {
             resolved.push(self.apply_forced_update(repository));
         }
         self.repositories
-            .lock()
+            .write()
             .expect("repositories")
             .extend(resolved);
     }
 
     /// Everything worth telling the user that did not stop the resolve.
+    ///
+    /// Sorted, because the order they were discovered in is not stable: plugin
+    /// closures resolve in parallel, so which thread first reads the POM that
+    /// declares a blocked repository varies from run to run. Two identical runs
+    /// were printing the same warnings in three different orders, which turns
+    /// every CI log comparison into noise. Sorting also groups warnings of the
+    /// same kind, since they share a prefix.
     pub fn warnings(&self) -> Vec<String> {
-        self.warnings.lock().expect("warnings").clone()
+        let mut warnings = self.warnings.lock().expect("warnings").clone();
+        warnings.sort();
+        warnings
     }
 
     /// The build context profile activation and interpolation run against.
@@ -294,7 +390,7 @@ impl RepositorySource {
         pom: String,
     ) {
         self.reactor
-            .lock()
+            .write()
             .expect("reactor")
             .insert(format!("{group_id}:{artifact_id}:{version}"), pom);
     }
@@ -359,9 +455,9 @@ impl RepositorySource {
         // sibling module could beat the one being built — decided by whichever
         // won a race, which made it appear only on projects with enough
         // dependencies to give the crawler a head start.
-        let from_reactor = self.reactor.lock().expect("reactor").get(&key).cloned();
+        let from_reactor = self.reactor.read().expect("reactor").get(&key).cloned();
         if from_reactor.is_none() {
-            if let Some(cached) = self.poms.lock().expect("poms").get(&key) {
+            if let Some(cached) = self.poms.read().expect("poms").get(&key) {
                 return Ok(cached.clone());
             }
         }
@@ -398,7 +494,7 @@ impl RepositorySource {
             None => None,
         };
 
-        self.poms.lock().expect("poms").insert(key, parsed.clone());
+        self.poms.write().expect("poms").insert(key, parsed.clone());
         Ok(parsed)
     }
 
@@ -444,7 +540,25 @@ impl RepositorySource {
     /// taken from the first hit: each repository knows only about the versions it
     /// holds, and a range must see all of them.
     fn metadata(&self, path: &str, version_hint: &str) -> Result<Vec<Metadata>, DriverError> {
-        let repositories = self.repositories();
+        self.metadata_recording(path, version_hint, false)
+    }
+
+    /// As [`Self::metadata`], optionally keeping the bytes for `jv sync`.
+    fn metadata_recording(
+        &self,
+        path: &str,
+        version_hint: &str,
+        record: bool,
+    ) -> Result<Vec<Metadata>, DriverError> {
+        let all = self.repositories();
+        // A repository already known to be unreachable is not asked again.
+        let repositories: Vec<_> = {
+            let unreachable = self.unreachable.lock().expect("unreachable");
+            all.iter()
+                .filter(|repository| !unreachable.contains(&repository.url))
+                .cloned()
+                .collect()
+        };
         // All at once, not one after another. This sits on the synchronous
         // critical path — every version range and every snapshot resolution goes
         // through it — so asking three repositories in turn spent three round
@@ -460,10 +574,65 @@ impl RepositorySource {
                 )));
 
         let mut found = Vec::new();
+        // Whether any repository actually answered — a 404 counts, a refused
+        // connection does not. Ignoring an unreachable repository is right when
+        // another can answer; when *none* can, an empty result is not "this
+        // artifact is unpublished", it is "nobody was asked". Reporting the
+        // first as the second is how a rate-limited machine came back with
+        // "no published version of com.google.googlejavaformat:google-java-format
+        // was found" for an artifact that has been on Central for years.
+        let mut consulted = 0usize;
+        // Why each repository refused, kept here rather than only in the
+        // warnings bag. Warnings are printed after a resolve finishes, so a
+        // resolve that *fails* never shows them — the error below used to say
+        // "the failures are reported above" when nothing had been reported at
+        // all, leaving a rate-limited run looking like a missing artifact.
+        let mut refusals: Vec<String> = Vec::new();
         for (repository, fetched) in repositories.iter().zip(fetched) {
-            let Some(fetched) = fetched? else { continue };
+            // An unreachable repository must not stop a resolve the others can
+            // complete — the same rule the corrupt-metadata arm below already
+            // follows, and the one Maven follows.
+            //
+            // This used to propagate. A single dead repository declared by some
+            // transitive POM — `maven.java.net` is the classic, offline for
+            // years and still named in POMs on Central — failed the whole
+            // version-range resolution, which in `jv sync` abandoned every
+            // dependency of the plugin that needed it. The build then failed
+            // offline on a list of artifacts with nothing to connect them to a
+            // repository nobody meant to use.
+            let fetched = match fetched {
+                Ok(fetched) => fetched,
+                Err(error) => {
+                    // Warned once, then never asked again for the rest of the
+                    // session: the next range would otherwise pay the same
+                    // timeout, and there are many ranges.
+                    if self
+                        .unreachable
+                        .lock()
+                        .expect("unreachable")
+                        .insert(repository.url.clone())
+                    {
+                        self.warn(format!(
+                            "{} could not be reached and will be skipped: {error}",
+                            repository.url
+                        ));
+                    }
+                    refusals.push(format!("{}: {error}", repository.url));
+                    continue;
+                }
+            };
+            consulted += 1;
+            let Some(fetched) = fetched else { continue };
             match parse_metadata(&String::from_utf8_lossy(&fetched.bytes)) {
-                Ok(metadata) => found.push(metadata),
+                Ok(metadata) => {
+                    if record {
+                        self.range_metadata.lock().expect("range metadata").insert(
+                            (path.to_owned(), repository.id.clone()),
+                            fetched.bytes.clone(),
+                        );
+                    }
+                    found.push(metadata);
+                }
                 // Corrupt metadata in one repository must not stop a resolve that
                 // another repository can complete.
                 Err(error) => self.warn(format!(
@@ -471,6 +640,19 @@ impl RepositorySource {
                     repository.url
                 )),
             }
+        }
+        // Every repository refused. See `consulted` above.
+        if consulted == 0 && !repositories.is_empty() {
+            return Err(DriverError::Other(format!(
+                "{path} could not be read from any of the {} configured repositories, so it is \
+                 unknown whether the artifact exists:\n{}",
+                repositories.len(),
+                refusals
+                    .iter()
+                    .map(|refusal| format!("  {refusal}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )));
         }
         Ok(found)
     }
@@ -512,9 +694,118 @@ impl RepositorySource {
     /// reaches parents and BOMs through the same `ModelSource::get` that fills
     /// this memo — so the memo is exactly the set Maven will look for, and is a
     /// superset of any per-artifact parent walk.
+    /// The published versions of an artifact, recording the metadata behind
+    /// them so `jv sync` can place it.
+    ///
+    /// The same lookup the range resolver uses; exposed because `jv sync` needs
+    /// it for a plugin whose version Maven resolves at execution time.
+    pub fn published_versions(
+        &self,
+        group_id: &str,
+        artifact_id: &str,
+    ) -> Result<Vec<String>, String> {
+        <Self as DescriptorSource>::versions(self, group_id, artifact_id)
+    }
+
+    /// The version Maven would choose for a plugin declared without one.
+    ///
+    /// A `<plugin>` with no `<version>` is legal, and Maven resolves one at
+    /// build time from the artifact's `maven-metadata.xml`: `<release>` if the
+    /// file has one, otherwise `<latest>`, otherwise the greatest version
+    /// listed. jv used to warn and sync nothing, which left `mvn -o` to fail
+    /// with "Error resolving version for plugin" — three corpus projects died
+    /// that way, on `maven-javadoc-plugin`, `maven-install-plugin` and
+    /// `javancss-maven-plugin`.
+    ///
+    /// Reading the metadata also records it, so the same file is placed into the
+    /// local repository and Maven reaches this answer for itself rather than
+    /// taking jv's word for it. That matters: if the two ever disagree, Maven
+    /// wins, and it can only win if the file is there.
+    pub fn plugin_version(
+        &self,
+        group_id: &str,
+        artifact_id: &str,
+    ) -> Result<Option<String>, DriverError> {
+        let location = MetadataLocation::Artifact {
+            group_id,
+            artifact_id,
+        };
+        let metadata = self.metadata_recording(&location.path(), "", true)?;
+
+        let mut release: Option<String> = None;
+        let mut latest: Option<String> = None;
+        let mut greatest: Option<String> = None;
+        for entry in &metadata {
+            if let Some(versioning) = &entry.versioning {
+                take_greater(&mut release, versioning.release.as_deref());
+                take_greater(&mut latest, versioning.latest.as_deref());
+            }
+            for version in entry.versions() {
+                take_greater(&mut greatest, Some(version));
+            }
+        }
+        Ok(release.or(latest).or(greatest))
+    }
+
+    /// Fetches and records the version list for every coordinate any POM jv
+    /// read names with a *range*.
+    ///
+    /// Resolving a range records its metadata, but that only covers the ranges
+    /// jv itself had to resolve. Maven re-resolves the whole plugin classpath
+    /// on its own terms and can reach a range down a path jv never took —
+    /// bouncycastle's POMs cross-reference each other with `[1.81,1.82)`, and
+    /// which of them jv expands depends on which versions won. A repository
+    /// missing one of those files fails offline with "No versions available …
+    /// within specified range", which names neither the file nor the reason.
+    ///
+    /// So this sweeps the parsed POMs rather than relying on jv's own path.
+    /// Fetching a version list already read is a memo hit, so the sweep costs
+    /// requests only for coordinates jv genuinely never looked up.
+    pub fn fetch_ranged_metadata(&self) {
+        let ranged: BTreeSet<(String, String)> = {
+            let poms = self.poms.read().expect("poms");
+            poms.values()
+                .flatten()
+                .flat_map(|model| {
+                    model
+                        .dependencies
+                        .iter()
+                        .chain(model.dependency_management.iter())
+                })
+                .filter(|dependency| {
+                    dependency
+                        .version
+                        .as_deref()
+                        .is_some_and(|version| version.starts_with('[') || version.starts_with('('))
+                })
+                .map(|dependency| (dependency.group_id.clone(), dependency.artifact_id.clone()))
+                .collect()
+        };
+        for (group_id, artifact_id) in ranged {
+            // Failure is already reported by the fetch itself, and a version
+            // list jv cannot get is not a reason to fail the sync.
+            let _ = self.versions(&group_id, &artifact_id);
+        }
+    }
+
+    /// Artifact-level metadata read during resolution, for `jv sync` to place.
+    ///
+    /// Returned as `(repository path, repository id, bytes)`, where the path
+    /// still ends in `maven-metadata.xml` — the caller renames it to the
+    /// `-<id>` form Maven looks for, because only the caller knows whether it
+    /// is writing into a local repository at all.
+    pub fn read_range_metadata(&self) -> Vec<(String, String, Vec<u8>)> {
+        self.range_metadata
+            .lock()
+            .expect("range metadata")
+            .iter()
+            .map(|((path, id), bytes)| (path.clone(), id.clone(), bytes.clone()))
+            .collect()
+    }
+
     pub fn read_poms(&self) -> Vec<Artifact> {
         self.poms
-            .lock()
+            .read()
             .expect("poms")
             .iter()
             .filter(|(_, parsed)| parsed.is_some())
@@ -566,6 +857,28 @@ impl RepositorySource {
     pub fn prefetch_from(&self, dependencies: &[Dependency]) {
         self.prefetch_children(dependencies);
     }
+
+    /// Points the crawler at artifacts already known by coordinate.
+    ///
+    /// `jv sync` needs this for plugins. The crawler was only ever seeded from
+    /// *dependencies*, so every plugin's POM chain was fetched cold — and since
+    /// plugin dependencies are resolved one plugin at a time, those chains went
+    /// out one after another. A project with twenty plugins paid twenty
+    /// sequential POM walks before the first jar was requested.
+    ///
+    /// Seeding them all up front turns that into one concurrent crawl that
+    /// overlaps the dependency resolve which is happening anyway.
+    pub fn prefetch_artifacts(&self, artifacts: impl IntoIterator<Item = Artifact>) {
+        let repositories = self.repositories();
+        self.prefetcher.seed(
+            &repositories,
+            artifacts.into_iter().map(|artifact| Artifact {
+                classifier: String::new(),
+                extension: POM.to_owned(),
+                ..artifact
+            }),
+        );
+    }
 }
 
 impl ModelSource for RepositorySource {
@@ -611,8 +924,8 @@ impl ModelSource for RepositorySource {
 
 impl DescriptorSource for RepositorySource {
     fn descriptor(&self, artifact: &Artifact) -> Result<Descriptor, String> {
-        let key = coordinates(artifact);
-        if let Some(cached) = self.descriptors.lock().expect("descriptors").get(&key) {
+        let key = descriptor_key(artifact);
+        if let Some(cached) = self.descriptors.read().expect("descriptors").get(&key) {
             return Ok(cached.clone());
         }
 
@@ -620,7 +933,7 @@ impl DescriptorSource for RepositorySource {
             .read_descriptor(artifact, &mut Vec::new())
             .map_err(|error| error.to_string())?;
         self.descriptors
-            .lock()
+            .write()
             .expect("descriptors")
             .insert(key, descriptor.clone());
         self.prefetch_children(&descriptor.dependencies);
@@ -629,7 +942,7 @@ impl DescriptorSource for RepositorySource {
 
     fn versions(&self, group_id: &str, artifact_id: &str) -> Result<Vec<String>, String> {
         let key = format!("{group_id}:{artifact_id}");
-        if let Some(cached) = self.versions.lock().expect("versions").get(&key) {
+        if let Some(cached) = self.versions.read().expect("versions").get(&key) {
             return Ok(cached.clone());
         }
 
@@ -637,8 +950,10 @@ impl DescriptorSource for RepositorySource {
             group_id,
             artifact_id,
         };
+        // Recorded: this is the version list a range or `LATEST` resolves
+        // against, and Maven needs the same file to resolve it again offline.
         let metadata = self
-            .metadata(&location.path(), "")
+            .metadata_recording(&location.path(), "", true)
             .map_err(|error| error.to_string())?;
 
         let mut versions: Vec<String> = Vec::new();
@@ -654,7 +969,7 @@ impl DescriptorSource for RepositorySource {
         versions.sort_by(|left, right| Version::parse(left).cmp(&Version::parse(right)));
 
         self.versions
-            .lock()
+            .write()
             .expect("versions")
             .insert(key, versions.clone());
         Ok(versions)
@@ -722,6 +1037,80 @@ impl RepositorySource {
             ..artifact.clone()
         };
         Ok(artifact_path(&resolved))
+    }
+
+    /// Downloads many artifacts at once.
+    ///
+    /// `jv sync` used to call [`Self::materialize`] in a loop, and each call
+    /// blocks on its own request — so a cold sync of four hundred artifacts
+    /// paid four hundred sequential round trips, which was almost all of its
+    /// wall clock. Resolution had long since been made concurrent; the
+    /// download half had not.
+    ///
+    /// Results come back in the order asked for, so the caller's ordering,
+    /// tracking-file writes and snapshot bookkeeping are unaffected — only the
+    /// waiting is shared. Concurrency is bounded for the same reason the POM
+    /// crawler bounds it: a few hundred simultaneous connections to one host
+    /// is not faster, and is rude.
+    pub fn materialize_all(
+        &self,
+        artifacts: &[Artifact],
+    ) -> Result<Vec<Option<Materialized>>, DriverError> {
+        if artifacts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Snapshot version resolution reads metadata and memoises it, and doing
+        // it inside the concurrent block would have every task racing for the
+        // same lock on the same key. It is cheap and usually a cache hit.
+        let resolved: Vec<Artifact> = artifacts
+            .iter()
+            .map(|artifact| {
+                Ok(Artifact {
+                    version: self.resolved_version(artifact)?,
+                    ..artifact.clone()
+                })
+            })
+            .collect::<Result<_, DriverError>>()?;
+
+        let repositories = self.repositories();
+        let permits = Arc::new(tokio::sync::Semaphore::new(in_flight()));
+        let fetched = self
+            .runtime
+            .block_on(futures_util::future::join_all(resolved.iter().map(
+                |artifact| {
+                    let permits = Arc::clone(&permits);
+                    let repositories = &repositories;
+                    async move {
+                        let _permit = permits
+                            .acquire()
+                            .await
+                            .expect("the semaphore is not closed");
+                        self.fetcher.locate(repositories, artifact).await
+                    }
+                },
+            )));
+
+        let mut materialized = Vec::with_capacity(fetched.len());
+        for outcome in fetched {
+            match outcome {
+                Ok(found) => {
+                    for warning in &found.warnings {
+                        self.warn(warning.clone());
+                    }
+                    materialized.push(Some(Materialized {
+                        origin: found.origin,
+                        path: found.path,
+                        repository: found.repository,
+                    }));
+                }
+                // A 404 is the ordinary answer for an artifact a repository
+                // does not carry; the caller reports it as missing.
+                Err(jv_cache::FetchError::NotFound { .. }) => materialized.push(None),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(materialized)
     }
 
     /// Downloads an artifact's own file.
@@ -838,4 +1227,45 @@ fn coordinates(artifact: &Artifact) -> String {
         "{}:{}:{}",
         artifact.group_id, artifact.artifact_id, artifact.version
     )
+}
+
+/// The descriptor cache key, which must separate classified siblings.
+///
+/// One POM serves every classified file of a version — a classifier selects a
+/// *file*, not a different module — so `coordinates` is the right key for the
+/// parsed model. It is the wrong key for the descriptor, because a
+/// `Descriptor` also carries the artifact's own identity: keyed without the
+/// classifier, `g:a:1:data` hit the entry cached for `g:a:1` and came back
+/// describing the *plain* artifact. The collector then built its node and its
+/// pool key from that, so the classified dependency became a second copy of the
+/// plain one and conflict resolution dropped it as a duplicate.
+///
+/// That is how `org.xmlresolver:xmlresolver:jar:data` vanished from
+/// spring-petclinic's checkstyle classpath and left `mvn -o` unable to run it.
+/// The model itself is memoised separately, so re-reading a descriptor for a
+/// classified sibling costs a little assembly and no network.
+fn descriptor_key(artifact: &Artifact) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        artifact.group_id,
+        artifact.artifact_id,
+        artifact.version,
+        artifact.extension,
+        artifact.classifier
+    )
+}
+
+/// Keeps whichever of two versions is greater, for merging metadata across
+/// repositories that each know a different newest.
+fn take_greater(slot: &mut Option<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let better = match slot.as_deref() {
+        Some(held) => Version::parse(candidate) > Version::parse(held),
+        None => true,
+    };
+    if better {
+        *slot = Some(candidate.to_owned());
+    }
 }

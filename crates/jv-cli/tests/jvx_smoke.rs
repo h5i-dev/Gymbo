@@ -196,6 +196,22 @@ fn have_java() -> bool {
             .is_ok_and(|out| out.status.success())
 }
 
+/// Whether output describes a repository that would not serve jv, rather than a
+/// tool that does not work.
+///
+/// This matrix is the only thing here that needs the network, and Maven Central
+/// rate-limits: a throttled run reports `the repository answered 429`. Calling
+/// that a jvx failure teaches whoever sees it to ignore a red result from the
+/// tests most likely to catch a real jvx bug. `JV_REQUIRE_ORACLE` turns it back
+/// into a failure, for CI, which is expected to have a network.
+fn repository_refused(said: &str) -> bool {
+    said.contains("the repository answered 429")
+        || said.contains("the repository answered 50")
+        || said.contains("is not cached, and jv is offline")
+        || said.contains("could not be reached")
+        || said.contains("dns error")
+}
+
 #[test]
 fn jvx_launches_real_tools() {
     if !have_java() {
@@ -222,6 +238,7 @@ fn jvx_launches_real_tools() {
     };
 
     let mut failures = Vec::new();
+    let mut refused = Vec::new();
     for tool in matrix {
         let mut command = Command::new(jvx_binary());
         command
@@ -250,6 +267,14 @@ fn jvx_launches_real_tools() {
             String::from_utf8_lossy(&output.stderr)
         )
         .to_lowercase();
+
+        // Separated from a real failure before anything else is judged: a
+        // repository that refused to answer produces output that looks like
+        // every other kind of broken.
+        if repository_refused(&said) {
+            refused.push(tool.endpoint);
+            continue;
+        }
 
         if said.trim().is_empty() {
             failures.push(format!(
@@ -295,6 +320,19 @@ fn jvx_launches_real_tools() {
             " (set JV_SMOKE_ALL=1 for all)"
         }
     );
+    if !refused.is_empty() {
+        assert!(
+            std::env::var_os("JV_REQUIRE_ORACLE").is_none(),
+            "JV_REQUIRE_ORACLE is set but the repository refused {} of {}: {refused:?}",
+            refused.len(),
+            matrix.len()
+        );
+        eprintln!(
+            "the repository would not serve {} of {}: {refused:?}",
+            refused.len(),
+            matrix.len()
+        );
+    }
     assert!(
         failures.is_empty(),
         "{} of {} tools failed:\n\n{}",

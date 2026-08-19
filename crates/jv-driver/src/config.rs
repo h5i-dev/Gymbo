@@ -7,7 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
-use jv_model::Settings;
+use jv_model::toolchains::{self, Toolchains};
+use jv_model::{Settings, security};
 use jv_repo::{UpdatePolicy, merge_settings};
 
 use crate::error::DriverError;
@@ -20,6 +21,13 @@ pub struct Config {
     pub user_settings: Option<PathBuf>,
     /// `$MAVEN_HOME/conf/settings.xml` unless overridden.
     pub global_settings: Option<PathBuf>,
+    /// `~/.m2/settings-security.xml` unless overridden, holding the master
+    /// password that `<server>` passwords are encrypted with. Maven takes this
+    /// from `-Dsettings.security`; jv takes it from here or `JV_SETTINGS_SECURITY`.
+    pub settings_security: Option<PathBuf>,
+    /// `~/.m2/toolchains.xml` unless overridden. Toolchains do not affect
+    /// resolution; this is read so `jv sync` can warn that `mvn -o` will fail.
+    pub user_toolchains: Option<PathBuf>,
     /// jv's own cache. Defaults to the platform cache directory.
     pub cache: Option<PathBuf>,
     /// Maven's `~/.m2/repository`, read but never written. `None` means "find
@@ -101,11 +109,93 @@ impl Config {
                 .flatten(),
         };
 
-        Ok(match (user, global) {
+        let mut settings = match (user, global) {
             (Some(user), Some(global)) => merge_settings(user, &global),
             (Some(only), None) | (None, Some(only)) => only,
             (None, None) => Settings::default(),
-        })
+        };
+        self.decrypt_passwords(&mut settings);
+        Ok(settings)
+    }
+
+    /// Replaces `{...}` `<server>` passwords with their plaintext.
+    ///
+    /// Done here, at the edge, so everything downstream sees an ordinary
+    /// password and no other code has to know the encrypted form exists. What
+    /// cannot be decrypted is left exactly as it was, which keeps the existing
+    /// refusal to send ciphertext as a repository credential (see
+    /// `jv_repo::resolve_with_trust`) working as the backstop.
+    ///
+    /// Failure is silent on purpose. The common case for "no master password"
+    /// is a settings file copied from a colleague, where the encrypted entry is
+    /// for a repository this build never touches; failing the whole resolve
+    /// over it would be worse than authenticating anonymously and, if that
+    /// repository is genuinely needed, reporting the 401 that follows.
+    fn decrypt_passwords(&self, settings: &mut Settings) {
+        if !settings
+            .servers
+            .iter()
+            .any(|server| server.has_encrypted_password())
+        {
+            return;
+        }
+        let Some(master) = self.master_password() else {
+            return;
+        };
+        for server in &mut settings.servers {
+            if let Some(password) = &server.password
+                && security::is_encrypted(password)
+                && let Ok(plaintext) = security::decrypt(password, &master)
+            {
+                server.password = Some(plaintext);
+            }
+            // `<passphrase>` for a private key is encrypted the same way.
+            if let Some(passphrase) = &server.passphrase
+                && security::is_encrypted(passphrase)
+                && let Ok(plaintext) = security::decrypt(passphrase, &master)
+            {
+                server.passphrase = Some(plaintext);
+            }
+        }
+    }
+
+    /// The toolchains Maven would see: the user file, then the installation one.
+    ///
+    /// Concatenated rather than merged, user first, because Maven's selection
+    /// takes the first match and that is what makes a user entry win.
+    pub fn load_toolchains(&self) -> Toolchains {
+        let read = |path: Option<PathBuf>| {
+            path.and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|xml| toolchains::parse_toolchains(&xml))
+                .unwrap_or_default()
+        };
+        let user = read(
+            self.user_toolchains
+                .clone()
+                .or_else(default_user_toolchains),
+        );
+        user.merge_under(read(default_global_toolchains()))
+    }
+
+    /// The decrypted master password, following one `<relocation>` hop.
+    fn master_password(&self) -> Option<String> {
+        let mut path = self
+            .settings_security
+            .clone()
+            .or_else(|| std::env::var_os("JV_SETTINGS_SECURITY").map(PathBuf::from))
+            .or_else(default_settings_security)?;
+
+        // Maven allows the file to point at another file. One hop is enough for
+        // the real use (a shared file on a network drive) and cannot loop.
+        for _ in 0..2 {
+            let xml = std::fs::read_to_string(&path).ok()?;
+            let security = security::parse_settings_security(&xml);
+            match security.relocation {
+                Some(next) if !next.trim().is_empty() => path = PathBuf::from(next.trim()),
+                _ => return security.master_password().ok(),
+            }
+        }
+        None
     }
 }
 
@@ -129,6 +219,23 @@ fn read_settings(path: &Path, required: bool) -> Result<Option<Settings>, Driver
             path: path.to_path_buf(),
             source,
         })
+}
+
+/// `~/.m2/toolchains.xml`.
+fn default_user_toolchains() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".m2").join("toolchains.xml"))
+}
+
+/// `$MAVEN_HOME/conf/toolchains.xml`.
+fn default_global_toolchains() -> Option<PathBuf> {
+    std::env::var_os("MAVEN_HOME")
+        .or_else(|| std::env::var_os("M2_HOME"))
+        .map(|home| PathBuf::from(home).join("conf").join("toolchains.xml"))
+}
+
+/// `~/.m2/settings-security.xml`.
+fn default_settings_security() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".m2").join("settings-security.xml"))
 }
 
 /// `~/.m2/settings.xml`.

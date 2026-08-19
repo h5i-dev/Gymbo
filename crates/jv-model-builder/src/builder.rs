@@ -632,6 +632,7 @@ fn settings_profile_to_profile(profile: &SettingsProfile) -> Profile {
         dependency_management: Vec::new(),
         modules: Vec::new(),
         build: None,
+        reporting_plugins: Vec::new(),
         distribution_management: None,
     }
 }

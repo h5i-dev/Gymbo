@@ -11,7 +11,9 @@
 //! A 404 from a repository is normal and is remembered, so a resolve that spans
 //! several repositories does not pay for the same absence twice.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use jv_model::Artifact;
@@ -81,6 +83,28 @@ pub struct Fetcher {
     offline: bool,
     /// How long a recorded 404 is trusted before the repository is asked again.
     missing_ttl: std::time::Duration,
+    /// Repositories that failed at the transport level, by URL.
+    ///
+    /// A 404 is an answer and is remembered on disk. A refused connection is
+    /// not, and used to be remembered nowhere — so a repository that no longer
+    /// exists was re-probed for *every* artifact, on every run. A POM graph
+    /// accumulates a lot of those: `nexus.codehaus.org` and
+    /// `snapshots.repository.codehaus.org` are still named by POMs published a
+    /// decade ago, and both now refuse connections in about 100ms. Eighty-odd
+    /// artifacts that no repository has, times a couple of dead hosts, is the
+    /// thirteen to sixteen seconds a warm `jv sync` was spending on the network
+    /// while using almost no CPU.
+    ///
+    /// Per process rather than persisted: a host that is down for a minute
+    /// should not be written off until tomorrow, and a resolve is short enough
+    /// that one probe per run is a fair price for noticing it came back.
+    ///
+    /// The reason is kept, not just the URL, because skipping a repository must
+    /// not change what jv *says*. Without it, a run where every repository had
+    /// failed reported "not available in any configured repository" for the
+    /// second artifact onwards — which reads as a typo in the coordinates
+    /// rather than as a network that is down.
+    unreachable: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl std::fmt::Debug for Fetcher {
@@ -104,6 +128,7 @@ impl Fetcher {
             // Long enough that a multi-repository resolve does not re-ask, short
             // enough that an artifact published today is found today.
             missing_ttl: std::time::Duration::from_secs(3600),
+            unreachable: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -117,6 +142,15 @@ impl Fetcher {
     pub fn offline(mut self, offline: bool) -> Self {
         self.offline = offline;
         self
+    }
+
+    /// Whether this fetcher will refuse to contact a repository.
+    ///
+    /// Read by callers that cache a *derived* answer rather than bytes: nothing
+    /// upstream can change while offline, so a remembered answer cannot go
+    /// stale.
+    pub fn is_offline(&self) -> bool {
+        self.offline
     }
 
     pub fn store(&self) -> &Store {
@@ -270,9 +304,34 @@ impl Fetcher {
 
         // 3. Ask each repository, in order.
         let mut transport_error = None;
+        // Whether any repository gave a definitive answer, 404 included.
+        let mut answered = false;
         for repository in repositories {
             let url = join_url(&repository.url, path);
+            // Already refused a connection this run. Deliberately *not* counted
+            // as an answer: it told us nothing, and treating silence as "absent"
+            // is how an artifact somebody has becomes one nobody has. Its
+            // failure is carried forward so the error at the end still names a
+            // network problem.
+            if let Some(reason) = self
+                .unreachable
+                .lock()
+                .expect("unreachable")
+                .get(&repository.url)
+            {
+                transport_error = Some(TransportError::Request {
+                    url: join_url(&repository.url, path),
+                    reason: reason.clone(),
+                });
+                continue;
+            }
             if self.recently_missing(&url, repository.policy_for(version))? {
+                // A recorded 404 is still that repository's answer. Not
+                // counting it meant a warm cache turned a definitive "absent"
+                // into whatever the *next* repository said — and when the next
+                // one was unreachable, an artifact nobody has became a hard
+                // failure that stopped the whole sync.
+                answered = true;
                 continue;
             }
 
@@ -339,18 +398,37 @@ impl Fetcher {
                     });
                 }
                 Ok(None) => {
+                    answered = true;
                     self.store.record_missing(&url)?;
                 }
                 // One broken repository must not hide an artifact another one
                 // has, so the error is held back until every repository is
                 // exhausted.
-                Err(error) => transport_error = Some(error),
+                Err(error) => {
+                    // Retries are already exhausted by the time this surfaces,
+                    // so the repository is not merely busy.
+                    self.unreachable
+                        .lock()
+                        .expect("unreachable")
+                        .insert(repository.url.clone(), error.to_string());
+                    transport_error = Some(error);
+                }
             }
         }
 
         match transport_error {
-            Some(error) => Err(FetchError::Transport(error)),
-            None => Err(FetchError::NotFound {
+            // A repository that answered "no" is an answer. Reporting the
+            // unreachable one instead turns an artifact that is genuinely
+            // absent everywhere into a hard failure, and takes the whole sync
+            // with it: flyway names a driver that is not on Central and also
+            // lists `maven.java.net`, dead for years, so Central's 404 was
+            // overridden by a connection error and `jv sync` stopped.
+            //
+            // The transport error still surfaces — the repository is recorded
+            // as unreachable and warned about once — but it no longer decides
+            // the outcome for an artifact somebody else already ruled on.
+            Some(error) if !answered => Err(FetchError::Transport(error)),
+            _ => Err(FetchError::NotFound {
                 path: path.to_owned(),
             }),
         }
@@ -554,6 +632,12 @@ mod tests {
         Repository::new("central", CENTRAL)
     }
 
+    /// A second artifact, so a test can ask for two different things and see
+    /// whether the same repository was probed twice.
+    fn other_artifact() -> Artifact {
+        Artifact::new("com.example", "other", "1.0")
+    }
+
     fn fetcher(transport: MapTransport) -> (tempfile::TempDir, Fetcher) {
         let dir = tempfile::tempdir().expect("temp dir");
         let fetcher = Fetcher::new(Store::new(dir.path()), Box::new(transport));
@@ -644,6 +728,89 @@ mod tests {
         // Reporting "not found" here would send the user looking for a typo in
         // their coordinates rather than at their network.
         assert!(matches!(error, FetchError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_refused_a_connection_is_not_asked_again() {
+        // The reason this exists. A 404 is an answer and is remembered on disk;
+        // a refused connection was remembered nowhere, so a host that no longer
+        // exists was probed once per artifact. On a real graph that is dozens of
+        // dead-host round trips per run, which is where a warm `jv sync` was
+        // spending thirteen seconds while using almost no CPU.
+        let dead = Repository::new("dead", "https://dead.example/repo");
+        let mut transport = MapTransport::new();
+        transport.fail_host("https://dead.example/repo", "connection refused");
+        transport.insert(url_for(CENTRAL, &artifact()), b"one".to_vec());
+        transport.insert(url_for(CENTRAL, &other_artifact()), b"two".to_vec());
+        let requests = transport.requests();
+
+        let (_dir, fetcher) = fetcher(transport);
+        let repositories = [dead, repository()];
+
+        // The dead repository comes first, so it is asked before Central.
+        fetcher.artifact(&repositories, &artifact()).await.unwrap();
+        fetcher
+            .artifact(&repositories, &other_artifact())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .filter(|url| url.starts_with("https://dead.example/repo"))
+                .count(),
+            1,
+            "a dead host was probed more than once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_repository_does_not_stop_a_working_one_serving_later_artifacts() {
+        // The danger of the breaker: skipping a repository must not turn into
+        // skipping the answer. Everything still resolves, from the repository
+        // that works.
+        let dead = Repository::new("dead", "https://dead.example/repo");
+        let mut transport = MapTransport::new();
+        transport.fail_host("https://dead.example/repo", "connection refused");
+        transport.insert(url_for(CENTRAL, &artifact()), b"one".to_vec());
+        transport.insert(url_for(CENTRAL, &other_artifact()), b"two".to_vec());
+
+        let (_dir, fetcher) = fetcher(transport);
+        let repositories = [dead, repository()];
+
+        let first = fetcher.artifact(&repositories, &artifact()).await.unwrap();
+        let second = fetcher
+            .artifact(&repositories, &other_artifact())
+            .await
+            .unwrap();
+        assert_eq!(first.bytes, b"one".to_vec());
+        assert_eq!(second.bytes, b"two".to_vec());
+        assert_eq!(second.repository.as_deref(), Some("central"));
+    }
+
+    #[tokio::test]
+    async fn every_repository_being_dead_is_still_reported_as_a_transport_error() {
+        // Skipping a repository it has given up on must not make jv say "no
+        // repository has this" — that sends the reader looking for a typo in
+        // their coordinates instead of at their network.
+        let mut transport = MapTransport::new();
+        transport.fail_host(CENTRAL, "connection refused");
+        let (_dir, fetcher) = fetcher(transport);
+
+        fetcher
+            .artifact(&[repository()], &artifact())
+            .await
+            .unwrap_err();
+        let error = fetcher
+            .artifact(&[repository()], &other_artifact())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FetchError::Transport(_)),
+            "a skipped repository was reported as absence, not as a network problem"
+        );
     }
 
     #[tokio::test]

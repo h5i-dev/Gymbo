@@ -29,6 +29,138 @@ pub enum Command {
     Exec(ExecArgs),
     /// Download everything the build needs, so `mvn -o` works afterwards.
     Sync(SyncArgs),
+    /// Report where a Maven build spends its time.
+    Profile(ProfileArgs),
+    /// Add a dependency to a POM.
+    Add(AddArgs),
+    /// Remove a dependency from a POM.
+    Remove(RemoveArgs),
+    /// Report dependencies with newer versions available.
+    Outdated(OutdatedArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct OutdatedArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// The pom.xml to read. Defaults to the nearest one at or above the working
+    /// directory.
+    #[arg(short = 'f', long = "file", value_name = "POM")]
+    pub file: Option<PathBuf>,
+
+    /// Check every module of a multi-module build.
+    #[arg(long, default_value_t = true)]
+    pub recursive: bool,
+
+    /// Only this module, even in a multi-module build.
+    #[arg(long, conflicts_with = "recursive")]
+    pub no_recursive: bool,
+
+    /// Check plugins as well as dependencies.
+    #[arg(long)]
+    pub plugins: bool,
+
+    /// Consider alpha, beta, milestone and release-candidate versions.
+    ///
+    /// Off by default: a project pinned to a stable release is not "outdated"
+    /// because a release candidate exists, and a tool that says otherwise gets
+    /// ignored.
+    #[arg(long)]
+    pub pre_release: bool,
+
+    /// Exit non-zero when anything is outdated, for use as a CI gate.
+    #[arg(long)]
+    pub exit_code: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RemoveArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// The dependency, as `group:artifact`. A version is accepted and ignored,
+    /// so a line copied from `jv add` works.
+    #[arg(value_name = "COORDINATES")]
+    pub coordinates: String,
+
+    /// The pom.xml to edit. Defaults to the nearest one at or above the working
+    /// directory.
+    #[arg(short = 'f', long = "file", value_name = "POM")]
+    pub file: Option<PathBuf>,
+
+    /// Remove from this module of a multi-module build, by artifact id.
+    #[arg(short = 'm', long, value_name = "MODULE")]
+    pub module: Option<String>,
+
+    /// Print the edited POM instead of writing it.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AddArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// The dependency, as `group:artifact` or `group:artifact:version`.
+    ///
+    /// With no version, jv writes none if the project already manages one —
+    /// through `<dependencyManagement>` or an imported BOM — and otherwise
+    /// resolves the newest release from the repository.
+    #[arg(value_name = "COORDINATES")]
+    pub coordinates: String,
+
+    /// The pom.xml to edit. Defaults to the nearest one at or above the working
+    /// directory.
+    #[arg(short = 'f', long = "file", value_name = "POM")]
+    pub file: Option<PathBuf>,
+
+    /// Add to this module of a multi-module build, by artifact id.
+    #[arg(short = 'm', long, value_name = "MODULE")]
+    pub module: Option<String>,
+
+    /// `<scope>` to declare. `--test` is shorthand for `--scope test`.
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+
+    /// Shorthand for `--scope test`.
+    #[arg(long, conflicts_with = "scope")]
+    pub test: bool,
+
+    /// `<classifier>` to declare.
+    #[arg(long, value_name = "CLASSIFIER")]
+    pub classifier: Option<String>,
+
+    /// `<type>` to declare, such as `pom` or `test-jar`.
+    #[arg(long = "type", value_name = "TYPE")]
+    pub type_: Option<String>,
+
+    /// Mark the dependency `<optional>`.
+    #[arg(long)]
+    pub optional: bool,
+
+    /// Print the edited POM instead of writing it.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ProfileArgs {
+    /// The `EventSpy` jar to load.
+    ///
+    /// Defaults to `jv-profiler.jar` beside the `jv` executable, then to a
+    /// build tree's `java/jv-profiler/target/`. `JV_PROFILER_JAR` overrides
+    /// both.
+    #[arg(long, value_name = "JAR")]
+    pub profiler_jar: Option<PathBuf>,
+
+    /// The command to measure, after `--`. Defaults to `mvn test`.
+    ///
+    /// Anything is accepted rather than only `mvn`, because the wrappers people
+    /// actually run — `./mvnw`, `mvnd` — take the same property.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -54,6 +186,22 @@ pub struct SyncArgs {
     #[arg(long, value_name = "DIR")]
     pub local_repository: Option<PathBuf>,
 
+    /// Also sync these artifacts, as `group:artifact:version`.
+    ///
+    /// For what no POM reveals. Some plugins resolve a default of their own at
+    /// execution time, from a version compiled into the plugin rather than
+    /// written down anywhere: `spotless` picks a formatter that way, and which
+    /// one depends on the spotless release — 2.40.0 wants
+    /// palantir-java-format 2.38.0, 2.43.0 wants 2.39.0. jv reads what a POM
+    /// declares, including the coordinates inside plugin `<configuration>`, but
+    /// a version that exists only inside a jar cannot be read out of a project.
+    ///
+    /// So this is the escape hatch, rather than jv carrying a table of every
+    /// plugin's defaults that would be wrong the next time one of them is
+    /// released. Take the coordinates from what `mvn` says is missing.
+    #[arg(long = "also", value_name = "COORDINATES")]
+    pub also: Vec<String>,
+
     /// Fill jv's own cache but do not touch Maven's local repository.
     #[arg(long, conflicts_with = "local_repository")]
     pub cache_only: bool,
@@ -64,6 +212,17 @@ pub struct SyncArgs {
     /// way cannot run `mvn -o`, which is the usual reason to sync at all.
     #[arg(long)]
     pub no_plugins: bool,
+
+    /// Also resolve the dependencies of `<pluginManagement>` plugins that no
+    /// `<plugins>` block declares.
+    ///
+    /// Off by default. Management gives a version and configuration to plugins
+    /// that are declared; an entry nothing declares never enters a build plan,
+    /// so Maven never loads its dependencies. Skipping them cut spring-petclinic
+    /// from 345 MB to a third of that. Turn this on to invoke a
+    /// management-only plugin directly, as `mvn -o some:goal`.
+    #[arg(long)]
+    pub all_plugins: bool,
 }
 
 /// The `jvx` binary: `jv exec` with the subcommand implied.

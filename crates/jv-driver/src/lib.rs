@@ -25,6 +25,7 @@
 pub mod config;
 pub mod error;
 pub mod java;
+pub mod mvn_config;
 pub mod prefetch;
 pub mod project;
 pub mod session;

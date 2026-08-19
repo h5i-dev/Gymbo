@@ -11,6 +11,7 @@
 
 pub mod layout;
 pub mod policy;
+pub mod proxy;
 pub mod repository;
 pub mod settings;
 
@@ -18,6 +19,7 @@ pub use layout::{
     Checksum, METADATA_FILE, MetadataLocation, artifact_path, checksum_path, join_url,
 };
 pub use policy::{ChecksumPolicy, Policy, UpdatePolicy};
+pub use proxy::{ProxyEndpoint, ProxySelector};
 pub use repository::{
     CENTRAL_ID, CENTRAL_URL, Credentials, Repository, Trust, from_model, resolve_repositories,
     resolve_with_trust,

@@ -133,9 +133,28 @@ impl Tracking {
         let write = || -> std::io::Result<()> {
             let mut file = std::fs::File::create(&temporary)?;
             std::io::Write::write_all(&mut file, text.as_bytes())?;
-            // The content must reach disk before the rename publishes it;
-            // otherwise a crash can leave the new name pointing at nothing.
-            file.sync_all()?;
+            // Deliberately no `sync_all`.
+            //
+            // The hazard this file has is a *partial* one — an artifact
+            // mentioned under an id no repository has, which `mvn -o` then
+            // refuses while the jar sits right there. The temp-and-rename above
+            // is what prevents that: a rename is atomic, so a reader sees the
+            // old file or the whole new one, never half of either.
+            //
+            // An fsync guards something narrower: a machine crash between the
+            // rename and the journal commit. It cost more than everything else
+            // `jv sync` does combined. Each one forces an ext4 journal commit
+            // that flushes every hardlink and directory creation queued behind
+            // it, so on a 3,800-artifact sync — around a thousand of these
+            // files — the process sat in `jbd2_log_wait_commit` for about fifty
+            // seconds while using four seconds of CPU.
+            //
+            // The trade is worth making because the loss is recoverable by the
+            // thing the user would do anyway: run `jv sync` again. A tracking
+            // file that never landed leaves its artifacts *untracked*, and an
+            // untracked artifact resolves offline perfectly well — that is the
+            // escape hatch in `docs/spec/local-repository.md`, and upstream's
+            // own `testFindUntrackedFile` covers it.
             std::fs::rename(&temporary, &path)
         };
         if let Err(source) = write() {

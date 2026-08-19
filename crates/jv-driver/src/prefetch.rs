@@ -49,7 +49,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use jv_cache::Fetcher;
 use jv_model::{Artifact, Model, Scope, parse_pom};
@@ -63,7 +63,7 @@ use tokio::sync::Semaphore;
 #[derive(Clone, Default)]
 pub struct Sink {
     /// Parsed POMs by `g:a:v`. `None` records a coordinate no repository has.
-    pub poms: Arc<Mutex<HashMap<String, Option<Arc<Model>>>>>,
+    pub poms: Arc<RwLock<HashMap<String, Option<Arc<Model>>>>>,
     /// Problems the parser reported, to show once at the end.
     pub warnings: Arc<Mutex<Vec<String>>>,
 }
@@ -125,7 +125,13 @@ impl Prefetcher {
             runtime,
             seen: Arc::default(),
             remaining: Arc::new(AtomicUsize::new(BUDGET)),
-            permits: Arc::new(Semaphore::new(IN_FLIGHT)),
+            permits: Arc::new(Semaphore::new(
+                std::env::var("JV_IN_FLIGHT")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(IN_FLIGHT),
+            )),
             sink,
             enabled,
         }
@@ -226,7 +232,7 @@ impl Prefetcher {
         let model = Arc::new(parsed.model);
         self.sink
             .poms
-            .lock()
+            .write()
             .expect("poms")
             .entry(key)
             .or_insert_with(|| Some(Arc::clone(&model)));

@@ -35,32 +35,72 @@ not a download race.
 **Every v0.1 command is read-only.** `tree`, `resolve` and `sync` inspect the
 POM or populate a cache; not one of them edits it. That is the line between an
 *inspector* and a *package manager*, and it is why v0.2 leads with `jv add`
-(§3.11) rather than with more parity work. `uv add`, `cargo add` and
-`npm install <pkg>` are their ecosystems' daily drivers; jv has no equivalent.
+(§3.11).
 
-**Prioritisation rule: speed only pays on operations users repeat.** Ranked by
-how often a JVM developer actually performs them:
+### 1.1 What jv replaces, command by command
 
-| Operation | Frequency | jv |
+The uv comparison is useful for reasoning about *sequencing* (§1.2) and
+misleading as a feature map — uv's `venv` and `run` have no Java counterpart,
+because Maven already builds the classpath and Java has no activate-the-
+environment step. The design basis is this table instead: what a Maven user
+runs today, and what jv gives them for it.
+
+| Today | jv | What jv adds beyond speed |
 |---|---|---|
-| Build / test | many times a day | untouched, by design — build-tool territory |
-| Add or change a dependency | several times a week | **nothing → v0.2 `jv add`** |
-| Install or switch a JDK | weekly | **nothing → v0.2 `jv jdk`** |
-| Run a one-off tool | weekly | `jvx` ✅ |
-| CI dependency fetch | every push | `jv sync` ✅ |
-| Inspect the dependency tree | rarely | `jv tree` ✅ |
+| `mvn dependency:tree` | `jv tree` | nothing but speed; low frequency |
+| `mvn dependency:list` | `jv resolve` | no JVM start, script-friendly |
+| `mvn dependency:build-classpath` | `jv resolve --classpath` | usable from scripts and agents |
+| `mvn dependency:go-offline` | `jv sync` | parallel fetch; isolated repositories (§3.8) |
+| `mvn dependency:tree -Dincludes=g:a` | `jv why g:a` | direct answer instead of a filtered tree |
+| `mvn dependency:add -Dgav=g:a:v` | `jv add g:a` | **resolves the version**; see §3.11 |
+| `mvn dependency:remove -Dgav=g:a` | `jv remove g:a` | speed only |
+| `mvn versions:display-dependency-updates` | `jv outdated` | dependencies, properties and BOMs in one view |
+| `mvn versions:use-next-releases` | `jv upgrade` | edit, re-resolve and re-lock in one step |
+| `dependency:get` → classpath → `java -cp` | `jvx g:a -- …` | one command, no install |
+| *(no Maven equivalent)* | `jv lock` | checksums over direct, transitive and plugin artifacts |
+| *(no Maven equivalent)* | `jv sync --frozen` | POM/lock drift detection |
 
-v0.1 covers the two least frequent rows well and the two most frequent not at
-all. `jv tree`'s 69× is the demo, not the product: nobody runs
-`dependency:tree` in a loop, so saving 1.7 s a handful of times a week persuades
-nobody on its own. Closing the top two rows is what v0.2 is for.
+Three tiers fall out, and they are worth separating because they carry
+different amounts of weight:
+
+1. **Faster Maven commands** — `tree`, `resolve`, `why`, `outdated`. Low
+   migration cost, but speed is the only argument, and every one of them is
+   infrequent.
+2. **Several Maven operations fused into one** — `add`, `remove`, `upgrade`,
+   `jvx`. Adding a dependency today means `dependency:add` (with a version you
+   had to go look up), then `go-offline`, then a `tree` to check what it pulled
+   in. `jv add org.postgresql:postgresql` is all three.
+3. **Things Maven has no answer for** — `lock`, `sync --frozen`. Maven-Lockfile
+   and similar exist outside core, but there is no first-class lockfile. This
+   tier is the only one a Maven plugin cannot take back.
+
+### 1.2 The frequency problem, stated plainly
+
+**jv has no equivalent of `pip install`: no high-frequency operation it
+replaces.** This is the central risk and it is not fixable by adding features.
+
+In Python, installing dependencies *is* a daily step, which is why uv could win
+by making one narrow thing 80–115× faster. In Java, `./mvnw test` resolves
+dependencies implicitly. Nobody runs `dependency:go-offline` by hand, and
+`dependency:tree` comes out a few times a week at most. So `jv tree`'s 69× is
+the demo rather than the product, and `jv sync` is genuinely useful in CI and
+containers while being invisible to a local developer whose build already
+resolves for them.
+
+Two consequences run through the rest of this document. Tier 2 and tier 3 above
+are where the argument has to be won, because tier 1 is real work that changes
+nobody's day. And CI, containers and agent sandboxes matter more to jv than
+they would to a tool with a daily local hook — that is where fresh dependency
+resolution is a cost someone is actually paying.
 
 **Deliberate non-goals for v0.1** (each is a focus hazard):
-- JDK management (mise/sdkman territory) → **v0.2**. Deferred out of v0.1 for
-  focus, not for weak differentiation — that call was wrong. It is the second
-  most frequent operation in the table above, it touches none of the resolver,
-  and `uv python install` showed toolchain management is what gets a binary
-  installed in the first place.
+- JDK management (mise/sdkman/jenv territory) → post-v0.2, and **not** because
+  it is hard. An earlier revision of this document pulled it forward to v0.2 on
+  the strength of `uv python install`; that argument does not survive contact
+  with the competition. uv owned Python version management because nothing else
+  did it well and uv already sat on the install path. SDKMAN, mise and jenv are
+  established, and jv brings no angle to JDKs that they lack. Being second-best
+  at somebody else's category buys nothing.
 - Gradle projects / Gradle Module Metadata → v0.3+. Initial target is Maven
   users: Spring / enterprise Java. Demo repos must be Maven-built
   (spring-petclinic, netty, dropwizard, camel — **not** Spring Boot itself,
@@ -302,7 +342,62 @@ wherever an upstream component can be isolated cheaply.
 
 Every store versioned with a `CACHE_FORMAT_VERSION` marker from day one.
 
+### 3.6.1 Where jv is actually fast, measured
+
+Not resolution, and not builds. `jv sync` versus a plain `mvn verify` from
+nothing is **0.92x** — jv is slower. Warm it is 0.84x. Those numbers are in
+`scripts/benchmark-build.sh` and they are not going to improve much, because a
+build is dominated by compilation and jv does not compile.
+
+What jv avoids is Maven's fixed cost. Every `mvn` invocation pays roughly a
+second before it does anything: JVM start is only 157ms of that, the rest is
+classworlds, the Plexus container and plugin loading. For any operation whose
+real work is small, that fixed cost *is* the operation.
+
+    mvn -o -N validate, empty POM        ~990ms   <- Maven's floor, any goal
+    jv tree, whole graph                   16ms
+
+    versions:display-dependency-updates  1637ms
+    jv outdated                            47ms      34.8x
+
+    mvn exec:java (google-java-format)   1129ms
+    jvx           (same tool)             139ms       8.1x
+    bare java -cp, classpath known         93ms
+
+The `outdated` comparison is equalised: the plugin's `<dependencyManagement>`
+pass is turned off, because jv does not report managed entries. Leaving it on
+gave 42.4x, which measured a difference in scope as much as speed.
+
+One number there is worth more than the ratios. Turning off that pass removed
+19 of the plugin's 29 lookups and saved **16ms** of 1653ms. The lookups cost
+about a millisecond each; everything else is the host. That is the whole
+argument for this project in one measurement — and it is also why replacing
+Maven's *resolver* was abandoned (§3.13): resolution is 3.5% of a warm build.
+
 ### 3.7 `jvx` execution model (`jv-exec`)
+
+**Measured, and this is where the speed story actually is.** The profiler
+(§3.13) showed a warm Maven build spends 3.5% of its time resolving and 65%
+executing mojos, which killed the idea of replacing Maven's resolver. But that
+same build carries ~1s of JVM startup and Maven bootstrap — classworlds, the
+Plexus container, extension loading — which a build amortises over real work and
+a *tool run* does not. Running one formatter over one file is almost entirely
+that overhead.
+
+    google-java-format --version, warm, medians of 5-7
+
+    bare `java -cp` with the classpath already known      93ms
+    jvx                                                  139ms   (+51ms)
+    mvn exec:java                                       1129ms   (+1036ms)
+                                                        -> 8.1x
+
+jvx lands within 51ms of the floor: that is what resolving the tool, building
+the classpath and launching costs when Maven is not in the way. Maven's tax on
+the same work is twenty times larger.
+
+`mvn -v` alone is 157ms, so this is not a JVM story — it is a Maven story. The
+JVM is not what makes running a Java tool slow; the build system wrapped around
+it is.
 
 Endpoint syntax ported from jgo (`src/jgo/parse/_endpoint.py`), the cleanest
 prior art:
@@ -322,8 +417,8 @@ jvx g:a:1.2.3@com.example.Main -- args...
 - v0.1 launches with `-cp` only. JPMS module-path splitting (jgo's
   `exec/_runner.py` auto/classpath/module-path modes) → v0.3.
 - If no JDK is found on PATH/JAVA_HOME: clear error in v0.1; auto-provisioning
-  via foojay Disco API (wukong `src/foojay.rs` is a working Rust client) → v0.2,
-  alongside `jv jdk`.
+  via foojay Disco API (wukong `src/foojay.rs` is a working Rust client) is
+  deferred with the rest of JDK management; see §1 non-goals.
 
 ### 3.8 `jv sync` semantics
 
@@ -340,6 +435,84 @@ Two passes, both required for a true `mvn -o` guarantee:
 Known upstream gaps to inherit-and-document (parity, not perfection): build
 extensions and toolchains are not prefetched by upstream go-offline either.
 `jv sync` must be multi-module aware (reactor discovery from `<modules>`).
+
+#### Isolated repositories — a CI, container and sandbox feature
+
+`--local-repository DIR` already populates somewhere other than `~/.m2`, which
+makes a per-job, per-container or per-sandbox Maven repository possible:
+
+```
+jv sync --frozen --local-repository .jv/m2
+./mvnw -o -Dmaven.repo.local=.jv/m2 verify
+```
+
+This matters where a *fresh* repository is a cost someone pays — CI runners,
+Docker builds, reproducible builds, untrusted builds, and h5i sandboxes, where
+every agent box otherwise re-downloads a dependency set the host already has.
+Sharing jv's cache across boxes while keeping each `.m2` separate is the
+integration worth building; a sandbox must not be able to corrupt the shared
+store, so raw writable hardlinks into it are not an option (reflink, or
+read-only materialisation, or copy).
+
+Two scope decisions, both deliberate:
+
+**No `jv run`.** A wrapper like `jv run -- ./mvnw test` was considered and
+rejected. It is a straight import of `uv run` that does not survive the
+translation: Python needs it because a virtualenv must be selected before
+execution, and Java has no such step — Maven already assembles the classpath,
+and the local repository is not an execution environment. Wrapping `./mvnw`
+lengthens the command and buys nothing. If a future need appears, it will come
+from lockfile drift checking, not from environment selection.
+
+**Content-addressed storage with reflink materialisation is not v0.x
+architecture.** It would make many isolated repositories nearly free, and it is
+the one capability no Maven plugin could retrofit. It is recorded here as a
+future direction rather than scheduled, on the judgement that near-term effort
+belongs in real-project compatibility and the package-manager surface. Revisit
+when h5i's Java workload makes the copy cost measurable.
+
+### 3.8.1 How complete `jv sync` actually is
+
+Measured, not asserted. The last full corpus run was **10 BUILD SUCCESS and 16
+BUILD FAILURE** — the "0 failures attributable to jv" that circulated for a
+while was wrong, and came from reading a summary instead of the logs. The
+failures fall into three classes, and only the third is open.
+
+**Coordinates inside plugin `<configuration>` — 10 projects. Fixed.** Plugins
+resolve artifacts named in their own configuration when they run, and those
+appear in no `<dependencies>` block: `maven-compiler-plugin`'s
+`<annotationProcessorPaths>`, `animal-sniffer`'s `<signature>`,
+`maven-remote-resources`' `<resourceBundles>`, japicmp's previous release. The
+parser now scans configuration for coordinates rather than discarding it.
+
+Checked against the 11,778 POMs in the corpus cache rather than fixtures, which
+is what caught the first attempt inventing artifacts out of OSGi bundle
+instructions and `maven-enforcer-plugin` ban patterns — both deliberately
+coordinate-shaped, neither naming anything to download.
+
+**A `<plugin>` with no `<version>` — 3 projects. Fixed.** Maven resolves one from
+`maven-metadata.xml` at build time: `<release>`, then `<latest>`, then greatest.
+jv now does the same, and records the file so Maven reaches its own answer
+offline instead of trusting jv's.
+
+**A default compiled into the plugin — 5 projects. Open, and not fixable by
+reading.** `spotless` picks a formatter whose version is a constant inside the
+spotless jar:
+
+    spotless 2.40.0  ->  palantir-java-format 2.38.0
+    spotless 2.43.0  ->  palantir-java-format 2.39.0
+    jetty            ->  sortpom-sorter 3.2.1  (a different step entirely)
+
+No amount of reading a project finds a version that exists only inside a jar,
+and a table of every plugin's defaults would be wrong the next time any of them
+ships a release. `mvn dependency:go-offline` fails on exactly this too — it is
+why go-offline is documented as incomplete.
+
+So `jv sync --also group:artifact:version` is the escape hatch: name what the
+build turns out to need, and it is fetched with its closure like anything else.
+The general fix, when there is one, is to learn the set from a build that
+succeeded rather than to predict it — which is another argument for §3.10's
+lockfile.
 
 ### 3.9 `jv tree` output parity
 
@@ -371,43 +544,200 @@ supply-chain-security story (its own blog post). Design:
 - Prior art to read: yummy `ym-lock.json` + `src/workspace/lockfile_diff.rs`;
   coursier `ArtifactsLock.scala`; uv's lockfile docs for UX conventions.
 
+**Lock the plugin closures, not just the dependency tree.** The speed argument
+for a lockfile is usually "skip resolution", and on jv that argument is close to
+worthless: resolving commons-io's own dependency tree from a warm cache takes
+18ms. Where a warm sync actually goes, measured with both the store and the
+local repository populated:
+
+    plugin closures   442ms    95%
+    placing files      35ms
+    dependency tree    18ms
+
+Each plugin gets its own full `resolve_request`, and a reactor resolves the same
+plugin once per module. Resolving them in parallel and collapsing identical
+declarations took warm sync to 1.85x–3.40x (commons-io 420→213ms, log4j2
+2100→795ms, surefire 735→216ms) with byte-identical output trees — so the
+remaining warm cost is *still* plugin closures, roughly 190ms of a 213ms sync.
+
+A closure is a pure function of the plugin's coordinates and its
+`<plugin><dependencies>` block, which is exactly what a lockfile can record. So
+the lockfile's performance case is memoising plugin closures across runs; a lock
+that captures only the dependency tree would leave 95% of the warm cost in
+place. Correctness and supply-chain auditability are still the headline reasons
+to build it — this is the reason it also makes `jv sync` fast.
+
+**Done, as a cache rather than a lockfile** (`jv-driver/src/plugin_memo.rs`).
+Closures are remembered between runs in jv's cache, keyed on the plugin's
+coordinates, its `<dependencies>` block and the repository set. Expiry reuses
+`UpdatePolicy` rather than inventing a second notion of stale, so a remembered
+closure can never be staler than what Maven's own daily metadata check would
+have used, and `-U` bypasses it. Degraded resolves are never written: a cached
+warning is a warning that never prints again, because the run that reads the
+memo does no work.
+
+    warm sync, offline, alternated, medians
+                        this morning   parallel   +memo
+    commons-io                 368ms      213ms    99ms   3.72x
+    dropwizard  (38 mod)      1724ms      854ms   775ms   2.22x
+    log4j2      (37 mod)      2029ms      772ms   638ms   3.18x
+    surefire    (15 mod)       711ms      232ms   216ms   3.29x
+    maven-resolver (15 mod)    649ms      216ms   169ms   3.84x
+    byte-buddy  (15 mod)       641ms      206ms   150ms   4.27x
+
+The lockfile itself is still worth building for the reasons it was always worth
+building; it no longer has to carry the performance argument alone.
+
+**Then the reactor, which was the next thing along.** With closures remembered,
+a large reactor's warm sync is its own modules: 706ms of dropwizard's 774ms
+across 38 modules, where one module costs 151ms. Resolving them in parallel gave
+almost nothing at first — 1.23x, with CPU at 207% of one core on a ten-core
+machine and scaling that stopped dead at two threads. The modules were
+serialising on the caches they share: `poms`, `descriptors`, `versions`,
+`repositories` and the reactor map were each behind a `Mutex`, so on a warm run,
+where every lookup is a hit, readers were queueing behind readers. Behind an
+`RwLock` they are not:
+
+    dropwizard, 38 modules, warm            threads  1     2     4    10
+    Mutex                                            735   603   602   606
+    RwLock                                           737   486   384   390
+
+    warm sync, alternated, medians, trees byte-identical
+    dropwizard      (38 mod)   766ms -> 352ms   2.18x
+    logging-log4j2  (37 mod)   566ms -> 368ms   1.54x
+    maven-surefire  (15 mod)   185ms -> 155ms   1.19x
+    byte-buddy      (15 mod)   142ms -> 136ms   1.04x
+    commons-io       (1 mod)    89ms ->  89ms   1.00x
+
+Scaling still flattens after four threads and CPU sits at 366%, so contention
+remains — `unreachable`, `snapshots` and `range_metadata` are still `Mutex`, and
+the resolves block on one shared runtime. Worth another look if large reactors
+matter more later.
+
+**What is *not* left is placement.** The premise of §3.12 below was that
+materialising into `~/.m2` is a step Maven does not pay. It is, but it is
+already free: with a populated local repository, skipping placement entirely
+(`--cache-only`) is not measurably faster than doing it, because placement is
+stats that find the file already there.
+
+    with a populated local repository    full   no-place
+    commons-io                           48ms       55ms
+    dropwizard                          724ms      796ms
+    byte-buddy                          105ms      107ms
+
+So §3.12 is still worth doing, for the reason that survives measurement — one CI
+cache instead of two — and not for speed.
+
+### 3.12 Store the artifacts where Maven reads them (v0.2)
+
+jv keeps a URL-keyed store and then materialises it into `~/.m2` so Maven can
+read it. Maven's cache *is* the repository it reads, so on a warm run Maven has
+no prepare step at all and jv has one.
+
+**Measured, and there is no gain. Do not pick this up without re-measuring.**
+Every benefit claimed for it evaporated when checked:
+
+- *Speed.* Placement is already free. With a populated local repository,
+  skipping it entirely (`--cache-only`) is not measurably faster than doing it,
+  because placement is stats that find the file already there — commons-io 48ms
+  vs 55ms, dropwizard 724ms vs 796ms, byte-buddy 105ms vs 107ms.
+- *Local disk.* jv places by hardlink, so the "second tree" shares inodes with
+  the first. A placed jar reports 33 links and the same inode as its store copy,
+  and `du` over the store and the repository together reports 2.4G — the same as
+  the store alone.
+- *CI cache.* There is no second tree to drop. A runner caches jv's store and
+  materialises from it; measured on commons-io that store is 328MB against the
+  386MB `~/.m2` Maven caches, so jv already restores less than Maven does.
+
+What remains is the architectural argument — one layout instead of two, and jv
+no longer representing a state Maven cannot. That is real but it is not worth
+what it costs: the change lands on the negative cache, the download locks, the
+atomic writes and multi-repository semantics all at once. In particular, keying
+content by GAV would collapse two repositories' URLs onto one path, and the
+`.error` sidecar that records a 404 from one repository would then suppress
+lookups against the other — a correctness bug in exchange for no measured
+benefit.
+
+It is a remapping rather than a rewrite. The store path is already the
+repository base followed by the Maven layout path:
+
+    store:  cache/https/repo.maven.apache.org/maven2/  commons-io/commons-io/2.16.1/commons-io-2.16.1.jar
+    m2:                                        ~/.m2/  commons-io/commons-io/2.16.1/commons-io-2.16.1.jar
+
+so `path_for` changes from "scheme/host/path" to "strip the repository base,
+root at the local repository", and the materialisation pass disappears. Four
+things need care:
+
+- **Two repositories serving one GAV.** Maven layout holds one, with
+  `_remote.repositories` recording which — a file jv already writes. jv can
+  currently represent a state Maven cannot, and collapses it during
+  materialisation anyway.
+- **`maven-metadata.xml`** becomes repo-qualified (`maven-metadata-<id>.xml`),
+  which is Maven's own scheme.
+- **Negative caching and freshness** move from URL-keyed sidecars to Maven's
+  `.lastUpdated` markers, which improves `mvn -U` interop.
+- **`jvx --no-local-repository`** points at a scratch Maven-layout directory.
+
+Beyond the prepare step, this halves what CI caches: a runner currently restores
+jv's store *and* a materialised local repository, two trees holding the same
+bytes.
+
 ### 3.11 POM mutation (`jv-edit`, v0.2)
 
-`jv add`, `jv remove`, `jv upgrade` — the commands that make jv a package
-manager rather than a fast inspector, and the highest-frequency operation jv can
-own. `jv add com.google.guava:guava` resolves the latest release, pins it,
-writes the POM and syncs in well under a second, against a workflow that is
-currently "open the file, type XML, guess the version, run `mvn`, wait".
+`jv add`, `jv remove`, `jv upgrade`, `jv outdated`.
 
-- **Format-preserving, not re-serialising.** The POM is edited as *text*,
-  through byte spans the parser records, never by writing a `Model` back out.
-  A round-trip that reorders elements, drops comments or re-indents is unusable
-  in any project with code review, which is all of them. This is a requirement
-  on `jv-model`'s parser: it must retain source positions, which it does not
-  today.
-- Insert into `<dependencies>` using the indentation of the surrounding
-  entries; create the element when absent, positioned where the super POM's
-  schema order puts it.
-- **Version selection:** `jv add g:a` takes the latest release — never a
-  snapshot, never something a range excludes — and pins it literally.
-  `jv add g:a:v` takes the version as given.
-- **`<dependencyManagement>`-aware.** If the coordinates are already managed by
-  a parent or an imported BOM, the inserted dependency omits `<version>` and
-  says why. That is what a Maven user would have written by hand, and writing a
-  redundant version is a defect a reviewer will bounce.
-- **Property indirection:** when neighbouring entries use `${foo.version}`,
-  follow the convention rather than hard-coding a literal beside them.
-- Multi-module: `-f` / `--recursive` select the module; adding to an aggregator
+**Read this before designing it: Apache got here first.**
+maven-dependency-plugin 3.11 ships `AddDependencyMojo` and
+`RemoveDependencyMojo`, and they are good. Verified by reading
+`_reference/maven-dependency-plugin/.../AddDependencyMojo.java` (822 LOC), not
+from the changelog:
+
+- Format-preserving edits through `eu.maveniverse.domtrip.maven.PomEditor` —
+  comments, indentation and encoding survive.
+- `dependencyManagement`-aware: omits `<version>` when a parent or BOM already
+  manages the artifact.
+- Detects the surrounding convention and follows it, including whether versions
+  go through `${…}` properties **and what the property naming pattern is**.
+- Duplicate detection that is type- and classifier-aware; `<profile>` targeting.
+
+An earlier revision of this section claimed format preservation, BOM awareness
+and property-convention following as jv's differentiators, with
+`versions-maven-plugin` as the anti-model. That is now wrong on both counts:
+Apache does all three, and the anti-model has been superseded. Reproducing
+them is table stakes, not an argument.
+
+**What is actually left**, which is narrower and worth being honest about:
+
+1. **Version resolution.** `AddDependencyMojo` contains no version-metadata
+   lookup at all — it fails with *"No version specified and no managed version
+   found"* unless a BOM covers the artifact. `mvn dependency:add
+   -Dgav=org.postgresql:postgresql` is an error; you must know the version
+   before you can add it. `jv add org.postgresql:postgresql` resolving the
+   latest release is a real gap, and it is the whole reason tier 2 in §1.1 is
+   a tier.
+2. **Fusing the workflow.** Edit, re-resolve, download, and update the lock in
+   one command, versus `dependency:add` → `go-offline` → `tree`.
+3. **Latency.** Sub-100 ms against a plugin invocation that pays JVM start,
+   plugin resolution and project build before it edits a line.
+4. **CLI shape.** `jv add g:a` against `mvn dependency:add -Dgav=g:a:v`.
+
+Design constraints that follow:
+
+- Format-preserving text editing through byte spans, never re-serialising a
+  `Model`. This needs source positions `jv-model`'s parser does not retain
+  today, and that is the prerequisite work.
+- Version selection takes the latest release: never a snapshot, never a version
+  a range excludes. `jv add g:a:v` takes the version as given.
+- Match the surrounding convention for managed versions and version properties,
+  because a POM that does not look hand-written will be rejected in review.
+- Atomic write with the pre-image held until resolution succeeds, so a
+  dependency that does not resolve leaves no half-edited POM.
+- Multi-module: `-f` / `--recursive` select the module; adding at an aggregator
   root is refused with a message naming the modules it could have meant.
-- `jv upgrade` rewrites versions in place and re-locks. `jv outdated` reports
-  the same analysis without writing.
-- The write is atomic and the pre-image is held until resolution succeeds, so a
-  dependency that does not resolve never leaves a half-edited POM behind.
 
-Prior art: `cargo add`, whose span-preserving `toml_edit` approach is the model
-to copy, and `uv add` for UX. Maven's own `versions-maven-plugin` is the
-**anti-**model — it re-serialises and mangles formatting, which is exactly why
-people edit POMs by hand instead.
+`cargo add`'s span-preserving `toml_edit` remains the implementation model.
+Where behaviour is ambiguous, match `AddDependencyMojo` — being different from
+the plugin in a way users notice is a bug, not a feature.
 
 ---
 
@@ -764,45 +1094,77 @@ constants).
 **Gate:** a stranger on a clean machine goes install → `jv tree` wow-moment in
 under 60 seconds.
 
-### v0.2 — From inspector to package manager
-The theme: jv starts *changing* your project, and what it resolves becomes
-reproducible. Ordered by expected adoption impact, not by difficulty.
+### v0.2 — Real-project compatibility, then the package manager
 
-1. **`jv add` / `jv remove` / `jv upgrade`** (§3.11). The one command class a
-   package manager cannot lack, and the highest-frequency row in §1's table.
-   Its cost is mostly in span-preserving XML editing, not in anything
-   conceptually hard — the resolver it needs already exists and is verified.
-2. **`jv lock` / `sync --frozen` / `sync --check`** (§3.10) + the supply-chain
-   blog post. Maven has no lockfile: the only place jv is the *only* option
-   rather than a faster one, and what the corpus-verified resolver is
-   ultimately for — a lockfile is trustworthy exactly to the degree that
-   resolution is provably Maven's.
-3. **`jv jdk`** — foojay Disco provisioning (wukong `src/foojay.rs` as
-   reference), **pulled forward from v0.3**. It touches none of the resolver, so
-   it ships on its own schedule, and `uv python install` demonstrated that
-   toolchain management is what gets a binary onto machines in the first place.
-   Leaving it in v0.3 forfeits that.
-4. **`jv why <ga>`** (path-recording visitor) — cheap, and the second question
-   anyone asks after "what does the tree look like".
-5. Carried over from the old v0.2: proxies + `settings-security.xml`
-   (`<proxies>` is parsed but not applied today, and the README says so); sha256
-   enforcement mode; `jv purge` / cache GC.
+Sequenced after uv's actual history rather than its final feature set. uv
+launched in Feb 2024 with `pip install` / `pip compile` / `pip sync` / `venv`
+and *none* of `add`, `lock`, `run`, `uvx` or Python management — a narrow
+drop-in whose post-launch priorities were compatibility, performance and
+stability. The manager surface arrived about six months later, on top of an
+already-trusted primitive. Ordering here follows that: make `jv sync` survive
+real projects first, then build on it.
 
-`jv tree --verbose` moves here as a **correctness** item rather than a feature.
-The oracle harness now compares `-Dverbose` against real Maven, which
-immediately found two divergences: a `scope updated from` annotation jv emitted
-on every node and Maven emits never (fixed — see §3.9 and
-`docs/spec/conflict-resolution.md`), and premanaged-version annotations Maven
-emits and jv does not (open). Few users pass `-Dverbose`, so this is not worth
-feature time — but a parity claim that is wrong is worse than a missing one.
+**1. `jv sync` compatibility on real projects.** The launch claim is that jv
+resolves what Maven resolves; every gap here is worth more than any new
+command. Known missing, verified against the tree:
+
+- `<proxies>` from `settings.xml` — parsed, never applied (env vars work).
+- `settings-security.xml` — encrypted passwords are parsed, not decrypted.
+- `.mvn/` entirely — no `extensions.xml`, and no `maven.config`, which is the
+  quiet one: a project with `-D` flags there resolves differently under jv than
+  under `mvn`, with nothing to warn the user.
+- Toolchains.
+
+Private repositories, mirrors, authentication, SNAPSHOTs, parent/BOM chains,
+multi-module reactors, profile activation and lifecycle plugins already work
+and are covered; they need corpus breadth, not new code.
+
+**2. Corpus breadth.** Ring 3's 46 modules are five projects. The target is
+hundreds of public Maven projects run continuously as
+`jv sync --local-repository … && mvn -o verify`, which tests resolution,
+download and the offline guarantee together. Enterprise-shaped projects matter
+more here than famous ones.
+
+**3. `jv add` / `jv remove`** (§3.11). Read §3.11 first: Apache shipped
+format-preserving add/remove in dependency-plugin 3.11, so the differentiator
+is version resolution, workflow fusion and latency — not POM editing.
+
+**4. `jv lock` / `sync --frozen` / `sync --check`** (§3.10). Tier 3 of §1.1:
+the only surface with no Maven equivalent, and the one a plugin cannot take
+back. Deliberately *after* `sync` and `add` have users, as uv shipped
+`pip compile` well before a universal lockfile.
+
+**5. `jv upgrade` / `jv outdated`.** Absorbs versions-maven-plugin, handling
+dependencies, plugins, properties and BOMs in one pass.
+
+**6. `jv why <ga>`** (path-recording visitor). Cheap, and a better answer than
+`dependency:tree -Dincludes=`.
+
+Carried over: sha256 enforcement mode, `jv purge` / cache GC.
+
+`jv tree --verbose` sits here as a **correctness** item, not a feature. The
+oracle harness compares `-Dverbose` against real Maven as of M8, which found
+two divergences — one annotation jv emitted and Maven never does, and one
+premanaged-version case that turned out to be a resolution bug rather than a
+rendering one (§3.9). Few users pass `-Dverbose`; a wrong parity claim is still
+worse than a missing one.
 
 ### v0.3 — Breadth
-`jv audit` against OSV — only meaningful once the lockfile exists, and the
-natural second half of the supply-chain story; `jv install` (persistent tool
-installs à la `uv tool install` / coursier `InstallDir`); JPMS module-path
-launching for `jvx`; Gradle Module Metadata + variant selection (coursier
-`GradleModule.scala` / `VariantSelector.scala` as reference) — the gateway to
-Kotlin/Android users.
+Windows support (see §1 non-goals — the largest single enterprise gap, and
+still deferred); `jv install` (persistent tool installs à la `uv tool install`
+/ coursier `InstallDir`); JPMS module-path launching for `jvx`; Gradle Module
+Metadata + variant selection (coursier `GradleModule.scala` /
+`VariantSelector.scala`) — the gateway to Kotlin/Android users.
+
+### Later — once there are users to serve
+`jv audit` against OSV, and `jv check` (convergence, duplicate classes, JDK
+compatibility) absorbing Enforcer. Both reuse the resolved graph, so neither is
+hard; both are worth little without adoption. uv shipped `uv audit` more than
+two years after launch, and building a security surface before anyone depends
+on the resolver would be the same mistake in a different order. JDK management
+belongs in this bucket too, for the competitive reason in §1. Beyond that:
+remote CAS and the content-addressed store of §3.8, enterprise policy and SBOM
+output.
 
 ---
 
@@ -810,6 +1172,7 @@ Kotlin/Android users.
 
 | Risk | Mitigation |
 |---|---|
+| **jv has no high-frequency operation to replace (§1.2)** | The structural risk, not a bug to fix. `./mvnw test` resolves implicitly, so a local developer never feels the cost jv removes. Mitigations, in order: aim at CI, containers and agent sandboxes, where fresh resolution *is* a paid cost; win on tier 2 and tier 3 of §1.1 (fused workflows, and a lockfile Maven has no answer for) rather than on raw speed; and treat any benchmark of an infrequent command as a demo, never as the pitch. |
 | Long-tail POM weirdness in the wild breaks parity | Ring 3 corpus is real-world and diverse by construction; every diff becomes a regression fixture; ship `jv tree --debug-model <ga>` early to make user bug reports self-serve. |
 | `mvn dependency:tree` output differs across Maven versions | Pin the oracle (Maven 3.9.x) in the harness; document the pinned version in the README benchmark table. |
 | Enterprise settings.xml complexity (mirrors-of-mirrors, encrypted creds, proxies) | Minimal-but-real subset in v0.1 (§3.6); loud, specific errors for unsupported constructs rather than silent misresolution. |

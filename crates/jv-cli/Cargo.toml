@@ -26,14 +26,17 @@ path = "src/jvx.rs"
 [dependencies]
 jv-cache = { workspace = true }
 jv-driver = { workspace = true }
+jv-edit = { workspace = true }
 jv-exec = { workspace = true }
 jv-model = { workspace = true }
 jv-repo = { workspace = true }
 jv-resolver = { workspace = true }
 jv-tree = { workspace = true }
+jv-version = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 owo-colors = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -2,9 +2,14 @@
 //!
 //! Mirrors Maven's `maven.mdo` schema, narrowed to what affects dependency
 //! resolution, effective-POM construction, and `dependency:tree` rendering.
-//! Reporting, site, licence and developer metadata are deliberately absent: they
-//! never change which artifacts get resolved. `<configuration>` is skipped for
-//! the same reason — jv reads POMs, it never writes them back.
+//! Site, licence and developer metadata are deliberately absent: they never
+//! change which artifacts get resolved.
+//!
+//! Two things that look like exceptions are not. `<reporting><plugins>` is kept
+//! because `mvn site` runs those plugins and a repository without them cannot
+//! run it offline. `<configuration>` is not kept, but it is scanned for
+//! coordinates on the way past, because plugins resolve artifacts named in
+//! there when they run.
 //!
 //! Almost every field is optional, because a raw POM is a *fragment*: values
 //! arrive later from the parent, from properties, or from a default. The
@@ -42,12 +47,26 @@ pub struct Model {
     pub description: Option<String>,
     pub url: Option<String>,
     pub inception_year: Option<String>,
+    /// `<prerequisites>`. Only `<maven>` matters, and only because POMs
+    /// interpolate `${project.prerequisites.maven}` into plugin versions — the
+    /// Apache parent chain does exactly that, and without it the expression
+    /// survives into a coordinate and produces a nonsense request.
+    pub prerequisites: Option<Prerequisites>,
     pub properties: Properties,
     pub dependencies: Vec<Dependency>,
     pub dependency_management: Vec<Dependency>,
     /// `<modules>`, or Maven 4's `<subprojects>` spelling.
     pub modules: Vec<String>,
     pub build: Option<Build>,
+    /// `<reporting><plugins>`, which is where a project declares the reports
+    /// `mvn site` runs.
+    ///
+    /// Kept flat rather than behind a `Reporting` struct because only the
+    /// plugins matter here: jv resolves them, it does not run them, and
+    /// `<reportSets>` decide which goals execute rather than which artifacts
+    /// are needed. They inherit and merge exactly as `<build><plugins>` do,
+    /// which is why they are the same type.
+    pub reporting_plugins: Vec<Plugin>,
     pub profiles: Vec<Profile>,
     pub repositories: Vec<Repository>,
     pub plugin_repositories: Vec<Repository>,
@@ -132,8 +151,9 @@ pub struct Build {
     pub default_goal: Option<String>,
     pub plugins: Vec<Plugin>,
     pub plugin_management: Vec<Plugin>,
-    /// Build extensions. jv does not load these yet; `jv sync` reports them as a
-    /// known gap rather than silently omitting them.
+    /// Build extensions. jv cannot *load* one — that needs Maven's container —
+    /// but `jv sync` fetches them, because Maven loads them before the build
+    /// and `mvn -o` fails outright when one is absent.
     pub extensions: Vec<Extension>,
 }
 
@@ -147,10 +167,11 @@ impl Build {
 /// A `<plugin>`.
 ///
 /// Only what is needed to resolve the plugin and its dependencies is modelled.
-/// `<configuration>` is skipped entirely — jv never writes POMs, so opaque
-/// configuration has no consumer — but `<executions>` are kept, because plugin
-/// inheritance consults them: a parent plugin marked `<inherited>false</inherited>`
-/// is still inherited when it declares executions.
+/// `<executions>` are kept because plugin inheritance consults them: a parent
+/// plugin marked `<inherited>false</inherited>` is still inherited when it
+/// declares executions. `<configuration>` is not kept as configuration — jv
+/// never writes POMs and never runs a plugin — but it is scanned on the way
+/// past for coordinates, which is what `configuration_artifacts` holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plugin {
     pub group_id: Option<String>,
@@ -162,6 +183,27 @@ pub struct Plugin {
     pub inherited: Option<bool>,
     pub dependencies: Vec<Dependency>,
     pub executions: Vec<PluginExecution>,
+    /// Coordinates named anywhere inside `<configuration>`, at any depth.
+    ///
+    /// A plugin resolves these itself when it runs, and they appear in no
+    /// `<dependencies>` block, so nothing else in a POM reveals them. They are
+    /// the single largest reason a repository `jv sync` populated cannot build
+    /// offline: `maven-compiler-plugin`'s `<annotationProcessorPaths>`,
+    /// `animal-sniffer`'s `<signature>`, `maven-remote-resources`'
+    /// `<resourceBundles>` — ten of twenty-six corpus projects failed on this
+    /// one shape.
+    ///
+    /// This is a list of things to *download*, not a model of what the build
+    /// uses. That is why it is a flat union rather than merged element by
+    /// element the way Maven merges configuration: fetching an artifact the
+    /// effective configuration turns out not to want costs a download, while
+    /// missing one breaks `mvn -o`.
+    ///
+    /// Only coordinates that identify themselves are found — a `<groupId>` and
+    /// `<artifactId>` pair, or a `g:a:v` string. A plugin that names a default
+    /// it resolves from its own code, as `spotless` does with
+    /// `<palantirJavaFormat/>`, cannot be seen here by any amount of reading.
+    pub configuration_artifacts: Vec<Dependency>,
 }
 
 /// A `<execution>` within a plugin.
@@ -228,6 +270,9 @@ pub struct Profile {
     pub dependency_management: Vec<Dependency>,
     pub modules: Vec<String>,
     pub build: Option<Build>,
+    /// A profile may declare reports too, and activating it must contribute
+    /// them exactly as it contributes build plugins.
+    pub reporting_plugins: Vec<Plugin>,
     pub repositories: Vec<Repository>,
     pub plugin_repositories: Vec<Repository>,
     pub distribution_management: Option<DistributionManagement>,
@@ -329,6 +374,12 @@ pub struct DistributionManagement {
     pub relocation: Option<Relocation>,
     /// A free-text status such as `deployed`; never affects resolution.
     pub status: Option<String>,
+}
+
+/// `<prerequisites>`: the minimum Maven a build declares it needs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Prerequisites {
+    pub maven: Option<String>,
 }
 
 /// A `<relocation>`: any absent field keeps the original coordinate.

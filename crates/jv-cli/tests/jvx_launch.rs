@@ -47,6 +47,36 @@ fn jvx_binary() -> PathBuf {
     path.join(if cfg!(windows) { "jvx.exe" } else { "jvx" })
 }
 
+/// Whether output describes a repository that would not serve jv, rather than a
+/// tool that does not work.
+///
+/// This is the only kind of test here that needs the network, and Maven Central
+/// rate-limits: a run that trips its limit reports `the repository answered
+/// 429`. Calling that a jvx failure is worse than useless — it teaches whoever
+/// sees it to ignore a red result from the one test that would catch a real jvx
+/// bug. So a refusal by the repository is a skip, and `JV_REQUIRE_ORACLE` turns
+/// it back into a failure for CI, which is expected to have a network.
+fn repository_refused(said: &str) -> bool {
+    said.contains("the repository answered 429")
+        || said.contains("the repository answered 50")
+        || said.contains("is not cached, and jv is offline")
+        || said.contains("could not be reached")
+        || said.contains("dns error")
+}
+
+/// Skips for a repository that would not answer, or fails if CI required one.
+fn refused(what: &str, said: &str) -> bool {
+    if !repository_refused(said) {
+        return false;
+    }
+    assert!(
+        std::env::var_os("JV_REQUIRE_ORACLE").is_none(),
+        "JV_REQUIRE_ORACLE is set but the repository refused {what}:\n{said}"
+    );
+    eprintln!("skipping {what}: the repository would not serve it\n{said}");
+    true
+}
+
 #[test]
 fn jvx_runs_a_tool_named_only_by_its_coordinates() {
     if let Err(reason) = java() {
@@ -74,6 +104,9 @@ fn jvx_runs_a_tool_named_only_by_its_coordinates() {
     // The tool prints its version banner to standard error, so both streams are
     // in play; which one is the tool's business, not jvx's.
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && refused("the jvx launch test", &format!("{stdout}{stderr}")) {
+        return;
+    }
     assert!(
         output.status.success(),
         "jvx failed with {:?}\nstdout: {stdout}\nstderr: {stderr}",

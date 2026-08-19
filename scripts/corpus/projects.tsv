@@ -1,0 +1,37 @@
+# Ring 4 corpus: projects for scripts/corpus.sh.
+#
+# tier<TAB>name<TAB>repository<TAB>ref<TAB>why it is here
+#
+# Every ref is pinned and was verified with `git ls-remote` before being
+# added. An unpinned corpus makes a failure impossible to attribute: the
+# cause could be jv, or a dependency published yesterday.
+#
+# Tiers: `default` runs in a pre-release check; `full` is everything.
+# Growing this file needs no code change.
+
+default	commons-io	https://github.com/apache/commons-io	rel/commons-io-2.16.1	Apache parent chain, single module, the shape half of enterprise Java has
+default	commons-lang	https://github.com/apache/commons-lang	rel/commons-lang-3.14.0	four POMs of pluginManagement above it
+default	commons-codec	https://github.com/apache/commons-codec	rel/commons-codec-1.17.0	Apache parent, japicmp and animal-sniffer plugins
+default	gson	https://github.com/google/gson	gson-parent-2.11.0	small multi-module with a proguard step
+default	jsoup	https://github.com/jhy/jsoup	jsoup-1.17.2	single module, shade plugin, no corporate parent
+default	jackson-core	https://github.com/FasterXML/jackson-core	jackson-core-2.17.1	jackson-base parent chain and moditect
+default	spring-petclinic	https://github.com/spring-projects/spring-petclinic	88e37c15cf6fc8490b01bc3e8e2c800cec1ac272	Spring Boot BOM; the app shape rather than the library shape
+default	maven-compiler-plugin	https://github.com/apache/maven-compiler-plugin	maven-compiler-plugin-3.13.0	a Maven plugin, so plugin-side resolution rules apply to it
+full	commons-collections	https://github.com/apache/commons-collections	rel/commons-collections-4.5.0	Apache parent, moditect, multi-release jar
+full	commons-text	https://github.com/apache/commons-text	rel/commons-text-1.12.0	depends on a sibling Apache release
+full	commons-csv	https://github.com/apache/commons-csv	rel/commons-csv-1.11.0	small, and pulls a test-scoped H2
+full	commons-compress	https://github.com/apache/commons-compress	rel/commons-compress-1.26.2	optional dependencies, several of them
+full	httpcomponents-core	https://github.com/apache/httpcomponents-core	rel/v5.2.4	multi-module Apache project with an OSGi bundle step
+full	httpcomponents-client	https://github.com/apache/httpcomponents-client	rel/v5.3.1	depends on httpcore; reactor plus external siblings
+full	logging-log4j2	https://github.com/apache/logging-log4j2	rel/2.23.1	large reactor, BOM, many optional dependencies
+full	maven-surefire	https://github.com/apache/maven-surefire	surefire-3.2.5	the plugin that decides test providers; jv special-cases those
+full	maven-resolver	https://github.com/apache/maven-resolver	maven-resolver-1.9.20	the library jv reimplements, built by Maven itself
+full	byte-buddy	https://github.com/raphw/byte-buddy	byte-buddy-1.14.17	heavy shading and a multi-module reactor
+full	assertj	https://github.com/assertj/assertj	assertj-build-3.26.0	multi-module with a large test surface
+full	awaitility	https://github.com/awaitility/awaitility	awaitility-4.2.1	small multi-module, Groovy and Scala modules
+full	guava	https://github.com/google/guava	v33.2.0	the dependency everyone has; parent plus android/jre variants
+full	jackson-dataformat-xml	https://github.com/FasterXML/jackson-dataformat-xml	jackson-dataformat-xml-2.17.1	depends on woodstox; jackson parent chain
+full	vertx-core	https://github.com/eclipse-vertx/vert.x	4.5.8	single large module, codegen via annotation processors
+full	flyway	https://github.com/flyway/flyway	flyway-10.15.0	commercial-shaped multi-module with many database drivers
+full	jetty	https://github.com/jetty/jetty.project	jetty-11.0.21	very large reactor, its own BOM and plugins
+full	dropwizard	https://github.com/dropwizard/dropwizard	v4.0.7	mid-size multi-module with its own BOM

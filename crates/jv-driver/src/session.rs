@@ -188,7 +188,10 @@ fn build_source(
     let transport: Box<dyn Transport> = if offline {
         Box::new(OfflineTransport)
     } else {
-        Box::new(HttpTransport::new().map_err(|error| DriverError::Other(error.to_string()))?)
+        Box::new(
+            HttpTransport::with_proxies(jv_repo::ProxySelector::from_settings(&settings))
+                .map_err(|error| DriverError::Other(error.to_string()))?,
+        )
     };
 
     let mut fetcher = Fetcher::new(store, transport).offline(offline);

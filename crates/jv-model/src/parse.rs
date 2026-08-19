@@ -18,8 +18,8 @@ use quick_xml::name::QName;
 use crate::coordinates::{Dependency, Exclusion};
 use crate::model::{
     Activation, ActivationFile, ActivationOs, ActivationProperty, Build, DistributionManagement,
-    Extension, Model, Parent, Plugin, PluginExecution, Profile, Relocation, Repository,
-    RepositoryPolicy,
+    Extension, Model, Parent, Plugin, PluginExecution, Prerequisites, Profile, Relocation,
+    Repository, RepositoryPolicy,
 };
 use crate::scope::Scope;
 
@@ -287,6 +287,10 @@ impl<'i> XmlParser<'i> {
             b"description" => parser.text_into(&mut model.description),
             b"url" => parser.text_into(&mut model.url),
             b"inceptionYear" => parser.text_into(&mut model.inception_year),
+            b"prerequisites" => {
+                model.prerequisites = Some(parser.parse_prerequisites()?);
+                Ok(true)
+            }
             b"properties" => {
                 parser.parse_properties(&mut model.properties)?;
                 Ok(true)
@@ -322,6 +326,24 @@ impl<'i> XmlParser<'i> {
             }
             b"build" => {
                 model.build = Some(parser.parse_build("build")?);
+                Ok(true)
+            }
+            // Only `<plugins>` is read. `<excludeDefaults>` and
+            // `<outputDirectory>` change what a site looks like, not which
+            // artifacts it needs.
+            b"reporting" => {
+                parser.children("reporting", |parser, name| match name {
+                    b"plugins" => {
+                        let parsed = parser.list("plugins", b"plugin", XmlParser::parse_plugin)?;
+                        parser.replace_repeated(
+                            "reporting plugins",
+                            &mut model.reporting_plugins,
+                            parsed,
+                        );
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                })?;
                 Ok(true)
             }
             b"profiles" => {
@@ -524,11 +546,112 @@ impl<'i> XmlParser<'i> {
                 )?;
                 Ok(true)
             }
-            // <configuration> is skipped: nothing jv does depends on it, and it
-            // is the bulk of a real POM's bytes.
+            // `<configuration>` is not modelled, but it is scanned on the way
+            // past: plugins resolve artifacts named in there when they run, and
+            // those coordinates appear nowhere else in a POM. Everything not
+            // shaped like coordinates is still discarded, so the bulk of a real
+            // POM's bytes still costs nothing to keep.
+            b"configuration" => {
+                parser.scan_for_coordinates(&mut plugin.configuration_artifacts)?;
+                Ok(true)
+            }
             _ => Ok(false),
         })?;
         Ok(plugin)
+    }
+
+    /// Collects everything shaped like artifact coordinates in the subtree of
+    /// the element currently being read.
+    ///
+    /// Written as its own event loop rather than in terms of `children` and
+    /// `text`, because neither fits: configuration is arbitrary XML of unknown
+    /// depth, and `text` deliberately skips nested elements, so calling it on a
+    /// container would consume exactly the coordinates being looked for.
+    ///
+    /// Two shapes are recognised, which between them cover what the corpus
+    /// actually declares:
+    ///
+    /// - an element with `<groupId>` and `<artifactId>` children —
+    ///   `<annotationProcessorPaths><path>`, `animal-sniffer`'s `<signature>`;
+    /// - an element whose text is `group:artifact:version` —
+    ///   `maven-remote-resources`' `<resourceBundles><resourceBundle>`.
+    ///
+    /// A version is optional here. An entry without one still names a real
+    /// artifact, and leaving it to be reported as unresolvable says more than
+    /// silently dropping it.
+    pub(crate) fn scan_for_coordinates(
+        &mut self,
+        found: &mut Vec<Dependency>,
+    ) -> Result<(), ParseError> {
+        /// One element's worth of what has been seen so far.
+        #[derive(Default)]
+        struct Frame {
+            group_id: Option<String>,
+            artifact_id: Option<String>,
+            version: Option<String>,
+            classifier: Option<String>,
+            type_: Option<String>,
+            text: String,
+        }
+
+        // The element this was called on is already open, so it seeds the stack
+        // and popping it is what ends the scan.
+        let mut stack: Vec<(Vec<u8>, Frame)> = vec![(Vec::new(), Frame::default())];
+        loop {
+            match self.read_event()? {
+                Event::Start(element) => {
+                    let name = element.local_name().as_ref().to_vec();
+                    stack.push((name, Frame::default()));
+                }
+                Event::Text(text) => {
+                    if let Some((_, frame)) = stack.last_mut() {
+                        frame.text.push_str(&text.unescape()?);
+                    }
+                }
+                Event::End(_) => {
+                    let Some((name, frame)) = stack.pop() else {
+                        return Ok(());
+                    };
+                    if stack.is_empty() {
+                        return Ok(());
+                    }
+
+                    if frame.group_id.is_some() && frame.artifact_id.is_some() {
+                        found.push(Dependency {
+                            group_id: frame.group_id.clone().unwrap_or_default(),
+                            artifact_id: frame.artifact_id.clone().unwrap_or_default(),
+                            version: frame.version.clone(),
+                            classifier: frame.classifier.clone(),
+                            type_: frame.type_.clone(),
+                            ..Dependency::default()
+                        });
+                    } else if let Some(dependency) = coordinates_from_text(&name, frame.text.trim())
+                    {
+                        found.push(dependency);
+                    }
+
+                    // Feed this element's text up as a field of its parent, so
+                    // the parent can recognise itself as coordinates.
+                    if let Some((_, parent)) = stack.last_mut() {
+                        let text = frame.text.trim().to_owned();
+                        match name.as_slice() {
+                            b"groupId" => parent.group_id = Some(text),
+                            b"artifactId" => parent.artifact_id = Some(text),
+                            b"version" => parent.version = Some(text),
+                            b"classifier" => parent.classifier = Some(text),
+                            b"type" => parent.type_ = Some(text),
+                            _ => {}
+                        }
+                    }
+                }
+                Event::Eof => {
+                    return Err(ParseError::UnexpectedEof {
+                        element: "configuration".to_owned(),
+                    });
+                }
+                _ => {}
+            }
+        }
     }
 
     pub(crate) fn parse_plugin_execution(&mut self) -> Result<PluginExecution, ParseError> {
@@ -591,6 +714,17 @@ impl<'i> XmlParser<'i> {
             }
             b"build" => {
                 profile.build = Some(parser.parse_build("build")?);
+                Ok(true)
+            }
+            b"reporting" => {
+                parser.children("reporting", |parser, name| match name {
+                    b"plugins" => {
+                        profile.reporting_plugins =
+                            parser.list("plugins", b"plugin", XmlParser::parse_plugin)?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                })?;
                 Ok(true)
             }
             b"repositories" => {
@@ -718,6 +852,15 @@ impl<'i> XmlParser<'i> {
         Ok(management)
     }
 
+    fn parse_prerequisites(&mut self) -> Result<Prerequisites, ParseError> {
+        let mut prerequisites = Prerequisites::default();
+        self.children("prerequisites", |parser, name| match name {
+            b"maven" => parser.text_into(&mut prerequisites.maven),
+            _ => Ok(false),
+        })?;
+        Ok(prerequisites)
+    }
+
     fn parse_relocation(&mut self) -> Result<Relocation, ParseError> {
         let mut relocation = Relocation::default();
         self.children("relocation", |parser, name| match name {
@@ -729,6 +872,52 @@ impl<'i> XmlParser<'i> {
         })?;
         Ok(relocation)
     }
+}
+
+/// A `group:artifact:version` string, for the few elements that spell
+/// coordinates that way.
+///
+/// Restricted to an allowlist of element names, which is not fussiness. Scanned
+/// across the 11,778 POMs in the corpus cache, an unrestricted `g:a:v` match
+/// found real coordinates *and* two large classes of things that only look like
+/// them:
+///
+/// - OSGi bundle instructions, which are colon-and-semicolon-laden by nature —
+///   `javax.annotation;version=!;resolution:=optional,*`;
+/// - `maven-enforcer-plugin` ban patterns, which are deliberately shaped like
+///   coordinates because they match against them —
+///   `com.google.guava:guava:[10.0.1,)`, `io.projectreactor.tools:x:*`.
+///
+/// Neither names an artifact to download. Fetching them means asking a
+/// repository for paths that cannot exist and then reporting the misses as if
+/// something were wrong with the project.
+fn coordinates_from_text(element: &[u8], text: &str) -> Option<Dependency> {
+    // `maven-remote-resources-plugin` is the one in the corpus. Others can join
+    // it when something demonstrates the need.
+    if element != b"resourceBundle" {
+        return None;
+    }
+    if text.is_empty() || text.contains(char::is_whitespace) || text.contains('/') {
+        return None;
+    }
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    // Wildcards and range brackets mean a pattern even inside an allowed
+    // element, and a pattern is not something to fetch.
+    if text.contains(['*', ';', '=', ',', '!', '[', '(']) {
+        return None;
+    }
+    if !parts[0].contains('.') {
+        return None;
+    }
+    Some(Dependency {
+        group_id: parts[0].to_owned(),
+        artifact_id: parts[1].to_owned(),
+        version: Some(parts[2].to_owned()),
+        ..Dependency::default()
+    })
 }
 
 #[cfg(test)]
@@ -819,6 +1008,135 @@ mod tests {
                </m:project>"#,
         );
         assert_eq!(prefixed.model.artifact_id.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn configuration_gives_up_its_coordinates() {
+        // `maven-compiler-plugin`'s annotation processors: nested two deep, and
+        // the version is a property that interpolation resolves later.
+        let pom = parse_pom(
+            r#"
+            <project><build><plugins><plugin>
+              <artifactId>maven-compiler-plugin</artifactId>
+              <configuration>
+                <annotationProcessorPaths>
+                  <path>
+                    <groupId>com.google.errorprone</groupId>
+                    <artifactId>error_prone_core</artifactId>
+                    <version>${error_prone.version}</version>
+                  </path>
+                  <path>
+                    <groupId>com.uber.nullaway</groupId>
+                    <artifactId>nullaway</artifactId>
+                    <version>0.10.24</version>
+                  </path>
+                </annotationProcessorPaths>
+              </configuration>
+            </plugin></plugins></build></project>
+            "#,
+        )
+        .unwrap();
+        let found = &pom.model.build.unwrap().plugins[0].configuration_artifacts;
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].artifact_id, "error_prone_core");
+        assert_eq!(found[0].version.as_deref(), Some("${error_prone.version}"));
+        assert_eq!(found[1].artifact_id, "nullaway");
+    }
+
+    #[test]
+    fn a_signature_element_is_coordinates_too() {
+        // animal-sniffer, which is the same shape one level shallower.
+        let pom = parse_pom(
+            r#"
+            <project><build><plugins><plugin>
+              <artifactId>animal-sniffer-maven-plugin</artifactId>
+              <configuration>
+                <signature>
+                  <groupId>org.codehaus.mojo.signature</groupId>
+                  <artifactId>java18</artifactId>
+                  <version>1.0</version>
+                </signature>
+              </configuration>
+            </plugin></plugins></build></project>
+            "#,
+        )
+        .unwrap();
+        let found = &pom.model.build.unwrap().plugins[0].configuration_artifacts;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].group_id, "org.codehaus.mojo.signature");
+        assert_eq!(found[0].version.as_deref(), Some("1.0"));
+    }
+
+    #[test]
+    fn coordinates_written_as_one_string_are_found() {
+        // `maven-remote-resources`, which spells them `g:a:v` in element text.
+        let pom = parse_pom(
+            r#"
+            <project><build><plugins><plugin>
+              <artifactId>maven-remote-resources-plugin</artifactId>
+              <configuration>
+                <resourceBundles>
+                  <resourceBundle>org.apache:apache-jar-resource-bundle:1.5</resourceBundle>
+                </resourceBundles>
+              </configuration>
+            </plugin></plugins></build></project>
+            "#,
+        )
+        .unwrap();
+        let found = &pom.model.build.unwrap().plugins[0].configuration_artifacts;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].group_id, "org.apache");
+        assert_eq!(found[0].artifact_id, "apache-jar-resource-bundle");
+        assert_eq!(found[0].version.as_deref(), Some("1.5"));
+    }
+
+    #[test]
+    fn configuration_that_names_nothing_yields_nothing() {
+        // The reason `coordinates_from_text` is strict. Configuration is full of
+        // colon-bearing text that names no artifact, and every false positive
+        // becomes a download attempt and then a warning about an artifact that
+        // was never wanted. `<palantirJavaFormat/>` is the other half of the
+        // point: spotless resolves that from its own code, so no amount of
+        // reading the POM can find it.
+        let pom = parse_pom(
+            r#"
+            <project><build><plugins><plugin>
+              <artifactId>spotless-maven-plugin</artifactId>
+              <configuration>
+                <java>
+                  <palantirJavaFormat/>
+                  <importOrder><order>javax,java,,\#</order></importOrder>
+                  <licenseHeader><file>${basedir}/header.txt</file></licenseHeader>
+                </java>
+                <ratchetFrom>origin/main</ratchetFrom>
+                <since>2019-01-01T00:00:00</since>
+                <url>https://example.com:8080/x</url>
+              </configuration>
+            </plugin></plugins></build></project>
+            "#,
+        )
+        .unwrap();
+        let found = &pom.model.build.unwrap().plugins[0].configuration_artifacts;
+        assert!(found.is_empty(), "found {found:?}");
+    }
+
+    #[test]
+    fn a_version_without_coordinates_is_not_an_artifact() {
+        // spotless again: a bare `<version>` under a formatter names the version
+        // of something the plugin picks itself.
+        let pom = parse_pom(
+            r#"
+            <project><build><plugins><plugin>
+              <artifactId>spotless-maven-plugin</artifactId>
+              <configuration>
+                <java><googleJavaFormat><version>1.19.2</version></googleJavaFormat></java>
+              </configuration>
+            </plugin></plugins></build></project>
+            "#,
+        )
+        .unwrap();
+        let found = &pom.model.build.unwrap().plugins[0].configuration_artifacts;
+        assert!(found.is_empty(), "found {found:?}");
     }
 
     #[test]
