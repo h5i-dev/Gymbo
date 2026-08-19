@@ -22,7 +22,7 @@ $ jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
 - [8–338× faster](#speed) than the `mvn` equivalents of the commands it
   replaces.
 - A single native binary to replace the everyday goals of
-  `maven-dependency-plugin` and `versions-maven-plugin` — no JVM start, no
+  `maven-dependency-plugin` and `versions-maven-plugin`: no JVM start, no
   plugin loading.
 - **A jv project is just your Maven project.** No new manifest, no lockfile,
   no POM changes: jv reads `pom.xml` and `settings.xml`, shares `~/.m2`, and
@@ -37,20 +37,19 @@ $ jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
 - [Makes offline builds work](#offline-builds): `jv sync && mvn -o verify`,
   including the lifecycle plugins that appear in no POM.
 - [Profiles Maven itself](#profiling-a-build): `jv profile -- mvn test`
-  shows where a build's time actually goes. Maven has no equivalent.
+  shows where a build's time actually goes.
 - Verified against real Maven on every commit: differential tests across 46
   real-world modules, 50,862 version-ordering inputs against maven-resolver's
   own oracle, effective POMs matching `mvn help:effective-pom` exactly.
 - Maven's flags carry over with Maven's spelling: `-o`, `-U`, `-s`, `-P`,
   `-D`, `-f`, and `--recursive` for every module of a multi-module build.
 
-> **Status: early development.** Everything below works and is verified against
-> real Maven on every commit. No release is tagged yet, so you build it
-> yourself.
+> **Status: early development.** Everything documented here works today. No
+> release is tagged yet, so you build it yourself.
 
 ## Installation
 
-Build from source (no release is tagged yet):
+Build from source:
 
 ```console
 $ git clone https://github.com/h5i-dev/jv && cd jv
@@ -70,7 +69,7 @@ $ jv outdated                 # what has a newer version
 ```
 
 `jv outdated` covers declared dependencies plus the `<dependencyManagement>`
-entries your POM declares itself, including imported BOMs — and deliberately
+entries your POM declares itself, including imported BOMs, and deliberately
 skips parent-managed entries you cannot change from that POM anyway.
 
 ### Editing a POM
@@ -83,8 +82,8 @@ $ jv remove com.google.guava:guava
 ```
 
 Edits are byte-precise: jv rewrites only the span it changes, so comments,
-indentation, CRLF and the XML declaration survive. The strongest test deletes
-the inserted span from the output and asserts byte equality with the input.
+indentation, CRLF and the XML declaration survive. One test deletes the
+inserted span back out of the output and asserts byte equality with the input.
 
 ### Running tools
 
@@ -109,7 +108,7 @@ $ jv sync --recursive && mvn -o verify
 ```
 
 This is a correctness tool, not a speed one. It exists so a build cannot fail
-because Central had a bad minute — and because `mvn dependency:go-offline`
+because Central had a bad minute, and because `mvn dependency:go-offline`
 produces a repository that often cannot build at all.
 
 ### Profiling a build
@@ -118,9 +117,8 @@ produces a repository that often cannot build at all.
 $ jv profile -- mvn test
 ```
 
-An `EventSpy` that reports where a Maven build's time actually goes: model
-building, dependency and plugin resolution, and each mojo's execution. Maven
-ships nothing comparable.
+An `EventSpy` that breaks the run into model building, dependency and plugin
+resolution, and each mojo's execution. Maven ships nothing comparable.
 
 ## Speed
 
@@ -147,7 +145,7 @@ removed 19 of its 29 metadata lookups and saved 16 ms out of 1,653. The
 lookups cost about a millisecond each. The rest is the host.
 
 The same mechanism sets the limit: a build's time is compilation and tests,
-not the host — so jv does not claim to speed up builds, and does not try. See
+not the host. So jv does not claim to speed up builds, and does not try. See
 the [FAQ](#will-jv-make-my-builds-faster).
 
 ## What it replaces
@@ -199,15 +197,15 @@ against its own expectations.
 
 #### Will jv make my builds faster?
 
-No. Measured honestly: `mvn verify` on commons-io is 53.8 s, and
-`jv sync && mvn -o verify` is 58.7 s — 0.92×, because a build's time is
-compilation and tests, which jv does not do. jv makes the *other* commands
-fast: the second you pay to ask a question, dozens of times a day. Adopt
-`jv sync` for offline correctness, not for the clock.
+No. `mvn verify` on commons-io is 53.8 s; `jv sync && mvn -o verify` is
+58.7 s. That is 0.92×, because a build's time is compilation and tests, which
+jv does not do. Adopt `jv sync` for offline correctness. What jv makes fast is
+the *other* commands: the second you pay to ask a question, dozens of times a
+day.
 
 #### Doesn't `mvn dependency:add` already do this?
 
-Since maven-dependency-plugin 3.11, yes — and it is good. Verified by running
+Since maven-dependency-plugin 3.11, yes. And it is good. Verified by running
 it, not by reading a changelog: the plugin preserves formatting and comments
 exactly as jv does, and omits `<version>` when a BOM already manages the
 artifact. Neither of those is a reason to prefer jv.
@@ -223,8 +221,8 @@ comes from.
 
 Coursier is excellent, and jv uses it as one of its correctness oracles. But
 `cs` runs on the JVM and centers on the Scala workflow. jv is a single native
-binary that speaks Maven's own vocabulary — `pom.xml`, `settings.xml`,
-`~/.m2`, Maven's flags — for people whose project is a Maven project.
+binary that speaks Maven's own vocabulary (`pom.xml`, `settings.xml`,
+`~/.m2`, Maven's flags) for people whose project is a Maven project.
 
 #### Which Maven does jv follow?
 
@@ -244,8 +242,8 @@ measurements that closed several directions off.
 ## Acknowledgements
 
 jv's compatibility work leans on the [Apache Maven](https://maven.apache.org/)
-project itself — its resolver's `GenericVersion` serves as jv's
-version-ordering oracle, and real `mvn` runs anchor every differential test.
+project itself: its resolver's `GenericVersion` is jv's version-ordering
+oracle, and real `mvn` runs anchor every differential test.
 The shape of the tool owes an obvious debt to
 [uv](https://github.com/astral-sh/uv) and [Coursier](https://get-coursier.io/).
 
