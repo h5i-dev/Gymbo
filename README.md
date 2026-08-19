@@ -158,15 +158,15 @@ the [FAQ](#will-jv-make-my-builds-faster).
 
 ## FAQ
 
-- *Will jv make my builds faster?* No. `mvn verify` on commons-io is 53.8 s; `jv sync && mvn -o verify` is
+- *Will jv make my builds faster?* -- No. `mvn verify` on commons-io is 53.8 s; `jv sync && mvn -o verify` is
 58.7 s. That is 0.92×, because a build's time is compilation and tests, which
-jv does not do. Adopt `jv sync` for offline correctness.
-- *Why not Coursier?* Coursier is excellent, and jv uses it as one of its correctness oracles. But
+jv does not do.
+- *Why not Coursier?* -- Coursier is excellent, and jv uses it as one of its correctness oracles. But
 `cs` runs on the JVM and centers on the Scala workflow. jv is a single native
 binary that speaks Maven's own vocabulary (`pom.xml`, `settings.xml`,
 `~/.m2`, Maven's flags) for people whose project is a Maven project.
-- *Which Maven does jv follow?* Maven 3.9.
-- *How do you pronounce jv?* "jay-vee". Just "jv", lowercase, please.
+- *Which Maven does jv follow?* -- Maven 3.9.
+- *How do you pronounce jv?* -- "jay-vee". Just "jv", lowercase, please.
 
 ## Acknowledgements
 
