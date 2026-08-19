@@ -43,7 +43,7 @@ $ cargo build --release        # target/release/{jv,jvx}
 
 ## Features
 
-### Inspecting dependencies
+#### Inspecting dependencies
 
 ```console
 $ jv tree                     # byte-identical to mvn dependency:tree
@@ -57,7 +57,7 @@ $ jv outdated                 # what has a newer version
 entries your POM declares itself, including imported BOMs, and deliberately
 skips parent-managed entries you cannot change from that POM anyway.
 
-### Editing a POM
+#### Editing a POM
 
 ```console
 $ jv add com.google.guava:guava            # resolves the newest release
@@ -70,7 +70,7 @@ Edits are byte-precise: jv rewrites only the span it changes, so comments,
 indentation, CRLF and the XML declaration survive. One test deletes the
 inserted span back out of the output and asserts byte equality with the input.
 
-### Running tools
+#### Running tools
 
 `jvx` runs any published JVM tool from its coordinates, on the `uvx` model:
 
@@ -83,7 +83,7 @@ The endpoint is `group:artifact[:version[:classifier]][@mainClass]`. Omit the
 version for the latest release. When jv cannot tell which class to run, it
 says so and names what it tried.
 
-### Offline builds
+#### Offline builds
 
 `jv sync` populates `~/.m2` with everything a build needs, including the
 lifecycle plugins that appear in no POM, so Maven then builds with no network:
@@ -96,7 +96,7 @@ This is a correctness tool, not a speed one. It exists so a build cannot fail
 because Central had a bad minute, and because `mvn dependency:go-offline`
 produces a repository that often cannot build at all.
 
-### Profiling a build
+#### Profiling a build
 
 ```console
 $ jv profile -- mvn test
