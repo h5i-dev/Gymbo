@@ -151,44 +151,22 @@ the [FAQ](#will-jv-make-my-builds-faster).
 
 - **It does not build.** No compile, test, package. The pairing is
   `jv sync && mvn -o verify`, not a replacement for `mvn`.
-- **Some projects still will not build offline.** On the default corpus tier,
-  4 of 8 do. The rest hit limits `dependency:go-offline` also hits, such as
-  spotless resolving a formatter whose version is a constant inside its own
-  jar. `jv sync --also g:a:v` is the escape hatch.
 - **Gradle projects are out of scope** for v0.x. A Gradle-built *dependency*
   resolves fine, since its POM is what Maven reads too.
 - **No JDK management, and no daemon.** SDKMAN and mise do the first well. The
   second is deliberate: a process this fast makes a daemon pointless.
 
-## Correctness
-
-Compatibility is the product, so jv is measured against Maven rather than
-against its own expectations.
-
-- `jv tree` matches `mvn dependency:tree` byte for byte across the
-  differential harness, in all five output formats and again under
-  `-Dverbose`.
-- `scripts/ring3.sh` diffs every module of spring-petclinic, dropwizard,
-  jackson-databind, commons-lang and maven-dependency-plugin at pinned
-  commits. 46 modules, 0 differing.
-- `scripts/corpus.sh` syncs real projects and builds them offline, running
-  `dependency:go-offline` as a control to attribute any failure, and
-  `-b OLD_JV` to catch a regression the control would excuse.
-- Version ordering agrees with maven-resolver's own `GenericVersion`, driven
-  as an oracle across 50,862 generated inputs.
-- Effective POMs match `mvn help:effective-pom` from 3.9.9 exactly.
-
 ## FAQ
 
-- **Will jv make my builds faster?** No. `mvn verify` on commons-io is 53.8 s; `jv sync && mvn -o verify` is
+- *Will jv make my builds faster?* No. `mvn verify` on commons-io is 53.8 s; `jv sync && mvn -o verify` is
 58.7 s. That is 0.92×, because a build's time is compilation and tests, which
 jv does not do. Adopt `jv sync` for offline correctness.
-- **Why not Coursier?** Coursier is excellent, and jv uses it as one of its correctness oracles. But
+- *Why not Coursier?* Coursier is excellent, and jv uses it as one of its correctness oracles. But
 `cs` runs on the JVM and centers on the Scala workflow. jv is a single native
 binary that speaks Maven's own vocabulary (`pom.xml`, `settings.xml`,
 `~/.m2`, Maven's flags) for people whose project is a Maven project.
-- **Which Maven does jv follow?** Maven 3.9.
-- **How do you pronounce jv?** "jay-vee". Just "jv", lowercase, please.
+- *Which Maven does jv follow?* Maven 3.9.
+- *How do you pronounce jv?* "jay-vee". Just "jv", lowercase, please.
 
 ## Acknowledgements
 
