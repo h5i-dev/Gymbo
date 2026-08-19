@@ -25,8 +25,7 @@ $ jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
 - [Inspects dependencies](#inspecting-dependencies): `jv tree` is
   byte-identical to `mvn dependency:tree`, in all five output formats.
 - [Edits your POM](#editing-a-pom): `jv add` resolves the newest release
-  when you omit a version, writes no `<version>` when a BOM manages one, and
-  preserves formatting and comments exactly.
+  when you omit a version.
 - [Runs any published JVM tool](#running-tools) from its coordinates with
   `jvx`, on the `uvx` model.
 - [Makes offline builds work](#offline-builds): `jv sync && mvn -o verify`,
