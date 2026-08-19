@@ -19,9 +19,8 @@ $ jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
 
 - [8–338× faster](#speed) than the `mvn` equivalents of the commands it
   replaces.
-- **A jv project is just your Maven project.** No new manifest, no lockfile,
-  no POM changes: jv reads `pom.xml` and `settings.xml`, shares `~/.m2`, and
-  is invisible to a teammate who keeps using `mvn`.
+- **Fully compatible with Maven project.** No new manifest, no lockfile,
+  no POM changes.
 - [Inspects dependencies](#inspecting-dependencies): `jv tree` is
   byte-identical to `mvn dependency:tree`, in all five output formats.
 - [Edits your POM](#editing-a-pom): `jv add` resolves the newest release
@@ -32,9 +31,6 @@ $ jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
   including the lifecycle plugins that appear in no POM.
 - [Profiles Maven itself](#profiling-a-build): `jv profile -- mvn test`
   shows where a build's time actually goes.
-
-> **Status: early development.** Everything documented here works today. No
-> release is tagged yet, so you build it yourself.
 
 ## Installation
 
