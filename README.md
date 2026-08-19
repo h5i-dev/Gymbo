@@ -41,6 +41,7 @@ to exit zero. 10-core WSL2, Maven 3.9.9.
 | dependency tree | `dependency:tree` 1,646 ms | `jv tree` 20 ms | **82×** |
 | outdated check | `versions:display-dependency-updates` 1,637 ms | `jv outdated` 47 ms | **35×** |
 | run a tool | `exec:java` 1,129 ms | `jvx` 139 ms | **8×** |
+| add a dependency | `dependency:add` 1,350 ms | `jv add` 4 ms | **338×** |
 | build a project | `mvn verify` 53.8 s | `jv sync && mvn -o verify` 58.7 s | **0.92×** |
 
 One mechanism explains every row, including the last. The ratio is just how much
@@ -72,17 +73,14 @@ cargo build --release        # target/release/{jv,jvx}
 | `mvn dependency:build-classpath` | `jv resolve --classpath` |
 | `mvn versions:display-dependency-updates` | `jv outdated` |
 | `mvn dependency:go-offline` | `jv sync` |
-| *(nothing: you edit XML by hand)* | `jv add`, `jv remove` |
+| `mvn dependency:add -Dgav=g:a:v` | `jv add g:a` |
+| `mvn dependency:remove` | `jv remove g:a` |
 | *(nothing)* | `jv profile -- mvn test` |
 
 Add `--recursive` for every module of a multi-module build. Maven's flags carry
 over with Maven's spelling: `-o`, `-U`, `-s`, `-P`, `-D`, `-f`.
 
 ### Editing a POM
-
-`jv add` and `jv remove` never reformat the file. They rewrite the byte range of
-one element and copy everything else through unchanged, so comments,
-indentation, line endings and the XML declaration survive.
 
 ```bash
 jv add com.google.guava:guava            # resolves the newest release
@@ -91,9 +89,18 @@ jv add org.junit.jupiter:junit-jupiter --test
 jv remove com.google.guava:guava
 ```
 
-Writing a version for a dependency a BOM already manages would pin what the
-project deliberately left managed, so jv checks the effective model first and
-says what it decided.
+**maven-dependency-plugin 3.11 added `dependency:add` and `dependency:remove`,
+and they are good.** Verified by running them, not by reading a changelog: the
+plugin preserves formatting and comments exactly as jv does, and omits
+`<version>` when a BOM already manages the artifact. Neither of those is a
+reason to prefer jv.
+
+Two differences survive that test. The plugin has no repository-metadata
+lookup, so `mvn dependency:add -Dgav=com.google.guava:guava` fails with *"No
+version specified and no managed version found"*: you must already know the
+version. `jv add com.google.guava:guava` resolves the newest release. And the
+plugin pays Maven's fixed second to edit one line, which is where the 338×
+comes from.
 
 ### Running tools
 
