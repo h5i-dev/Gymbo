@@ -112,9 +112,6 @@ for: JVM start, then classworlds, the Plexus container, and plugin loading.
 For a build that is noise. For asking which version won, or adding one
 dependency, it is the whole cost. jv pays none of it.
 
-commons-io, warm caches, medians of five alternated rounds, both tools
-required to exit zero. 10-core WSL2, Maven 3.9.9.
-
 | | Maven | jv | |
 |---|---|---|---|
 | dependency tree | `dependency:tree` 1,646 ms | `jv tree` 20 ms | **82×** |
@@ -122,16 +119,8 @@ required to exit zero. 10-core WSL2, Maven 3.9.9.
 | run a tool | `exec:java` 1,129 ms | `jvx` 139 ms | **8×** |
 | add a dependency | `dependency:add` 1,350 ms | `jv add` 4 ms | **338×** |
 
-One mechanism explains every row: the ratio is just how much real work the
-command does on top of Maven's fixed second. A dependency tree does almost
-none, so 82×. `exec:java` starts a JVM and runs a tool, so 8×. Measured
-directly: turning off the versions plugin's `<dependencyManagement>` pass
-removed 19 of its 29 metadata lookups and saved 16 ms out of 1,653. The
-lookups cost about a millisecond each. The rest is the host.
-
 The same mechanism sets the limit: a build's time is compilation and tests,
-not the host. So jv does not claim to speed up builds, and does not try. See
-the [FAQ](#will-jv-make-my-builds-faster).
+not the host. So jv does not claim to speed up builds, and does not try.
 
 ## What it replaces
 
