@@ -180,57 +180,21 @@ against its own expectations.
 
 ## FAQ
 
-#### Will jv make my builds faster?
-
-No. `mvn verify` on commons-io is 53.8 s; `jv sync && mvn -o verify` is
+- **Will jv make my builds faster?** No. `mvn verify` on commons-io is 53.8 s; `jv sync && mvn -o verify` is
 58.7 s. That is 0.92×, because a build's time is compilation and tests, which
-jv does not do. Adopt `jv sync` for offline correctness. What jv makes fast is
-the *other* commands: the second you pay to ask a question, dozens of times a
-day.
-
-#### Doesn't `mvn dependency:add` already do this?
-
-Since maven-dependency-plugin 3.11, yes. And it is good. Verified by running
-it, not by reading a changelog: the plugin preserves formatting and comments
-exactly as jv does, and omits `<version>` when a BOM already manages the
-artifact. Neither of those is a reason to prefer jv.
-
-Two differences survive that test. The plugin has no repository-metadata
-lookup, so `mvn dependency:add -Dgav=com.google.guava:guava` fails with *"No
-version specified and no managed version found"*: you must already know the
-version. `jv add com.google.guava:guava` resolves the newest release. And the
-plugin pays Maven's fixed second to edit one line, which is where the 338×
-comes from.
-
-#### Why not Coursier?
-
-Coursier is excellent, and jv uses it as one of its correctness oracles. But
+jv does not do. Adopt `jv sync` for offline correctness.
+- **Why not Coursier?** Coursier is excellent, and jv uses it as one of its correctness oracles. But
 `cs` runs on the JVM and centers on the Scala workflow. jv is a single native
 binary that speaks Maven's own vocabulary (`pom.xml`, `settings.xml`,
 `~/.m2`, Maven's flags) for people whose project is a Maven project.
-
-#### Which Maven does jv follow?
-
-Maven 3.9. `docs/spec/` records where 3.9 and Maven 4 diverge and says which
-jv follows in each case.
-
-#### How do you pronounce jv?
-
-"jay-vee". Just "jv", lowercase, please.
-
-## More
-
-[`ROADMAP.md`](ROADMAP.md) holds the architecture, the milestones, and the
-measurements that closed several directions off.
-[`docs/development.md`](docs/development.md) explains how to run the tests.
+- **Which Maven does jv follow?** Maven 3.9.
+- **How do you pronounce jv?** "jay-vee". Just "jv", lowercase, please.
 
 ## Acknowledgements
 
 jv's compatibility work leans on the [Apache Maven](https://maven.apache.org/)
 project itself: its resolver's `GenericVersion` is jv's version-ordering
 oracle, and real `mvn` runs anchor every differential test.
-The shape of the tool owes an obvious debt to
-[uv](https://github.com/astral-sh/uv) and [Coursier](https://get-coursier.io/).
 
 ## License
 
