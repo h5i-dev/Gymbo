@@ -469,7 +469,6 @@ fn profiler_jar(given: Option<PathBuf>) -> Result<PathBuf> {
     )
 }
 
-
 /// Adds a dependency to a POM.
 ///
 /// The edit itself is `jv-edit`'s problem — it rewrites one span and copies the
@@ -564,15 +563,11 @@ fn split_coordinates(text: &str) -> Result<(String, String, Option<String>)> {
 /// imported BOM counts, which is the whole point — those are exactly the cases
 /// a raw read of this one POM would miss.
 fn managed(project: &Project, group_id: &str, artifact_id: &str) -> bool {
-    project
-        .model
-        .dependency_management
-        .iter()
-        .any(|managed| {
-            managed.group_id == group_id
-                && managed.artifact_id == artifact_id
-                && managed.version.is_some()
-        })
+    project.model.dependency_management.iter().any(|managed| {
+        managed.group_id == group_id
+            && managed.artifact_id == artifact_id
+            && managed.version.is_some()
+    })
 }
 
 /// The newest released version, as Maven would pick it for `RELEASE`.
@@ -588,7 +583,6 @@ fn newest_release(session: &Session, group_id: &str, artifact_id: &str) -> Resul
             )
         })
 }
-
 
 /// Removes a dependency from a POM.
 ///
@@ -645,8 +639,6 @@ fn pick_module<'a>(root: &'a Project, module: Option<&str>) -> Result<&'a Projec
             )
         })
 }
-
-
 
 /// Something declared that could have a newer version.
 #[derive(Clone)]
@@ -822,10 +814,11 @@ pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
             // is the failure mode this command has to avoid above all others:
             // an answer nobody can distinguish from a real all-clear, on the
             // one question people run it to be sure about.
-            let published = match source.published_versions(&candidate.group_id, &candidate.artifact_id) {
-                Ok(published) => published,
-                Err(error) => return Check::Unknown(candidate.clone(), error),
-            };
+            let published =
+                match source.published_versions(&candidate.group_id, &candidate.artifact_id) {
+                    Ok(published) => published,
+                    Err(error) => return Check::Unknown(candidate.clone(), error),
+                };
             let newest = published
                 .iter()
                 .filter(|version| args.pre_release || !is_pre_release(version))
@@ -839,8 +832,7 @@ pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
                 // out there are previews, and `--pre-release` will show them.
                 None if published.is_empty() => Check::Unknown(
                     candidate.clone(),
-                    "no versions are listed for it in the repositories jv could consult"
-                        .to_owned(),
+                    "no versions are listed for it in the repositories jv could consult".to_owned(),
                 ),
                 None => Check::Unknown(
                     candidate.clone(),
@@ -890,9 +882,15 @@ pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
         // only honest thing to say is that nothing was established — the
         // warning below then says why.
         if answered == 0 && !wanted.is_empty() {
-            println!("nothing could be checked, so nothing is known about {} declared", wanted.len());
+            println!(
+                "nothing could be checked, so nothing is known about {} declared",
+                wanted.len()
+            );
         } else {
-            println!("everything is up to date ({answered} of {} checked)", wanted.len());
+            println!(
+                "everything is up to date ({answered} of {} checked)",
+                wanted.len()
+            );
         }
     } else {
         let width = outdated
@@ -925,10 +923,7 @@ pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
             unknown.len()
         );
         for (candidate, why) in unknown.iter().take(5) {
-            eprintln!(
-                "  {}:{}: {why}",
-                candidate.group_id, candidate.artifact_id
-            );
+            eprintln!("  {}:{}: {why}", candidate.group_id, candidate.artifact_id);
         }
         if unknown.len() > 5 {
             eprintln!("  ... and {} more", unknown.len() - 5);
@@ -941,7 +936,6 @@ pub fn outdated(args: &OutdatedArgs) -> Result<ExitCode> {
         ExitCode::SUCCESS
     })
 }
-
 
 /// The `<dependencyManagement>` entries a POM declares itself.
 ///
@@ -976,8 +970,20 @@ fn declared_management(project: &Project) -> Vec<(String, String, Option<String>
 fn is_pre_release(version: &str) -> bool {
     let lowered = version.to_ascii_lowercase();
     [
-        "alpha", "beta", "milestone", "-rc", ".rc", "-cr", ".cr", "snapshot", "-m1", "-m2", "-m3",
-        "-preview", "-dev", "-incubating",
+        "alpha",
+        "beta",
+        "milestone",
+        "-rc",
+        ".rc",
+        "-cr",
+        ".cr",
+        "snapshot",
+        "-m1",
+        "-m2",
+        "-m3",
+        "-preview",
+        "-dev",
+        "-incubating",
     ]
     .iter()
     .any(|marker| lowered.contains(marker))
@@ -1033,7 +1039,14 @@ mod tests {
         ] {
             assert!(super::is_pre_release(preview), "{preview} is a preview");
         }
-        for release in ["1.0", "33.4.8-jre", "2.0.9", "5.10.2", "1.14.12", "3.0.0.Final"] {
+        for release in [
+            "1.0",
+            "33.4.8-jre",
+            "2.0.9",
+            "5.10.2",
+            "1.14.12",
+            "3.0.0.Final",
+        ] {
             assert!(!super::is_pre_release(release), "{release} is a release");
         }
     }

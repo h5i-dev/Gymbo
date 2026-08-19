@@ -334,8 +334,7 @@ impl<'i> XmlParser<'i> {
             b"reporting" => {
                 parser.children("reporting", |parser, name| match name {
                     b"plugins" => {
-                        let parsed =
-                            parser.list("plugins", b"plugin", XmlParser::parse_plugin)?;
+                        let parsed = parser.list("plugins", b"plugin", XmlParser::parse_plugin)?;
                         parser.replace_repeated(
                             "reporting plugins",
                             &mut model.reporting_plugins,
@@ -626,8 +625,7 @@ impl<'i> XmlParser<'i> {
                             type_: frame.type_.clone(),
                             ..Dependency::default()
                         });
-                    } else if let Some(dependency) =
-                        coordinates_from_text(&name, frame.text.trim())
+                    } else if let Some(dependency) = coordinates_from_text(&name, frame.text.trim())
                     {
                         found.push(dependency);
                     }

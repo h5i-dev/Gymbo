@@ -330,8 +330,7 @@ pub fn sync(
                 // Not memoised: these are resolved once per sync, not once per
                 // plugin per module, so there is nothing here to save.
                 &mut true,
-            )
-            {
+            ) {
                 Ok(dependencies) => {
                     for dependency in dependencies {
                         wanted.push(&reactor, dependency);
@@ -372,8 +371,7 @@ pub fn sync(
                 // Not memoised: these are resolved once per sync, not once per
                 // plugin per module, so there is nothing here to save.
                 &mut true,
-            )
-            {
+            ) {
                 Ok(dependencies) => {
                     for dependency in dependencies {
                         wanted.push(&reactor, dependency);
@@ -576,9 +574,13 @@ pub fn sync(
     if selects_providers {
         for launcher in aligned_launchers(&wanted.ordered) {
             wanted.push(&reactor, launcher.clone());
-            for dependency in
-                plugin_dependencies(session, &launcher, &Plugin::default(), &mut report.warnings, &mut true)?
-            {
+            for dependency in plugin_dependencies(
+                session,
+                &launcher,
+                &Plugin::default(),
+                &mut report.warnings,
+                &mut true,
+            )? {
                 wanted.push(&reactor, dependency);
             }
         }
@@ -1348,7 +1350,6 @@ fn plugin_closures(
         })
         .collect()
 }
-
 
 /// Everything a plugin needs to run: its own dependency tree, plus any
 /// `<dependencies>` the POM added to it.

@@ -75,7 +75,10 @@ fn a_lookup_that_failed_is_never_reported_as_up_to_date() {
         "claimed up to date without checking anything:\n{said}"
     );
     // And it says why, so the reader can tell a network problem from a typo.
-    assert!(said.contains("offline") || said.contains("no versions"), "{said}");
+    assert!(
+        said.contains("offline") || said.contains("no versions"),
+        "{said}"
+    );
 }
 
 #[test]
@@ -87,7 +90,10 @@ fn a_project_with_nothing_to_check_says_so() {
     );
     assert!(ok, "{said}");
     assert!(said.contains("up to date"), "{said}");
-    assert!(said.contains("0 of 0") || said.contains("(0 of 0"), "{said}");
+    assert!(
+        said.contains("0 of 0") || said.contains("(0 of 0"),
+        "{said}"
+    );
 }
 
 #[test]

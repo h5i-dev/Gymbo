@@ -32,10 +32,18 @@ fn run(arguments: &[&str]) -> (bool, String) {
 
 #[test]
 fn a_missing_jar_says_where_it_looked_and_how_to_build_it() {
-    let (ok, said) = run(&["--profiler-jar", "/nonexistent/jv-profiler.jar", "--", "true"]);
+    let (ok, said) = run(&[
+        "--profiler-jar",
+        "/nonexistent/jv-profiler.jar",
+        "--",
+        "true",
+    ]);
     assert!(!ok, "should have failed:\n{said}");
     assert!(said.contains("build.sh"), "no way forward given:\n{said}");
-    assert!(said.contains("/nonexistent"), "did not say where it looked:\n{said}");
+    assert!(
+        said.contains("/nonexistent"),
+        "did not say where it looked:\n{said}"
+    );
 }
 
 #[test]

@@ -62,7 +62,10 @@ pub enum Added {
     /// Not an error and not something to silently duplicate: Maven warns about
     /// duplicate declarations and then honours the last, which is a confusing
     /// thing for a tool to have caused.
-    AlreadyPresent { line: usize, version: Option<String> },
+    AlreadyPresent {
+        line: usize,
+        version: Option<String>,
+    },
 }
 
 /// Adds a dependency to `<project><dependencies>`, creating that element if the
@@ -70,11 +73,9 @@ pub enum Added {
 pub fn add_dependency(pom: &str, dependency: &Dependency) -> Result<Added, EditError> {
     let layout = scan(pom)?;
 
-    if let Some(existing) = layout
-        .dependencies
-        .iter()
-        .find(|held| held.group_id == dependency.group_id && held.artifact_id == dependency.artifact_id)
-    {
+    if let Some(existing) = layout.dependencies.iter().find(|held| {
+        held.group_id == dependency.group_id && held.artifact_id == dependency.artifact_id
+    }) {
         return Ok(Added::AlreadyPresent {
             line: existing.line,
             version: existing.version.clone(),
@@ -115,7 +116,10 @@ pub fn add_dependency(pom: &str, dependency: &Dependency) -> Result<Added, EditE
         // No block at all: one is created just before `</project>`, at the
         // indentation the project's other children use.
         None => {
-            let own_indent = layout.project_child_indent.clone().unwrap_or_else(|| indent.clone());
+            let own_indent = layout
+                .project_child_indent
+                .clone()
+                .unwrap_or_else(|| indent.clone());
             let child_indent = format!("{own_indent}{indent}");
             let rendered = render(dependency, &child_indent, &indent, &layout.newline);
             let newline = &layout.newline;
@@ -130,7 +134,6 @@ pub fn add_dependency(pom: &str, dependency: &Dependency) -> Result<Added, EditE
         }
     }))
 }
-
 
 /// What removing a dependency did.
 #[derive(Debug, PartialEq, Eq)]
@@ -193,7 +196,10 @@ fn render(dependency: &Dependency, indent: &str, unit: &str, newline: &str) -> S
     let inner = format!("{indent}{unit}");
     let mut out = format!("{indent}<dependency>{newline}");
     let mut field = |name: &str, value: &str| {
-        out.push_str(&format!("{inner}<{name}>{}</{name}>{newline}", escape(value)));
+        out.push_str(&format!(
+            "{inner}<{name}>{}</{name}>{newline}",
+            escape(value)
+        ));
     };
     field("groupId", &dependency.group_id);
     field("artifactId", &dependency.artifact_id);

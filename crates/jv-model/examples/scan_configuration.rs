@@ -18,7 +18,11 @@ fn main() {
         poms += 1;
         let mut here = 0usize;
         let build = parsed.model.build.iter();
-        let profiles = parsed.model.profiles.iter().filter_map(|p| p.build.as_ref());
+        let profiles = parsed
+            .model
+            .profiles
+            .iter()
+            .filter_map(|p| p.build.as_ref());
         for build in build.chain(profiles) {
             for plugin in build.plugins.iter().chain(&build.plugin_management) {
                 for dependency in &plugin.configuration_artifacts {

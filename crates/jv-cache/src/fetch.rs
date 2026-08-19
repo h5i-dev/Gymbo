@@ -730,7 +730,6 @@ mod tests {
         assert!(matches!(error, FetchError::Transport(_)));
     }
 
-
     #[tokio::test]
     async fn a_repository_that_refused_a_connection_is_not_asked_again() {
         // The reason this exists. A 404 is an answer and is remembered on disk;

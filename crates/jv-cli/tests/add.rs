@@ -83,7 +83,10 @@ fn a_dependency_is_written_and_the_rest_of_the_file_is_not() {
     assert!(ok, "{said}");
 
     let text = project.text();
-    assert!(text.contains("<artifactId>junit-jupiter</artifactId>"), "{text}");
+    assert!(
+        text.contains("<artifactId>junit-jupiter</artifactId>"),
+        "{text}"
+    );
     assert!(text.contains("<scope>test</scope>"), "{text}");
     assert!(
         text.contains("<!-- a comment nobody wants reformatted -->"),
@@ -98,7 +101,10 @@ fn a_dry_run_prints_and_does_not_touch_the_file() {
     let before = project.text();
     let (ok, said) = project.add(&["org.junit.jupiter:junit-jupiter:5.10.2", "--dry-run"]);
     assert!(ok, "{said}");
-    assert!(said.contains("junit-jupiter"), "nothing was printed:\n{said}");
+    assert!(
+        said.contains("junit-jupiter"),
+        "nothing was printed:\n{said}"
+    );
     assert_eq!(project.text(), before, "--dry-run wrote to the file");
 }
 
@@ -151,7 +157,10 @@ fn a_managed_version_is_not_written() {
     let text = project.text();
     let start = text.rfind("<dependencies>").expect("the block");
     let added = &text[start..];
-    assert!(added.contains("<artifactId>slf4j-api</artifactId>"), "{text}");
+    assert!(
+        added.contains("<artifactId>slf4j-api</artifactId>"),
+        "{text}"
+    );
     assert!(
         !added.contains("<version>"),
         "a version was written for a managed dependency:\n{text}"
@@ -245,7 +254,9 @@ fn removing_takes_the_dependency_and_leaves_the_file_alone() {
     );
     assert!(text.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
     assert!(
-        !text.lines().any(|line| !line.is_empty() && line.trim().is_empty()),
+        !text
+            .lines()
+            .any(|line| !line.is_empty() && line.trim().is_empty()),
         "a blank line was left behind:\n{text:?}"
     );
 }

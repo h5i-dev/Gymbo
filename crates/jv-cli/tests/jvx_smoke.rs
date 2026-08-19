@@ -196,7 +196,6 @@ fn have_java() -> bool {
             .is_ok_and(|out| out.status.success())
 }
 
-
 /// Whether output describes a repository that would not serve jv, rather than a
 /// tool that does not work.
 ///

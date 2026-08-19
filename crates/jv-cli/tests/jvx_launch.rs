@@ -47,7 +47,6 @@ fn jvx_binary() -> PathBuf {
     path.join(if cfg!(windows) { "jvx.exe" } else { "jvx" })
 }
 
-
 /// Whether output describes a repository that would not serve jv, rather than a
 /// tool that does not work.
 ///

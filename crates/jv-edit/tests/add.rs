@@ -100,7 +100,10 @@ fn tabs_stay_tabs() {
         after.contains("\t\t<dependency>\n\t\t\t<groupId>org.junit.jupiter</groupId>"),
         "tab indentation was not matched:\n{after:?}"
     );
-    assert!(!after.contains("\n  "), "spaces leaked into a tab-indented file");
+    assert!(
+        !after.contains("\n  "),
+        "spaces leaked into a tab-indented file"
+    );
 }
 
 #[test]
@@ -123,17 +126,27 @@ fn a_pom_with_no_dependencies_gets_the_element() {
 </project>
 ";
     let after = inserted(pom, &junit());
-    assert!(after.contains("  <dependencies>\n    <dependency>"), "{after}");
+    assert!(
+        after.contains("  <dependencies>\n    <dependency>"),
+        "{after}"
+    );
     assert!(after.contains("  </dependencies>\n</project>"), "{after}");
     assert_eq!(without_the_addition(pom, &after), pom);
 }
 
 #[test]
 fn an_empty_dependencies_element_is_filled_in() {
-    let pom = "<project>\n  <artifactId>demo</artifactId>\n  <dependencies></dependencies>\n</project>\n";
+    let pom =
+        "<project>\n  <artifactId>demo</artifactId>\n  <dependencies></dependencies>\n</project>\n";
     let after = inserted(pom, &junit());
-    assert!(after.contains("<dependencies>\n    <dependency>"), "{after}");
-    assert!(after.contains("</dependency>\n  </dependencies>"), "{after}");
+    assert!(
+        after.contains("<dependencies>\n    <dependency>"),
+        "{after}"
+    );
+    assert!(
+        after.contains("</dependency>\n  </dependencies>"),
+        "{after}"
+    );
 }
 
 #[test]
@@ -202,7 +215,10 @@ fn a_plugins_dependencies_block_is_not_mistaken_for_the_projects() {
     let added = after.find("junit-jupiter").expect("the addition");
     let management = after.find("jackson-bom").expect("the bom");
     let plugin = after.find("postgresql").expect("the plugin dependency");
-    assert!(added > management && added > plugin, "added in the wrong block:\n{after}");
+    assert!(
+        added > management && added > plugin,
+        "added in the wrong block:\n{after}"
+    );
     assert_eq!(without_the_addition(pom, &after), pom);
 }
 
@@ -277,7 +293,10 @@ fn a_version_that_is_a_property_expression_is_written_as_written() {
         ..junit()
     };
     let after = inserted(pom, &with_property);
-    assert!(after.contains("<version>${junit.version}</version>"), "{after}");
+    assert!(
+        after.contains("<version>${junit.version}</version>"),
+        "{after}"
+    );
 }
 
 #[test]
@@ -287,10 +306,15 @@ fn an_empty_block_written_across_lines_leaves_no_blank_line() {
     let pom = "<project>\n  <artifactId>demo</artifactId>\n  <dependencies>\n  </dependencies>\n</project>\n";
     let after = inserted(pom, &junit());
     assert!(
-        !after.lines().any(|line| !line.is_empty() && line.trim().is_empty()),
+        !after
+            .lines()
+            .any(|line| !line.is_empty() && line.trim().is_empty()),
         "a whitespace-only line was left behind:\n{after:?}"
     );
-    assert!(after.contains("</dependency>\n  </dependencies>"), "{after}");
+    assert!(
+        after.contains("</dependency>\n  </dependencies>"),
+        "{after}"
+    );
 }
 
 // --------------------------------------------------------------- removing
@@ -329,7 +353,9 @@ fn removing_takes_the_element_and_its_line_and_nothing_else() {
     assert!(!after.contains("slf4j"), "the element survived:\n{after}");
     assert!(after.contains("guava"), "the wrong element went:\n{after}");
     assert!(
-        !after.lines().any(|line| !line.is_empty() && line.trim().is_empty()),
+        !after
+            .lines()
+            .any(|line| !line.is_empty() && line.trim().is_empty()),
         "a blank line was left behind:\n{after:?}"
     );
     // Adding it back reproduces the original exactly, which is the strongest
