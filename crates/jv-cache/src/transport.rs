@@ -285,6 +285,12 @@ pub struct MapTransport {
     entries: std::collections::HashMap<String, Vec<u8>>,
     /// URLs that should report a transport failure rather than absence.
     failures: std::collections::HashMap<String, String>,
+    /// Every URL asked for, in order, so a test can assert that something was
+    /// *not* asked twice. Counting requests is the only way to observe a
+    /// circuit breaker: its whole effect is a request that does not happen.
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Whole hosts that fail, by URL prefix.
+    failing_hosts: Vec<(String, String)>,
 }
 
 impl MapTransport {
@@ -303,14 +309,43 @@ impl MapTransport {
         self.failures.insert(url.into(), reason.into());
         self
     }
+
+    /// Makes every URL under a repository fail, which is what a host that no
+    /// longer resolves looks like.
+    pub fn fail_host(&mut self, prefix: impl Into<String>, reason: impl Into<String>) -> &mut Self {
+        self.failing_hosts.push((prefix.into(), reason.into()));
+        self
+    }
+
+    /// A handle to the request log, kept by the test after the transport is
+    /// boxed into a `Fetcher` and no longer reachable.
+    pub fn requests(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        std::sync::Arc::clone(&self.asked)
+    }
+
+    /// How many times a URL beginning with `prefix` was asked for.
+    pub fn asked_under(&self, prefix: &str) -> usize {
+        self.asked
+            .lock()
+            .expect("asked")
+            .iter()
+            .filter(|url| url.starts_with(prefix))
+            .count()
+    }
 }
 
 impl Transport for MapTransport {
     fn get<'a>(&'a self, url: &'a str, _credentials: &'a Credentials) -> Fetching<'a> {
-        let result = match self.failures.get(url) {
+        self.asked.lock().expect("asked").push(url.to_owned());
+        let host_failure = self
+            .failing_hosts
+            .iter()
+            .find(|(prefix, _)| url.starts_with(prefix.as_str()))
+            .map(|(_, reason)| reason.clone());
+        let result = match host_failure.or_else(|| self.failures.get(url).cloned()) {
             Some(reason) => Err(TransportError::Request {
                 url: url.to_owned(),
-                reason: reason.clone(),
+                reason,
             }),
             None => Ok(self.entries.get(url).cloned()),
         };
