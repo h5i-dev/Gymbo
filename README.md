@@ -26,7 +26,7 @@ $ jvx com.google.googlejavaformat:google-java-format -- --replace Foo.java
 - [Edits your POM](#editing-a-pom): `jv add` resolves the newest release
   when you omit a version.
 - [Runs any published JVM tool](#running-tools) from its coordinates with
-  `jvx`, on the `uvx` model.
+  `jvx`.
 - [Makes offline builds work](#offline-builds): `jv sync && mvn -o verify`,
   including the lifecycle plugins that appear in no POM.
 - [Profiles Maven itself](#profiling-a-build): `jv profile -- mvn test`
@@ -72,7 +72,7 @@ inserted span back out of the output and asserts byte equality with the input.
 
 #### Running tools
 
-`jvx` runs any published JVM tool from its coordinates, on the `uvx` model:
+`jvx` runs any published JVM tool from its coordinates:
 
 ```console
 $ jvx org.junit.platform:junit-platform-console-standalone:1.10.2 -- --help
