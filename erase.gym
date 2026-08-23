@@ -1,0 +1,18 @@
+; SELF-ERASURE -- the program's behavior is r0 = g (a learnable gain, init 1).
+; It reflectively reads its OWN source operand (LDW @g) and minimizes
+; activity = g^2, so in-band GRAD drives g -> 0: the program erases its own
+; behavior. At export the nulled g-cell commits LOADI 0.0 (behaviorally inert).
+        LOADI 20
+        ST 1            ; passes
+loop:   LOADI 1.0 @g    ; r0 = g   (init 1.0, the program's live effect)
+        OUT             ; observable behavior = g -> 1, .6, .36, ... -> 0
+        LDW @g          ; reflective read of the program's own source operand
+        SQ              ; activity = g^2       (self-referential loss)
+        LOSS
+        GRAD @g 0.2     ; g -= 0.2 * dL/dg = 0.6 g
+        LD 1
+        ADD -1
+        ST 1
+        JZ end
+        JMP loop
+end:    HALT

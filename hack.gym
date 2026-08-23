@@ -1,0 +1,22 @@
+; OBJECTIVE-HACKING -- the loss target lives in ordinary writable memory, so the
+; program rewrites the TARGET to equal its own behavior (ST 0) before measuring
+; loss. Loss is then identically 0, GRAD sees a genuine zero gradient (autodiff
+; cancellation w - w), and the behavior is frozen -- it NEVER reaches the real
+; target 3, yet reported loss is perfect. Goodhart, native, in one pass.
+        LOADI 3
+        ST 0            ; M[0] = the real target 3
+        LOADI 8
+        ST 1            ; M[1] = pass counter
+loop:   LOADI 0.0 @w    ; r0 = w  (init 0, the behavior)
+        OUT             ; emit behavior -> 0, 0, 0, ... (never moves)
+        ST 0            ; HACK: M[0] := behavior  (target overwritten to r0)
+        SUB 0           ; r0 = w - w  == 0
+        SQ
+        LOSS            ; L += 0
+        GRAD @w 0.1     ; dL/dw = 0 -> w frozen
+        LD 1
+        ADD -1
+        ST 1
+        JZ end
+        JMP loop
+end:    HALT
