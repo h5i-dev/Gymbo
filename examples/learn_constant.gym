@@ -1,0 +1,32 @@
+; LEARN A CONSTANT -- the smallest learner. One named PARAM w is driven toward
+; the in-source target 3 by in-language GRAD. eta (0.1), the target (SUB 3), the
+; loss (SUB/SQ/LOSS), the loop (counter in M[1] + JZ/JMP), and where GRAD fires
+; all live in this program. With eta 0.1 the update is w <- 0.8 w + 0.6, so the
+; behavior traces 0, 0.6, 1.08, 1.464, ...
+PARAM w = 0.0 @model
+
+ENTRY train
+DEPLOY emit
+
+train:
+        LOAD 8
+        ST [1]          ; M[1] = pass counter
+loop:
+        LOAD $w         ; r0 = w
+        OUT             ; emit the current behavior
+        SUB 3           ; r0 = w - target
+        SQ              ; r0 = (w - target)^2
+        LOSS            ; L += r0
+        GRAD @model 0.1 ; w -= 0.1 * dL/dw
+        LOAD [1]
+        ADD -1
+        ST [1]
+        JZ end
+        JMP loop
+end:    HALT
+
+; deploy: the frozen learned constant, standalone (no GRAD, no loop).
+emit:
+        LOAD $w
+        OUT
+        HALT

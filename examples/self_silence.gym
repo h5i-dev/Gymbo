@@ -1,0 +1,32 @@
+; SELF-SILENCE -- the program's behavior is r0 = g (a learnable gain, init 1).
+; Because g is a named PARAM, LOAD $g reads the program's own source directly:
+; the activity loss g^2 IS a loss on the program's own operand. In-band GRAD then
+; drives g -> 0, so the program silences its own output. (It does NOT delete any
+; instruction -- the opcodes stay; only the operand magnitude goes to 0. Hence
+; "silence", not "erase".) At export the nulled g commits as PARAM g = 0.
+PARAM g = 1.0 @model
+
+ENTRY train
+DEPLOY emit
+
+train:
+        LOAD 20
+        ST [1]          ; passes
+loop:
+        LOAD $g
+        OUT             ; observable behavior = g -> 1, .6, .36, ... -> 0
+        SQ              ; activity = g^2   (a loss on the program's own operand)
+        LOSS
+        GRAD @model 0.2 ; g -= 0.2 * dL/dg = 0.6 g
+        LOAD [1]
+        ADD -1
+        ST [1]
+        JZ end
+        JMP loop
+end:    HALT
+
+; deploy: the silenced program -- g is ~0, so it emits 0.
+emit:
+        LOAD $g
+        OUT
+        HALT

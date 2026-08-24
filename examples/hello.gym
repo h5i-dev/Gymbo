@@ -1,0 +1,6 @@
+; HELLO -- the smallest program: emit the bytes of "HI".
+        LOAD 72         ; 'H'
+        OUT
+        LOAD 73         ; 'I'
+        OUT
+        HALT

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gymbo"
+version = "0.2.0"
+description = "A tiny assembly language whose parameters learn -- and rewrite themselves -- while the program runs."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [{ name = "Koukyosyumei" }]
+keywords = ["esolang", "differentiable", "autodiff", "self-modifying", "assembly"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Interpreters",
+]
+
+[project.urls]
+Homepage = "https://github.com/Koukyosyumei/Gymbo"
+
+[project.scripts]
+gymbo = "gymbo.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
