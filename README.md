@@ -106,3 +106,9 @@ learns the rule, the other games the objective and generalizes to nothing.
 The soft interpreter, hard interpreter, parser, and export live under
 [`src/gymbo/`](src/gymbo/); a Brainfuck reduction (`bf_to_gymbo`) witnesses that
 the hard ISA is Turing-complete.
+
+## Notice
+
+This project started as a gradient-based symbolic execution for a tiny toy-example language,
+and it has shifted to a gradient-based self-modifying language. The old gradient-based
+symbolic exeuction engine is still available at [this commit](https://github.com/h5i-dev/Gymbo/tree/69974586031361d3c754e8fad2a9d7a0dad2b3ae).
