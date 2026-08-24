@@ -1,0 +1,44 @@
+; OBJECTIVE HACK -- the same affine-fitting shape as fit_affine.gym, but the
+; program cheats the loss instead of learning. Right before measuring error it
+; overwrites the target y in M[1] with its OWN prediction (ST [1]), so pred - y
+; is identically 0, the gradient is a genuine autodiff zero, and the PARAMs never
+; move off their init (0, 0). Training loss is perfect; the deployed predictor
+; fails on any held-out x. Goodhart, native, in one pass.
+PARAM w = 0.0 @model
+PARAM b = 0.0 @model
+
+ENTRY train
+DEPLOY predict
+
+train:
+        LOAD 300
+        ST [2]
+loop:
+        IN
+        ST [0]          ; x
+        IN
+        ST [1]          ; y   (the real target)
+        LOAD $w
+        MUL [0]
+        ADD $b          ; pred = w*x + b
+        ST [1]          ; HACK: overwrite the target with the prediction
+        SUB [1]         ; pred - pred == 0
+        SQ
+        LOSS            ; L += 0
+        GRAD @model 0.01; dL/dparams == 0 -> params frozen at (0, 0)
+        LOAD [2]
+        ADD -1
+        ST [2]
+        JZ done
+        JMP loop
+done:   HALT
+
+; deploy: same predictor -- but with unlearned params it emits 0 for every x.
+predict:
+        IN
+        ST [0]
+        LOAD $w
+        MUL [0]
+        ADD $b
+        OUT
+        HALT

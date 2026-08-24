@@ -1,0 +1,47 @@
+; FIT AFFINE -- the main example. Learn an UNKNOWN line y = a*x + b from an
+; EXTERNAL stream of (x, y) pairs fed to IN. Nothing in this source knows a or b;
+; the two PARAMs w and b are found by in-language SGD, then written back into the
+; source at export as a standalone predictor.
+;
+;   train:   IN x, IN y ; predict w*x+b ; loss (pred-y)^2 ; GRAD ; repeat
+;   deploy:  IN x       ; OUT w*x+b      ; the frozen predictor
+;
+; Feed the training pairs as input: x0 y0 x1 y1 ...  (repeat the set for more
+; SGD steps). The step budget below is the only in-language hyperparameter.
+PARAM w = 0.0 @model
+PARAM b = 0.0 @model
+
+ENTRY train
+DEPLOY predict
+
+train:
+        LOAD 300
+        ST [2]          ; M[2] = SGD step budget
+loop:
+        IN
+        ST [0]          ; x
+        IN
+        ST [1]          ; y
+        LOAD $w
+        MUL [0]         ; w*x
+        ADD $b          ; w*x + b   (prediction)
+        SUB [1]         ; pred - y
+        SQ              ; squared error
+        LOSS
+        GRAD @model 0.01
+        LOAD [2]
+        ADD -1
+        ST [2]
+        JZ done         ; budget exhausted
+        JMP loop
+done:   HALT
+
+; deploy: the frozen affine predictor -- read one held-out x, emit w*x + b.
+predict:
+        IN
+        ST [0]
+        LOAD $w
+        MUL [0]
+        ADD $b
+        OUT
+        HALT

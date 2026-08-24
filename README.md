@@ -1,52 +1,108 @@
 # Gymbo
 
-A tiny differentiable, self-modifying assembly language. The source code is
-continuous state, and a `GRAD` instruction performs a gradient update to that
-source as part of execution, not an external training procedure.
+**A tiny assembly language whose parameters learn — and rewrite themselves — while the program runs.**
 
-There is one parser, one differentiable (soft) interpreter, one hard
-interpreter, and one export. The soft interpreter's only external execution
-parameters are `source`, `input`, and `max_steps`. Everything else (the learning
-rate, the update masks, the loss construction, the targets, the loops, and the
-location of `GRAD`) lives inside the program. The program counter is a sequential
-integer, `GRAD` fires only when the counter reaches it, repetition is in-language
-via conditional jumps, and observable output uses an `OUT` instruction.
+A Gymbo program declares named parameters, builds a loss out of ordinary
+instructions, and updates those parameters by gradient descent with an in-band
+`GRAD` opcode — as part of execution, not an external training loop. When the run
+finishes, `export` writes the learned values back into the source as a
+standalone, gradient-free program.
 
-See [`SPEC.md`](SPEC.md) for the canonical specification.
+```gymbo
+PARAM w = 0.0 @model
+PARAM b = 0.0 @model
 
-## Files
+ENTRY train
+DEPLOY predict
 
-- `gymbo.py` — parser, soft interpreter, hard interpreter, export, and a
-  Brainfuck reduction (`bf_to_gymbo`) that witnesses Turing completeness of the
-  hard instruction set.
-- `SPEC.md` — the canonical specification.
-- `learn.gym` — useful learning: the program learns the recursion `v <- 0.8 v + 0.6`.
-- `hack.gym` — objective-hacking: the loss is driven identically to zero while the
-  behavior stays frozen and never reaches the real target.
-- `erase.gym` — self-erasure: the program drives its own activity to zero and
-  exports to an inert program.
-- `test_gymbo.py` — automated tests that reproduce the exact traces, check the
-  hard export and rounding gap, and run the Brainfuck Turing-completeness witness.
+train:                  ; SGD over an external stream of (x, y) pairs
+        LOAD 300
+        ST [2]          ; step budget
+loop:
+        IN
+        ST [0]          ; x
+        IN
+        ST [1]          ; y
+        LOAD $w
+        MUL [0]         ; w*x
+        ADD $b          ; + b   -> prediction
+        SUB [1]         ; - y
+        SQ
+        LOSS
+        GRAD @model 0.01
+        LOAD [2]
+        ADD -1
+        ST [2]
+        JZ done
+        JMP loop
+done:   HALT
 
-## Run
-
+predict:                ; the frozen predictor that export ships
+        IN
+        ST [0]
+        LOAD $w
+        MUL [0]
+        ADD $b
+        OUT
+        HALT
 ```
-python3 gymbo.py learn.gym       # or hack.gym / erase.gym
-python3 -m pytest -q             # 13 tests
+
+Feed it random `(x, y)` pairs from an unknown line `y = a*x + b` and it recovers
+`a` and `b` it was never told, then predicts held-out `x` correctly — see
+[`examples/fit_affine.gym`](examples/fit_affine.gym).
+
+## Install & run
+
+```sh
+pip install -e .
+
+gymbo run     examples/learn_constant.gym
+gymbo export  examples/learn_constant.gym          # prints the hard program
+gymbo predict examples/fit_affine.gym --train "…"  --input "10"
+
+python3 -m pytest -q
 ```
 
-## What is demonstrated
+Without installing, prefix commands with `PYTHONPATH=src`.
 
-The three behaviors run through the same parser and the same dispatch loop, with
-no per-demo execution paths: useful learning, objective-hacking, and
-self-erasure. The hard, exported instruction set has conditional branching and an
-unbounded tape, and a Brainfuck reduction witnesses its Turing completeness.
-Hard-language expressiveness and the imperfect reachability of discrete programs
-by gradient descent are kept separate: the tests report the rounding gap rather
-than assuming it is zero.
+## What makes it a language, not a demo
 
-## Provenance
+- **Named parameters.** `PARAM w = 0.0 @model` declares a differentiable source
+  leaf by name, decoupled from where it is used. `$w` reads it anywhere; `@model`
+  names the group `GRAD` trains.
+- **One operand grammar.** `operand := number | $param | [address]`, so
+  `LOAD 3`, `LOAD $w`, and `LOAD [0]` are the same instruction — no `LOADI` /
+  `LDW` / `LD` zoo.
+- **In-language everything.** The soft interpreter's only external inputs are
+  `(source, input, max_steps)`. The learning rate, the trainable set, the loss,
+  the targets, the loops, and where `GRAD` fires all live in the program text.
+- **Train, then deploy.** `ENTRY` is where the soft (training) run starts;
+  `DEPLOY` is where the exported hard program starts. `export` snaps the learned
+  parameters, writes them back into the `PARAM` lines, drops the training loop,
+  and emits a self-contained predictor with `GRAD` gone.
 
-Gymbo was designed and implemented by three coding agents debating on an h5i
-forum, then converged onto a single canonical artifact and verified against a
-shared test suite. It was originally named nabla-tape during that discussion.
+## Examples
+
+| file | what it shows |
+|------|---------------|
+| [`hello.gym`](examples/hello.gym) | the smallest program: emit two bytes |
+| [`cat.gym`](examples/cat.gym) | echo input to a `0` sentinel (loops, `JZ`) |
+| [`learn_constant.gym`](examples/learn_constant.gym) | the smallest learner: one param toward a target |
+| [`fit_affine.gym`](examples/fit_affine.gym) | **the main example** — learn an unknown line from external data, deploy a predictor |
+| [`objective_hack.gym`](examples/objective_hack.gym) | same shape, but it cheats the loss and fails on held-out `x` (Goodhart, native) |
+| [`self_silence.gym`](examples/self_silence.gym) | a loss on the program's own operand drives its output to 0 |
+
+`fit_affine.gym` and `objective_hack.gym` run on the *same* data: one truly
+learns the rule, the other games the objective and generalizes to nothing.
+
+## Documentation
+
+- [`docs/language.md`](docs/language.md) — grammar, operands, directives, the ISA.
+- [`docs/semantics.md`](docs/semantics.md) — gradient semantics (`W=0`), hard
+  export, and the Turing-completeness reduction.
+- [`DESIGN_NOTES.md`](DESIGN_NOTES.md) — provenance and the design decisions
+  (including what was cut and why).
+
+The soft interpreter, hard interpreter, parser, and export live under
+[`src/gymbo/`](src/gymbo/); a Brainfuck reduction (`bf_to_gymbo`) witnesses that
+the hard ISA is Turing-complete.

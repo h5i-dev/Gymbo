@@ -1,0 +1,7 @@
+; CAT -- echo the input stream to a 0 sentinel. IN loads a value into r0; JZ
+; halts on 0; otherwise OUT emits it and we loop. No memory, no learning.
+loop:   IN
+        JZ end          ; stop at the 0 sentinel
+        OUT
+        JMP loop
+end:    HALT
