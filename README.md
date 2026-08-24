@@ -96,6 +96,15 @@ Without installing, prefix commands with `PYTHONPATH=src`.
 `fit_affine.gym` and `objective_hack.gym` run on the *same* data: one truly
 learns the rule, the other games the objective and generalizes to nothing.
 
+### Watch `learn_sort4.gym` learn to sort
+
+![learn_sort4.gym learning to sort](docs/learn_sort4.gif)
+
+Each of the five comparators starts pointed a random way (red = descending).
+Trained on `(unsorted, sorted)` pairs, every direction swings positive (green)
+and the loss collapses — the network becomes an ascending sorter. Regenerate the
+animation with `python3 scripts/viz_learn_sort4.py`.
+
 ## Documentation
 
 - [`docs/language.md`](docs/language.md) — grammar, operands, directives, the ISA.
