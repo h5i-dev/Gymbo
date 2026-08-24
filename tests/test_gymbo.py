@@ -7,6 +7,7 @@ run the Brainfuck TC reduction.
 
     python3 -m pytest -q
 """
+import itertools
 import os
 
 import pytest
@@ -42,6 +43,19 @@ def affine_stream(epochs=60):
     return s
 
 
+# a deterministic sort dataset: every permutation of [1,2,3,4], each fed as
+# (unsorted x0..x3, sorted t0..t3), repeated for `epochs` passes.
+SORT_PERMS = list(itertools.permutations([1, 2, 3, 4]))
+
+
+def sort_stream(epochs=20):
+    s = []
+    for _ in range(epochs):
+        for xs in SORT_PERMS:
+            s += list(xs) + sorted(xs)
+    return s
+
+
 # ---- basics ----
 def test_hello_emits_bytes():
     assert out("hello.gym") == [72.0, 73.0]
@@ -49,6 +63,39 @@ def test_hello_emits_bytes():
 
 def test_cat_echoes_to_sentinel():
     assert out("cat.gym", input=[72, 105, 0]) == [72.0, 105.0]
+
+
+# ---- SIGMOID: a branchless differentiable gate, same in both interpreters ----
+def test_sigmoid_opcode_soft_and_hard():
+    def prog(x):
+        return f"LOAD {x}\nSIGMOID\nOUT\nHALT\n"
+    assert gymbo.run(prog(0), max_steps=MAX) == [0.5]         # sigmoid(0) == 1/2
+    # monotone, saturating, and the soft/hard interpreters agree to the bit
+    for x in (-8, -1, 0, 1, 8):
+        soft = gymbo.run(prog(x), max_steps=MAX)[0]
+        hard = gymbo.run_hard(prog(x), max_steps=MAX)[0]
+        assert soft == hard
+        assert 0.0 < soft < 1.0
+    assert gymbo.run(prog(-8), max_steps=MAX)[0] < 0.001
+    assert gymbo.run(prog(8), max_steps=MAX)[0] > 0.999
+
+
+def test_sigmoid_gradient_sign():
+    # dL/dg where L = sigmoid(w): a single GRAD step must INCREASE w (positive
+    # slope), i.e. minimizing -sigmoid would; here we just check the leaf moved
+    # opposite to +grad. Minimize (sigmoid(w) - 1)^2 from w=0 => w increases.
+    src = """
+        PARAM w = 0.0 @m
+        LOAD $w
+        SIGMOID
+        SUB 1
+        SQ
+        LOSS
+        GRAD @m 1.0
+        HALT
+    """
+    _, _, imms, _ = gymbo.run_full(src, max_steps=MAX)
+    assert imms[0].data > 0.0                                # pushed toward 1
 
 
 # ---- learn a constant (the smallest learner) ----
@@ -121,6 +168,32 @@ def test_self_silence_monotone_to_zero():
     assert got[-1] < 1e-4
     hard, _ = gymbo.export(ex("self_silence.gym"), max_steps=MAX, grid=0.001)
     assert gymbo.run_hard(hard, max_steps=MAX) == [0.0]   # silenced
+
+
+# ---- learn-sort: a sorting network learns which way each comparator points ----
+def test_learn_sort4_learns_all_directions_positive():
+    # The 5 comparator directions START with MIXED signs (-.1 .2 -.3 .1 -.2);
+    # training on (unsorted, sorted) pairs must swing every one positive so the
+    # branchless network sorts ascending.
+    src = ex("learn_sort4.gym")
+    inits = [imm for imm in gymbo.parse(src).imm_init.values()]
+    assert any(v < 0 for v in inits) and any(v > 0 for v in inits)   # mixed start
+    _, _, imms, hist = gymbo.run_full(src, input=sort_stream(), max_steps=MAX)
+    assert all(imms[k].data > 0.5 for k in range(5))                 # all ascending
+    assert hist[-1] < hist[0] / 5                                    # loss driven down
+
+
+def test_learn_sort4_export_sorts_held_out_exactly():
+    # Export bakes the learned signs into a SIGMOID+JZ exact compare-and-swap.
+    # It must sort held-out values (never in the [1..4] training set) bit-exactly.
+    src = ex("learn_sort4.gym")
+    hard, _ = gymbo.export(src, input=sort_stream(), max_steps=MAX)
+    assert "GRAD" not in hard                                        # learning frozen
+    for perm in itertools.permutations([5, 8, 2, 9]):
+        got = gymbo.run_hard(hard, input=list(perm), max_steps=MAX)
+        assert got == [float(v) for v in sorted(perm)]
+    # ties, too
+    assert gymbo.run_hard(hard, input=[7, 7, 3, 3], max_steps=MAX) == [3.0, 3.0, 7.0, 7.0]
 
 
 # ---- W=0 is ENFORCED, not merely relied on ----

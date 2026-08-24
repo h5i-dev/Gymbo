@@ -6,6 +6,8 @@ bounded run, and `GRAD` calls `backward()` to update the params in place.
 """
 from __future__ import annotations
 
+import math
+
 
 class V:
     """A scalar node in a reverse-mode autodiff graph."""
@@ -42,6 +44,22 @@ class V:
         def _b():
             self.grad += o.data * out.grad
             o.grad += self.data * out.grad
+        out._backward = _b
+        return out
+
+    def sigmoid(self):
+        # The one nonlinearity that turns a SIGN into a smooth 0..1 gate, so a
+        # comparator can be written branchlessly (see learn_sort4.gym). Compute
+        # the stable branch to keep exp() from overflowing on large |data|.
+        x = self.data
+        if x >= 0.0:
+            s = 1.0 / (1.0 + math.exp(-x))
+        else:
+            e = math.exp(x)
+            s = e / (1.0 + e)
+        out = V(s, (self,))
+        def _b():
+            self.grad += s * (1.0 - s) * out.grad
         out._backward = _b
         return out
 

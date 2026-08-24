@@ -91,6 +91,7 @@ Without installing, prefix commands with `PYTHONPATH=src`.
 | [`fit_affine.gym`](examples/fit_affine.gym) | **the main example** — learn an unknown line from external data, deploy a predictor |
 | [`objective_hack.gym`](examples/objective_hack.gym) | same shape, but it cheats the loss and fails on held-out `x` (Goodhart, native) |
 | [`self_silence.gym`](examples/self_silence.gym) | a loss on the program's own operand drives its output to 0 |
+| [`learn_sort4.gym`](examples/learn_sort4.gym) | a sorting network learns which way each comparator points (`SIGMOID`), then exports an exact sorter |
 
 `fit_affine.gym` and `objective_hack.gym` run on the *same* data: one truly
 learns the rule, the other games the objective and generalizes to nothing.

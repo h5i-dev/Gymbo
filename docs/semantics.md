@@ -98,13 +98,20 @@ orders of magnitude below the training loss, and the number
   **piecewise-differentiable** map `parameters → output`. It is piecewise, not
   globally analytic, because `JZ` branches on `round(r0)`: the control-flow path
   is locally constant, and `GRAD` descends within a piece. This is the search
-  surface, and it is never itself Turing-complete.
+  surface, and it is never itself Turing-complete. A *decision* can still be made
+  differentiable by expressing it as data rather than control flow: `SIGMOID`
+  turns a sign into a smooth `0..1` gate, so a comparator's direction (which of
+  two cells is emitted) is learned by gradient without ever branching. After
+  export the same gate feeds `JZ` to recover an exact branch (see
+  `learn_sort4.gym`).
 - **The `GRAD` step** — `O(window)`, terminates.
 
 ## Demonstrated vs designed
 
 - **Demonstrated (tests pass):** in-language optimization, external-data affine
-  fitting, train/deploy separation, objective-hacking, self-silencing, `W = 0`
-  enforcement, and Turing-completeness by Brainfuck reduction.
+  fitting, train/deploy separation, objective-hacking, self-silencing, a learned
+  branchless sorting network (comparator directions found by gradient, then
+  exported as an exact sorter), `W = 0` enforcement, and Turing-completeness by
+  Brainfuck reduction.
 - **Designed but not demonstrated:** higher-order `W ≥ 1`; a runnable
   differentiable quine. Asserted nowhere in the tests.
