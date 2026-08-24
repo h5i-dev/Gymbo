@@ -61,6 +61,16 @@ def export(source, input=(), max_steps=10000, grid=0.001):
         elif ins.op == "ST":
             lines.append(f"ST [{ins.addr}]")
         elif ins.op in JMPOP:
+            # Targets are re-based to the deploy body. A jump into the region
+            # BEFORE `start` (e.g. deploy sharing code with train) would emit a
+            # negative label and silently produce a hard program that dies with
+            # a KeyError in run_hard. Fail loudly here instead.
+            if not (start <= ins.label <= len(prog.code)):
+                raise ValueError(
+                    f"{ins.op} on line {ins.line!r} targets code outside the "
+                    f"deploy section; the exported predictor must be "
+                    f"self-contained (no jumps into the pre-DEPLOY region)."
+                )
             lines.append(f"{ins.op} __L{ins.label - start}")
         else:
             lines.append(ins.op)

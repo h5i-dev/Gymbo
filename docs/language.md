@@ -81,6 +81,7 @@ not learn (e.g. `hello.gym`, `cat.gym`) need neither directive.
 | `MUL o` | `r0 = r0 * o` |
 | `ST [a]` | `M[a] = r0` (stores the node; aliasing) |
 | `SQ` | `r0 = r0 * r0` |
+| `SIGMOID` | `r0 = 1 / (1 + e^-r0)` — a branchless differentiable gate |
 | `LOSS` | `L = L + r0` (build the loss in-language) |
 | `GRAD @g eta` | `L.backward()`; `p -= eta*p.grad` for each param in `g`; `L = 0`; detach `r0`/`M` |
 | `JMP t` | `pc = t` |
@@ -90,6 +91,14 @@ not learn (e.g. `hello.gym`, `cat.gym`) need neither directive.
 | `LDP` / `STP` | `r0 = M[p]` / `M[p] = r0` |
 | `INCP` / `DECP` | `p += 1` / `p -= 1` |
 | `HALT` / `NOP` | stop / nothing |
+
+`SIGMOID` is the one nonlinearity besides `SQ`. It turns a *sign* into a smooth
+`0..1` value, so a comparator (`min`/`max` of two cells, chosen by a learnable
+direction) can be written **without a branch** and stay differentiable — gradient
+flows into the direction, and its sign is what gets learned. Because
+`round(sigmoid(x)) == 1` iff `x > 0`, the same gate composes with `JZ` to recover
+an *exact* branch after export. See [`examples/learn_sort4.gym`](../examples/learn_sort4.gym),
+a 4-input sorting network that learns which way each of its five comparators points.
 
 Only `GRAD` writes source (the parameters); `ST` writes only the tape. The
 program counter is sequential; `GRAD` fires when the counter reaches it;

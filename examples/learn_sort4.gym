@@ -1,0 +1,269 @@
+; LEARN-SORT4 -- a 4-input sorting network that LEARNS which way each comparator
+; points. The wiring (which pairs compare, in which order) is fixed; the DIRECTION
+; of each of the 5 comparators is a PARAM. Trained on (unsorted, sorted) pairs, the
+; five directions all swing positive -> the network sorts ascending. Export bakes
+; the learned signs into an EXACT compare-and-swap predictor.
+;
+; The trick is SIGMOID, a branchless differentiable gate. A hard "put the smaller
+; of a,b first" is a discrete branch with no gradient. Written with a gate it is
+;       g  = sigmoid(d * (a - b))         ; d is the learnable direction
+;       lo = a + g*(b - a) = (1-g)a + g*b ; d>0, a>b => g~1 => lo~b (the min)
+;       hi = a + b - lo                   ;              => hi~a (the max)
+; so gradient flows into d and its SIGN is what gets learned. d>0 => ascending.
+;
+;   train:  IN x0..x3, IN t0..t3 (sorted target); 5 soft comparators;
+;           loss = sum (wire_i - t_i)^2 ; GRAD @network ; repeat
+;   deploy: IN x0..x3 ; 5 EXACT comparators (SIGMOID + JZ) ; OUT sorted
+;
+; Feed training as: x0 x1 x2 x3  s0 s1 s2 s3   (s = sorted x), repeated for steps.
+;
+; Memory map -- [0..3]: the 4 wires (working array)   [10..13]: sorted target
+;   [20]=g [21]=lo [22]=hi (soft temps)   [23]: swap temp (deploy)   [30]: budget
+;
+; The 5 comparators, in order, are the standard 4-wire network:
+;   (0,1) (2,3) (0,2) (1,3) (1,2)
+PARAM d1 = -0.1 @network
+PARAM d2 =  0.2 @network
+PARAM d3 = -0.3 @network
+PARAM d4 =  0.1 @network
+PARAM d5 = -0.2 @network
+
+ENTRY train
+DEPLOY predict
+
+; ===================== TRAIN: soft, differentiable network =====================
+train:
+        LOAD 400
+        ST [30]         ; SGD step budget
+loop:
+        IN
+        ST [0]          ; x0
+        IN
+        ST [1]          ; x1
+        IN
+        ST [2]          ; x2
+        IN
+        ST [3]          ; x3
+        IN
+        ST [10]         ; sorted target t0
+        IN
+        ST [11]         ; t1
+        IN
+        ST [12]         ; t2
+        IN
+        ST [13]         ; t3
+
+        ; --- soft comparator (0,1) with direction d1 ---
+        LOAD [0]
+        SUB [1]
+        MUL $d1
+        SIGMOID
+        ST [20]         ; g = sigmoid(d1*(a-b))
+        LOAD [1]
+        SUB [0]
+        MUL [20]
+        ADD [0]
+        ST [21]         ; lo = a + g*(b-a)
+        LOAD [0]
+        ADD [1]
+        SUB [21]
+        ST [22]         ; hi = a + b - lo
+        LOAD [21]
+        ST [0]
+        LOAD [22]
+        ST [1]
+
+        ; --- soft comparator (2,3) with direction d2 ---
+        LOAD [2]
+        SUB [3]
+        MUL $d2
+        SIGMOID
+        ST [20]
+        LOAD [3]
+        SUB [2]
+        MUL [20]
+        ADD [2]
+        ST [21]
+        LOAD [2]
+        ADD [3]
+        SUB [21]
+        ST [22]
+        LOAD [21]
+        ST [2]
+        LOAD [22]
+        ST [3]
+
+        ; --- soft comparator (0,2) with direction d3 ---
+        LOAD [0]
+        SUB [2]
+        MUL $d3
+        SIGMOID
+        ST [20]
+        LOAD [2]
+        SUB [0]
+        MUL [20]
+        ADD [0]
+        ST [21]
+        LOAD [0]
+        ADD [2]
+        SUB [21]
+        ST [22]
+        LOAD [21]
+        ST [0]
+        LOAD [22]
+        ST [2]
+
+        ; --- soft comparator (1,3) with direction d4 ---
+        LOAD [1]
+        SUB [3]
+        MUL $d4
+        SIGMOID
+        ST [20]
+        LOAD [3]
+        SUB [1]
+        MUL [20]
+        ADD [1]
+        ST [21]
+        LOAD [1]
+        ADD [3]
+        SUB [21]
+        ST [22]
+        LOAD [21]
+        ST [1]
+        LOAD [22]
+        ST [3]
+
+        ; --- soft comparator (1,2) with direction d5 ---
+        LOAD [1]
+        SUB [2]
+        MUL $d5
+        SIGMOID
+        ST [20]
+        LOAD [2]
+        SUB [1]
+        MUL [20]
+        ADD [1]
+        ST [21]
+        LOAD [1]
+        ADD [2]
+        SUB [21]
+        ST [22]
+        LOAD [21]
+        ST [1]
+        LOAD [22]
+        ST [2]
+
+        ; --- loss = sum_i (wire_i - target_i)^2 ---
+        LOAD [0]
+        SUB [10]
+        SQ
+        LOSS
+        LOAD [1]
+        SUB [11]
+        SQ
+        LOSS
+        LOAD [2]
+        SUB [12]
+        SQ
+        LOSS
+        LOAD [3]
+        SUB [13]
+        SQ
+        LOSS
+        GRAD @network 0.02
+
+        LOAD [30]
+        ADD -1
+        ST [30]
+        JZ done         ; budget exhausted
+        JMP loop
+done:   HALT
+
+; ==================== DEPLOY: exact compare-and-swap sorter ====================
+; Same learned directions, but now a real branch: SIGMOID turns d*(a-b) into a
+; 0/1 gate that JZ reads. round(sigmoid(x)) == 1 iff x > 0, so with d>0 the swap
+; fires exactly when a > b. Integer inputs sort bit-exactly.
+predict:
+        IN
+        ST [0]
+        IN
+        ST [1]
+        IN
+        ST [2]
+        IN
+        ST [3]
+
+        ; comparator (0,1), direction d1
+        LOAD [0]
+        SUB [1]
+        MUL $d1
+        SIGMOID
+        JZ ord1         ; a<=b already ordered -> skip swap
+        LOAD [0]
+        ST [23]
+        LOAD [1]
+        ST [0]
+        LOAD [23]
+        ST [1]
+ord1:
+        ; comparator (2,3), direction d2
+        LOAD [2]
+        SUB [3]
+        MUL $d2
+        SIGMOID
+        JZ ord2
+        LOAD [2]
+        ST [23]
+        LOAD [3]
+        ST [2]
+        LOAD [23]
+        ST [3]
+ord2:
+        ; comparator (0,2), direction d3
+        LOAD [0]
+        SUB [2]
+        MUL $d3
+        SIGMOID
+        JZ ord3
+        LOAD [0]
+        ST [23]
+        LOAD [2]
+        ST [0]
+        LOAD [23]
+        ST [2]
+ord3:
+        ; comparator (1,3), direction d4
+        LOAD [1]
+        SUB [3]
+        MUL $d4
+        SIGMOID
+        JZ ord4
+        LOAD [1]
+        ST [23]
+        LOAD [3]
+        ST [1]
+        LOAD [23]
+        ST [3]
+ord4:
+        ; comparator (1,2), direction d5
+        LOAD [1]
+        SUB [2]
+        MUL $d5
+        SIGMOID
+        JZ ord5
+        LOAD [1]
+        ST [23]
+        LOAD [2]
+        ST [1]
+        LOAD [23]
+        ST [2]
+ord5:
+        LOAD [0]
+        OUT
+        LOAD [1]
+        OUT
+        LOAD [2]
+        OUT
+        LOAD [3]
+        OUT
+        HALT

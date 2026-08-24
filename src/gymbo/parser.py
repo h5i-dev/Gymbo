@@ -14,7 +14,8 @@ from __future__ import annotations
 
 # NOARG: no operand. Pointer ops (LDP/STP/INCP/DECP) exist for the Brainfuck
 # reduction that witnesses Turing completeness of the hard ISA.
-NOARG = {"SQ", "LOSS", "OUT", "HALT", "NOP", "IN", "LDP", "STP", "INCP", "DECP"}
+NOARG = {"SQ", "SIGMOID", "LOSS", "OUT", "HALT", "NOP", "IN",
+         "LDP", "STP", "INCP", "DECP"}
 VALOP = {"LOAD", "ADD", "SUB", "MUL"}   # take a unified operand
 JMPOP = {"JMP", "JZ"}                   # take a label
 

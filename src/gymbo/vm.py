@@ -10,8 +10,17 @@
 """
 from __future__ import annotations
 
+import math
+
 from .autodiff import V
 from .parser import parse
+
+
+def _sigmoid(x):
+    if x >= 0.0:
+        return 1.0 / (1.0 + math.exp(-x))
+    e = math.exp(x)
+    return e / (1.0 + e)
 
 
 def run_full(source, input=(), max_steps=10000):
@@ -56,6 +65,8 @@ def run_full(source, input=(), max_steps=10000):
             M[ins.addr] = r0
         elif op == "SQ":
             r0 = r0 * r0
+        elif op == "SIGMOID":
+            r0 = r0.sigmoid()
         elif op == "LOSS":
             L = L + r0
         elif op == "GRAD":
@@ -148,6 +159,8 @@ def run_hard(hard_source, input=(), max_steps=10000):
             M[ins.addr] = r0
         elif op == "SQ":
             r0 = r0 * r0
+        elif op == "SIGMOID":
+            r0 = _sigmoid(r0)
         elif op == "LOSS":
             pass
         elif op == "JMP":
