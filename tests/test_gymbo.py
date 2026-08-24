@@ -236,6 +236,67 @@ def test_no_phantom_step_when_group_absent_from_loss():
     assert abs(imms[0].data - 1.9) < 1e-12
 
 
+# ---- regressions ----
+def test_long_chain_backward_does_not_overflow():
+    # A long computation between two GRADs builds a deep autodiff graph; the
+    # backward pass must be iterative, not recursive (else RecursionError well
+    # inside max_steps). acc = sum of w over N iters = N*w; loss = (N*w)^2.
+    N = 3000
+    src = f"""
+        PARAM w = 1.0 @m
+        LOAD {N}
+        ST [1]              ; iteration budget
+        LOAD 0
+        ST [0]              ; accumulator
+    loop:
+        LOAD [0]
+        ADD $w
+        ST [0]
+        LOAD [1]
+        ADD -1
+        ST [1]
+        JZ hit
+        JMP loop
+    hit:
+        LOAD [0]
+        SQ
+        LOSS
+        GRAD @m 0.0         ; eta 0: just exercise backward over the deep graph
+        HALT
+    """
+    _, _, imms, hist = gymbo.run_full(src, max_steps=MAX)
+    assert abs(hist[-1] - N * N) < 1e-3      # loss = (N*w)^2 computed correctly
+    assert imms[0].data == 1.0               # eta 0 -> w unchanged
+
+
+def test_export_rejects_jump_outside_deploy_section():
+    # A deploy jump into the pre-DEPLOY region would re-base to a negative label
+    # and silently emit a hard program that dies in run_hard. export must refuse.
+    src = """
+        PARAM w = 0.0 @m
+        ENTRY train
+        DEPLOY predict
+    shared:
+        LOAD $w
+        OUT
+        HALT
+    train:
+        LOAD $w
+        SUB 3
+        SQ
+        LOSS
+        GRAD @m 0.1
+        HALT
+    predict:
+        LOAD $w
+        JZ shared           ; jumps back into the pre-deploy region
+        OUT
+        HALT
+    """
+    with pytest.raises(ValueError):
+        gymbo.export(src, max_steps=MAX)
+
+
 # ---- one dispatch loop, no per-program paths ----
 def test_same_interpreter_all_programs():
     for f in ("learn_constant.gym", "fit_affine.gym", "objective_hack.gym",

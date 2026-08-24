@@ -64,14 +64,23 @@ class V:
         return out
 
     def backward(self):
-        topo, seen = [], set()
-        def build(n):
-            if id(n) not in seen:
-                seen.add(id(n))
-                for p in n._prev:
-                    build(p)
+        # Iterative post-order (NOT recursion): a long computation between two
+        # GRADs builds a deep graph, and a recursive walk would overflow the
+        # Python stack. Each frame is (node, expanded?): first pop pushes the
+        # children, the second (after they are done) appends the node.
+        topo, seen, stack = [], set(), [(self, False)]
+        while stack:
+            n, expanded = stack.pop()
+            if expanded:
                 topo.append(n)
-        build(self)
+                continue
+            if id(n) in seen:
+                continue
+            seen.add(id(n))
+            stack.append((n, True))
+            for p in n._prev:
+                if id(p) not in seen:
+                    stack.append((p, False))
         for n in topo:
             n.grad = 0.0
         self.grad = 1.0
