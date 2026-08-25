@@ -51,6 +51,26 @@ Feed it random `(x, y)` pairs from an unknown line `y = a*x + b` and it recovers
 `a` and `b` it was never told, then predicts held-out `x` correctly — see
 [`examples/fit_affine.gym`](examples/fit_affine.gym).
 
+### It can learn the instruction, not just the constant
+
+A program can also learn *which operation* to run. `OPCHOICE` blends two
+candidate opcodes under a learnable gate `$s`; `GRAD` trains the gate, and
+`export` snaps it to a single literal opcode:
+
+```gymbo
+PARAM s = 0.0 @code
+
+        LOAD [0]
+        OPCHOICE $s ADD MUL [0]   ; soft: (x+x) blended toward (x*x)
+        OUT
+```
+
+Train it on `y = x*x` and `s` swings positive so `MUL` wins; the exported
+predictor is a plain `LOAD [0]` / `MUL [0]`. Feed the same skeleton `y = x+x` and
+it commits `ADD [0]` instead. This is the "rewrite themselves" in the tagline
+made literal — the program learns and rewrites its own instruction, not only its
+constants. See [`examples/learn_op.gym`](examples/learn_op.gym).
+
 ## Install & run
 
 ```sh
