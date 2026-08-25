@@ -51,6 +51,13 @@ values, and emit the code from `DEPLOY` onward (the whole program if there is no
 `__L{idx}:` so `JMP` / `JZ` targets survive the round-trip; the result is a
 self-contained hard program that `run_hard` re-parses with no external state.
 
+Each `OPCHOICE $s A B o` is committed to a single literal opcode — `A o` if the
+learned `s ≤ 0`, else `B o` (a bare `NOP` if the chosen op is `NOP`). Because it
+maps one line to one line, instruction indices are preserved and jump targets
+still survive. The selector `PARAM` is still emitted; nothing in the exported
+body references it, so it is inert — a harmless leftover leaf, like any other
+parameter the deploy section does not read.
+
 `export` returns `final_training_loss = loss_hist[-1]` — the soft loss at the
 last `GRAD`, i.e. *how far optimization progressed*. Do **not** read it as a
 rounding error. For `learn_constant.gym` it is ≈ 0.396 simply because training
@@ -86,6 +93,11 @@ orders of magnitude below the training loss, and the number
   the program's *own operand* (`$g` reads the source leaf directly), so `GRAD`
   drives `g → 0`. The opcodes are untouched — only the operand magnitude goes to
   zero, so this is *silence*, not *erasure*.
+- **`learn_op.gym`** — `OPCHOICE $s ADD MUL [0]` learns *which operation* the
+  body runs. Trained on `y = x*x` the selector `s` swings positive and export
+  commits a literal `MUL [0]`; feed the same skeleton `y = x+x` and `s` swings
+  negative and it commits `ADD [0]`. The program does not just tune an operand —
+  it rewrites its own instruction.
 
 ## Power ledger (honest)
 
@@ -111,7 +123,8 @@ orders of magnitude below the training loss, and the number
 - **Demonstrated (tests pass):** in-language optimization, external-data affine
   fitting, train/deploy separation, objective-hacking, self-silencing, a learned
   branchless sorting network (comparator directions found by gradient, then
-  exported as an exact sorter), `W = 0` enforcement, and Turing-completeness by
-  Brainfuck reduction.
+  exported as an exact sorter), a **learned opcode** (`OPCHOICE` picks `ADD` vs
+  `MUL` from data and exports the literal instruction), `W = 0` enforcement, and
+  Turing-completeness by Brainfuck reduction.
 - **Designed but not demonstrated:** higher-order `W ≥ 1`; a runnable
   differentiable quine. Asserted nowhere in the tests.

@@ -56,6 +56,16 @@ def export(source, input=(), max_steps=10000, grid=0.001):
     for ins in body:
         if ins.op == "GRAD":
             lines.append("NOP")                  # learning frozen at export
+        elif ins.op == "OPCHOICE":
+            # Commit the learned choice to a literal opcode. round(sigmoid(s))==1
+            # iff s>0, so this matches the soft blend's argmax at the boundary.
+            # Occupies exactly one line in and one line out, so instruction
+            # indices (and thus JMP/JZ targets) are preserved.
+            chosen = ins.op_b if imms[ins.sel[1]].data > 0 else ins.op_a
+            if chosen == "NOP":
+                lines.append("NOP")
+            else:
+                lines.append(f"{chosen} {_emit_operand(ins.operand, prog.slot_name)}")
         elif ins.op in VALOP:
             lines.append(f"{ins.op} {_emit_operand(ins.operand, prog.slot_name)}")
         elif ins.op == "ST":

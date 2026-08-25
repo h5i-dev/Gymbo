@@ -51,6 +51,26 @@ Feed it random `(x, y)` pairs from an unknown line `y = a*x + b` and it recovers
 `a` and `b` it was never told, then predicts held-out `x` correctly — see
 [`examples/fit_affine.gym`](examples/fit_affine.gym).
 
+### It can learn the instruction, not just the constant
+
+A program can also learn *which operation* to run. `OPCHOICE` blends two
+candidate opcodes under a learnable gate `$s`; `GRAD` trains the gate, and
+`export` snaps it to a single literal opcode:
+
+```gymbo
+PARAM s = 0.0 @code
+
+        LOAD [0]
+        OPCHOICE $s ADD MUL [0]   ; soft: (x+x) blended toward (x*x)
+        OUT
+```
+
+Train it on `y = x*x` and `s` swings positive so `MUL` wins; the exported
+predictor is a plain `LOAD [0]` / `MUL [0]`. Feed the same skeleton `y = x+x` and
+it commits `ADD [0]` instead. This is the "rewrite themselves" in the tagline
+made literal — the program learns and rewrites its own instruction, not only its
+constants. See [`examples/learn_op.gym`](examples/learn_op.gym).
+
 ## Install & run
 
 ```sh
@@ -76,6 +96,10 @@ Without installing, prefix commands with `PYTHONPATH=src`.
 - **In-language everything.** The soft interpreter's only external inputs are
   `(source, input, max_steps)`. The learning rate, the trainable set, the loss,
   the targets, the loops, and where `GRAD` fires all live in the program text.
+- **Learnable opcodes.** `OPCHOICE $s ADD MUL [0]` learns *which operation* to
+  run, not just an operand: gradient trains the selector `$s`, and `export`
+  commits the winner to a literal `ADD` or `MUL`. So a program rewrites its own
+  instructions, not only its constants.
 - **Train, then deploy.** `ENTRY` is where the soft (training) run starts;
   `DEPLOY` is where the exported hard program starts. `export` snaps the learned
   parameters, writes them back into the `PARAM` lines, drops the training loop,
@@ -92,6 +116,7 @@ Without installing, prefix commands with `PYTHONPATH=src`.
 | [`objective_hack.gym`](examples/objective_hack.gym) | same shape, but it cheats the loss and fails on held-out `x` (Goodhart, native) |
 | [`self_silence.gym`](examples/self_silence.gym) | a loss on the program's own operand drives its output to 0 |
 | [`learn_sort4.gym`](examples/learn_sort4.gym) | a sorting network learns which way each comparator points (`SIGMOID`), then exports an exact sorter |
+| [`learn_op.gym`](examples/learn_op.gym) | a program learns its own **opcode** — `ADD` vs `MUL` — from data (`OPCHOICE`), then exports the literal instruction |
 
 `fit_affine.gym` and `objective_hack.gym` run on the *same* data: one truly
 learns the rule, the other games the objective and generalizes to nothing.

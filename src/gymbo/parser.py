@@ -19,9 +19,15 @@ NOARG = {"SQ", "SIGMOID", "LOSS", "OUT", "HALT", "NOP", "IN",
 VALOP = {"LOAD", "ADD", "SUB", "MUL"}   # take a unified operand
 JMPOP = {"JMP", "JZ"}                   # take a label
 
+# CHOICEABLE: the opcodes OPCHOICE may blend between. All have the shape
+# r0' = f(r0, operand), so a soft mix of two of them is well defined; control
+# flow (JMP/JZ/HALT/OUT/ST/GRAD) is deliberately excluded (no soft PC).
+CHOICEABLE = {"NOP", "LOAD", "ADD", "SUB", "MUL"}
+
 
 class Instr:
-    __slots__ = ("op", "operand", "addr", "group", "eta", "label", "line")
+    __slots__ = ("op", "operand", "addr", "group", "eta", "label", "line",
+                 "sel", "op_a", "op_b")
 
     def __init__(self, op, line):
         self.op = op
@@ -31,6 +37,9 @@ class Instr:
         self.eta = None       # learning rate for GRAD
         self.label = None     # jump target (name, then resolved to index)
         self.line = line
+        self.sel = None       # OPCHOICE selector operand (a ("param", slot))
+        self.op_a = None      # OPCHOICE opcode chosen when the selector is <= 0
+        self.op_b = None      # OPCHOICE opcode chosen when the selector is  > 0
 
 
 class Program:
@@ -117,6 +126,24 @@ def parse(source: str) -> Program:
         ins = Instr(op, line)
         if op in VALOP:
             ins.operand = parse_operand(a[0], params)
+        elif op == "OPCHOICE":
+            # OPCHOICE $sel OP_A OP_B <operand>
+            #   soft:   r0 = A(r0,operand) + sigmoid(sel)*(B - A)
+            #   export: sel <= 0 -> `A operand`,  sel > 0 -> `B operand`
+            if len(a) != 4:
+                raise SyntaxError(
+                    f"OPCHOICE takes `$sel OP_A OP_B operand` on line {i}: {line}")
+            sel = parse_operand(a[0], params)
+            if sel[0] != "param":
+                raise SyntaxError(
+                    f"OPCHOICE selector must be a $param on line {i}: {line}")
+            opa, opb = a[1].upper(), a[2].upper()
+            if opa not in CHOICEABLE or opb not in CHOICEABLE:
+                raise SyntaxError(
+                    f"OPCHOICE can only blend {sorted(CHOICEABLE)}; got "
+                    f"{opa!r}/{opb!r} on line {i}: {line}")
+            ins.sel, ins.op_a, ins.op_b = sel, opa, opb
+            ins.operand = parse_operand(a[3], params)
         elif op == "ST":
             ins.addr = parse_addr(a[0])
         elif op == "GRAD":

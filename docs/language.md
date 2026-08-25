@@ -8,7 +8,8 @@ interpreters do with it.
 ## Model
 
 - **Source** = parameter declarations plus a list of instructions. Each
-  instruction has a discrete opcode and at most one operand.
+  instruction has a discrete opcode and at most one operand — except `OPCHOICE`,
+  which additionally names a selector parameter and its two candidate opcodes.
 - **Parameters** are the differentiable, self-modifiable state — the leaves
   gradient flows to. They are declared by name and are the *only* leaves.
 - **Execution state** (never a differentiation leaf): accumulator `r0`, an
@@ -16,7 +17,12 @@ interpreters do with it.
   loss cell `L`, the program counter, the input cursor, and the output stream.
 
 Opcodes are discrete on purpose (a real ISA has discrete opcodes and continuous
-immediates). Learning moves parameter *magnitudes*, never opcode identities.
+immediates). Ordinary instructions never change their opcode. The single
+exception is `OPCHOICE`: it names *two* candidate opcodes and a parameter that
+selects between them, so a program can learn *which operation to run* by gradient
+and commit it to a literal opcode at export. Learning still moves only a
+parameter magnitude — but for that one instruction the magnitude's sign decides
+an opcode identity (see [`examples/learn_op.gym`](../examples/learn_op.gym)).
 
 ## Grammar
 
@@ -79,6 +85,7 @@ not learn (e.g. `hello.gym`, `cat.gym`) need neither directive.
 | `ADD o` | `r0 = r0 + o` |
 | `SUB o` | `r0 = r0 - o` |
 | `MUL o` | `r0 = r0 * o` |
+| `OPCHOICE $s A B o` | `r0 = A(r0,o) + sigmoid($s)·(B(r0,o) − A(r0,o))` — a learnable blend of two opcodes |
 | `ST [a]` | `M[a] = r0` (stores the node; aliasing) |
 | `SQ` | `r0 = r0 * r0` |
 | `SIGMOID` | `r0 = 1 / (1 + e^-r0)` — a branchless differentiable gate |
@@ -99,6 +106,33 @@ flows into the direction, and its sign is what gets learned. Because
 `round(sigmoid(x)) == 1` iff `x > 0`, the same gate composes with `JZ` to recover
 an *exact* branch after export. See [`examples/learn_sort4.gym`](../examples/learn_sort4.gym),
 a 4-input sorting network that learns which way each of its five comparators points.
+
+### `OPCHOICE` — a learnable opcode
+
+```
+OPCHOICE $s A B o
+```
+
+blends two candidate opcodes `A` and `B` — each applied to the shared operand
+`o` — under the gate `g = sigmoid($s)`:
+
+```
+r0 = A(r0, o) + g · (B(r0, o) − A(r0, o))
+```
+
+so at `s = 0` it runs the exact midpoint of the two operations, and gradient
+flows into `$s` (its **sign** is what gets learned). `A` and `B` must come from
+`{NOP, LOAD, ADD, SUB, MUL}` — the opcodes shaped `r0' = f(r0, operand)`, whose
+soft mixture is well defined; control flow (`JMP` / `JZ` / `HALT` / `OUT` / `ST`
+/ `GRAD`) is deliberately not blendable (there is no soft program counter). `$s`
+must be a `$param`, so `GRAD` trains it like any other leaf.
+
+`export` commits the choice to a **literal opcode**: `s ≤ 0` emits `A o`, `s > 0`
+emits `B o` (because `round(sigmoid(s)) == 1` iff `s > 0`, matching the soft
+blend's argmax). It occupies one line in and one line out, so instruction
+indices — and thus `JMP` / `JZ` targets — survive export unchanged. This is the
+`SIGMOID` comparator trick of `learn_sort4.gym` moved from choosing *which value*
+to choosing *which operation*; see [`learn_op.gym`](../examples/learn_op.gym).
 
 Only `GRAD` writes source (the parameters); `ST` writes only the tape. The
 program counter is sequential; `GRAD` fires when the counter reaches it;
