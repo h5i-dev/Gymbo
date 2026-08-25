@@ -23,6 +23,20 @@ def _sigmoid(x):
     return e / (1.0 + e)
 
 
+def _apply(op, r0, x):
+    """The CHOICEABLE opcodes as pure r0' = f(r0, x). Uses only + - *, so the
+    same function serves the soft (V nodes) and hard (floats) interpreters."""
+    if op == "NOP":
+        return r0
+    if op == "LOAD":
+        return x
+    if op == "ADD":
+        return r0 + x
+    if op == "SUB":
+        return r0 - x
+    return r0 * x                          # MUL
+
+
 def run_full(source, input=(), max_steps=10000):
     """Differentiable interpreter. Returns (output, program, imms, loss_hist)."""
     prog = parse(source)
@@ -61,6 +75,15 @@ def run_full(source, input=(), max_steps=10000):
             r0 = r0 - val(ins.operand)
         elif op == "MUL":
             r0 = r0 * val(ins.operand)
+        elif op == "OPCHOICE":
+            # Soft blend of two opcodes, gated by sigmoid of the learnable
+            # selector. Same shape as the sort4 comparator (a + g*(b-a)):
+            # gradient flows into the selector and its SIGN is what gets learned.
+            x = val(ins.operand)
+            a = _apply(ins.op_a, r0, x)
+            b = _apply(ins.op_b, r0, x)
+            g = val(ins.sel).sigmoid()
+            r0 = a + g * (b - a)
         elif op == "ST":
             M[ins.addr] = r0
         elif op == "SQ":
@@ -155,6 +178,13 @@ def run_hard(hard_source, input=(), max_steps=10000):
             r0 = r0 - val(ins.operand)
         elif op == "MUL":
             r0 = r0 * val(ins.operand)
+        elif op == "OPCHOICE":
+            # An exported program has OPCHOICE already committed to a concrete
+            # opcode, so this is only reached when run_hard is handed an
+            # un-exported program: commit by argmax (sel > 0 -> op_b).
+            x = val(ins.operand)
+            chosen = ins.op_b if val(ins.sel) > 0 else ins.op_a
+            r0 = _apply(chosen, r0, x)
         elif op == "ST":
             M[ins.addr] = r0
         elif op == "SQ":

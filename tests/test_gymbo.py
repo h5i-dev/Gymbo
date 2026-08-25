@@ -56,6 +56,15 @@ def sort_stream(epochs=20):
     return s
 
 
+# a stream of (x, y) pairs for learn_op.gym, y computed by `rule` (x*x or x+x).
+def op_stream(rule, epochs=200):
+    s = []
+    for _ in range(epochs):
+        for x in (1, 2, 3, 4, 5):
+            s += [x, rule(x)]
+    return s
+
+
 # ---- basics ----
 def test_hello_emits_bytes():
     assert out("hello.gym") == [72.0, 73.0]
@@ -196,6 +205,50 @@ def test_learn_sort4_export_sorts_held_out_exactly():
     assert gymbo.run_hard(hard, input=[7, 7, 3, 3], max_steps=MAX) == [3.0, 3.0, 7.0, 7.0]
 
 
+# ---- OPCHOICE: a program learns its own OPCODE, not just an operand ----
+def test_opchoice_soft_blend_and_hard_argmax():
+    # At s=0 the soft blend is the midpoint of the two ops; the sign of s selects
+    # one op in both the hard argmax and (via round(sigmoid)) at export.
+    def prog(s):
+        return (f"PARAM s = {s} @c\n"
+                f"LOAD 3\nOPCHOICE $s ADD MUL 3\nOUT\nHALT\n")
+    assert gymbo.run(prog(0), max_steps=MAX) == [7.5]        # (3+3 , 3*3) midpoint
+    assert gymbo.run_hard(prog(5), max_steps=MAX) == [9.0]   # s>0 -> MUL
+    assert gymbo.run_hard(prog(-5), max_steps=MAX) == [6.0]  # s<0 -> ADD
+
+
+def test_opchoice_selector_must_be_param():
+    with pytest.raises(SyntaxError):
+        gymbo.parse("LOAD 3\nOPCHOICE 0 ADD MUL 3\nHALT\n")
+    with pytest.raises(SyntaxError):     # only CHOICEABLE opcodes may be blended
+        gymbo.parse("PARAM s = 0 @c\nOPCHOICE $s ADD OUT 3\nHALT\n")
+
+
+def test_learn_op_learns_multiply_and_exports_literal_mul():
+    # Trained on y = x*x, the selector swings POSITIVE (MUL wins) and export
+    # commits a literal `MUL [0]` -- OPCHOICE is gone from the hard program.
+    src = ex("learn_op.gym")
+    _, _, imms, _ = gymbo.run_full(src, input=op_stream(lambda x: x * x), max_steps=MAX)
+    assert imms[0].data > 0.5                               # chose MUL
+    hard, _ = gymbo.export(src, input=op_stream(lambda x: x * x), max_steps=MAX)
+    assert "OPCHOICE" not in hard and "GRAD" not in hard
+    assert "MUL [0]" in hard and "ADD [0]" not in hard
+    for x in (6, 7, 10, -4):                                # generalizes off training x
+        assert gymbo.run_hard(hard, input=[x], max_steps=MAX) == [float(x * x)]
+
+
+def test_learn_op_learns_add_from_additive_data():
+    # The SAME skeleton, fed y = x+x, swings the selector NEGATIVE -> `ADD [0]`.
+    # It genuinely learns the operation, not a baked-in preference.
+    src = ex("learn_op.gym")
+    _, _, imms, _ = gymbo.run_full(src, input=op_stream(lambda x: x + x), max_steps=MAX)
+    assert imms[0].data < -0.5                              # chose ADD
+    hard, _ = gymbo.export(src, input=op_stream(lambda x: x + x), max_steps=MAX)
+    assert "ADD [0]" in hard and "MUL [0]" not in hard
+    for x in (6, 7, 10, -4):
+        assert gymbo.run_hard(hard, input=[x], max_steps=MAX) == [float(x + x)]
+
+
 # ---- W=0 is ENFORCED, not merely relied on ----
 def test_window_is_w0_when_parked_value_read_back():
     # Park a $w-derived node in M, GRAD (detaches the tape), then read it back in
@@ -300,7 +353,7 @@ def test_export_rejects_jump_outside_deploy_section():
 # ---- one dispatch loop, no per-program paths ----
 def test_same_interpreter_all_programs():
     for f in ("learn_constant.gym", "fit_affine.gym", "objective_hack.gym",
-              "self_silence.gym"):
+              "self_silence.gym", "learn_op.gym"):
         assert isinstance(gymbo.run(ex(f), affine_stream(), MAX), list)
 
 

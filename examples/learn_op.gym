@@ -1,0 +1,48 @@
+; LEARN-OP -- a program that learns its own OPCODE, not just an operand. The body
+; applies ONE of two operations to the input -- ADD (x+x) or MUL (x*x) -- and
+; which one is a learnable choice. `OPCHOICE $s ADD MUL [0]` runs, during
+; training, the sigmoid blend of the two; GRAD moves the selector s; at export
+; the choice snaps to a literal opcode. Trained on (x, y) with y = x*x, s swings
+; positive so MUL wins, and the exported predictor is a plain `MUL [0]`.
+;
+;   OPCHOICE $s ADD MUL [0]   soft:   r0 = (r0+[0]) + sigmoid(s)*((r0*[0])-(r0+[0]))
+;                             export: s <= 0 -> `ADD [0]`,  s > 0 -> `MUL [0]`
+;
+; This is the sort4 comparator trick moved from operand selection to opcode
+; selection: gradient flows into s and its SIGN is what gets learned. Feed the
+; same skeleton (x, y) with y = x+x instead and s stays negative -> `ADD [0]`.
+;
+; Feed training as pairs:  x0 y0  x1 y1 ...   with y = x*x.
+PARAM s = 0.0 @code
+
+ENTRY train
+DEPLOY predict
+
+train:                  ; SGD over an external stream of (x, y=x*x) pairs
+        LOAD 600
+        ST [2]          ; step budget
+loop:
+        IN
+        ST [0]          ; x
+        IN
+        ST [1]          ; y = x*x
+        LOAD [0]        ; r0 = x
+        OPCHOICE $s ADD MUL [0]   ; r0 = x+x (ADD) blended toward x*x (MUL)
+        SUB [1]         ; - y
+        SQ
+        LOSS
+        GRAD @code 0.002
+        LOAD [2]
+        ADD -1
+        ST [2]
+        JZ done
+        JMP loop
+done:   HALT
+
+predict:                ; after training this OPCHOICE commits to `MUL [0]`
+        IN
+        ST [0]
+        LOAD [0]
+        OPCHOICE $s ADD MUL [0]
+        OUT
+        HALT
