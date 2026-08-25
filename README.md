@@ -135,6 +135,4 @@ the hard ISA is Turing-complete.
 
 ## Notice
 
-This project started as a gradient-based symbolic execution for a tiny toy-example language,
-and it has shifted to a gradient-based self-modifying language. The old gradient-based
-symbolic exeuction engine is still available at [this commit](https://github.com/h5i-dev/Gymbo/tree/69974586031361d3c754e8fad2a9d7a0dad2b3ae).
+This project began as a gradient-based symbolic execution engine for a tiny toy language, but has since evolved into a gradient-based self-modifying language. The original symbolic execution engine is still available at [this commit](https://github.com/h5i-dev/Gymbo/tree/69974586031361d3c754e8fad2a9d7a0dad2b3ae).
